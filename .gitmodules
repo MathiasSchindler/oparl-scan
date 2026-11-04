@@ -1,0 +1,3 @@
+[submodule "vendor/newos"]
+	path = vendor/newos
+	url = https://github.com/mathiasschindler/newos.git
