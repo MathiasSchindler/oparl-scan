@@ -1,0 +1,100 @@
+CC := clang
+NEWOS := vendor/newos
+HOST_OS := $(shell uname -s)
+HOST_ARCH := $(shell uname -m)
+TARGET ?= $(if $(filter Darwin,$(HOST_OS)),macos,linux)
+ARCH ?= $(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch64,x86_64)
+BUILD := build/$(TARGET)-$(ARCH)
+EXE := $(if $(filter windows,$(TARGET)),.exe,)
+PROGRAM := $(BUILD)/oparl-scan$(EXE)
+
+ifeq ($(wildcard $(NEWOS)/Makefile),)
+$(error newos submodule is missing; run git submodule update --init --recursive)
+endif
+
+RUNTIME := $(filter-out src/platform/%,$(shell sed -n 's/^MACOS_FREESTANDING_RUNTIME_SOURCES := //p' $(NEWOS)/Makefile))
+CRYPTO := $(sort $(shell grep -oE '"src/shared/crypto/[^"]+\.c"' $(NEWOS)/src/compiler/source_manifest.h | tr -d '"'))
+TLS := $(sort $(shell grep -oE '"src/shared/tls/[^"]+\.c"' $(NEWOS)/src/compiler/source_manifest.h | tr -d '"'))
+COMMON := $(addprefix $(NEWOS)/,$(sort $(RUNTIME) $(CRYPTO) $(TLS)))
+CPPFLAGS := -I$(NEWOS)/src/shared -Isrc -DNEWOS_HAVE_PTHREAD=0
+CFLAGS := -std=c11 -Oz -Wall -Wextra -Wpedantic -ffreestanding -fno-builtin \
+	-fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
+	-ffunction-sections -fdata-sections
+APP := src/oparl-scan.c src/json.c src/http.c
+
+ifeq ($(TARGET),macos)
+ifneq ($(ARCH),aarch64)
+$(error The pinned newos no-import Mach-O backend supports macOS/aarch64)
+endif
+TRIPLE := arm64-apple-macos11
+SDKROOT ?= $(shell xcrun --sdk macosx --show-sdk-path)
+CPPFLAGS += -DNEWOS_MACOS_NEWLINKER -DNEWOS_CRYPTO_CURVE25519_FORCE_64BIT=1
+CFLAGS += -isysroot $(SDKROOT) -fno-common -fno-jump-tables -flto
+PLATFORM := $(NEWOS)/src/platform/macos/freestanding.c $(NEWOS)/src/platform/macos/newlinker_runtime.c
+START := $(NEWOS)/src/platform/macos/newlinker_start.S
+NEWOS_HOST := $(if $(filter Darwin,$(HOST_OS)),macos,linux)-$(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch64,x86_64)
+LINKER := $(NEWOS)/build/host-$(NEWOS_HOST)/linker
+LINK_DEPS := $(LINKER)
+define link
+$(LINKER) --target=mach-o-arm64 --macho-compact --gc-sections --lto-cc="$(CC)" -o $@ $(1)
+endef
+else ifeq ($(TARGET),linux)
+TRIPLE := $(ARCH)-unknown-linux-elf
+CPPFLAGS += -I$(NEWOS)/src/platform/linux -I$(NEWOS)/src/platform/common -I$(NEWOS)/src/arch/$(ARCH)/linux -DNEWOS_DISABLE_STACK_GUARD_INIT=1
+PLATFORM := $(addprefix $(NEWOS)/src/platform/linux/,fs.c identity.c io.c net.c process.c thread.c time.c stack_guard.c)
+START := $(NEWOS)/src/arch/$(ARCH)/linux/crt0.S $(wildcard $(NEWOS)/src/arch/$(ARCH)/linux/syscall_stubs.S)
+CFLAGS += -fno-pie
+define link
+$(CC) --target=$(TRIPLE) -nostdlib -static -fuse-ld=lld -Wl,--gc-sections -Wl,-e,_start -o $@ $(1)
+endef
+else ifeq ($(TARGET),windows)
+TRIPLE := $(ARCH)-w64-windows-gnu
+CPPFLAGS += -I$(NEWOS)/src/platform/windows
+PLATFORM := $(NEWOS)/src/platform/windows/core.c $(NEWOS)/src/platform/windows/thread.c $(NEWOS)/src/platform/windows/random.c
+START := $(NEWOS)/src/arch/$(ARCH)/windows/chkstk.S
+IMPORTS := $(addprefix $(BUILD)/imports/lib,kernel32.a ws2_32.a bcrypt.a)
+LINK_DEPS := $(IMPORTS)
+CFLAGS += -flto
+define link
+$(CC) --target=$(TRIPLE) -nostdlib -fuse-ld=lld -flto -Wl,-e,mainCRTStartup -Wl,--gc-sections -Wl,--stack,8388608 -o $@ $(1) -L$(BUILD)/imports -lkernel32 -lws2_32 -lbcrypt
+endef
+else
+$(error Unknown TARGET; use macos, linux, or windows)
+endif
+
+OBJECTS := $(addprefix $(BUILD)/obj/,$(addsuffix .o,$(basename $(COMMON) $(PLATFORM) $(START))))
+APP_OBJECTS := $(addprefix $(BUILD)/obj/,$(APP:.c=.o))
+
+.DEFAULT_GOAL := all
+.PHONY: all test check-deps
+all: $(PROGRAM)
+
+$(PROGRAM): $(APP_OBJECTS) $(OBJECTS) $(LINK_DEPS)
+	$(call link,$(APP_OBJECTS) $(OBJECTS))
+
+$(BUILD)/test-json$(EXE): $(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS) $(LINK_DEPS)
+	$(call link,$(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS))
+
+$(BUILD)/obj/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) --target=$(TRIPLE) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/obj/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) --target=$(TRIPLE) $(CPPFLAGS) -ffreestanding -c $< -o $@
+
+$(NEWOS)/build/host-$(NEWOS_HOST)/linker:
+	$(MAKE) -C $(NEWOS) build/host-$(NEWOS_HOST)/linker CC="$(CC)"
+
+$(BUILD)/imports/lib%.a: $(NEWOS)/src/platform/windows/imports/%.def
+	@mkdir -p $(dir $@)
+	llvm-dlltool -m $(if $(filter aarch64,$(ARCH)),arm64,i386:x86-64) -d $< -l $@
+
+test: $(PROGRAM) $(BUILD)/test-json$(EXE) check-deps
+	$(BUILD)/test-json$(EXE)
+	node tests/integration.mjs "$(abspath $(PROGRAM))"
+
+check-deps: $(PROGRAM)
+	node tests/check-deps.mjs "$(abspath $(PROGRAM))"
+
+-include $(OBJECTS:.o=.d) $(APP_OBJECTS:.o=.d) $(BUILD)/obj/tests/test-json.d

@@ -1,0 +1,4 @@
+/build/
+/downloads/
+*.part
+.DS_Store
