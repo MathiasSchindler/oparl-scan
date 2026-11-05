@@ -40,6 +40,7 @@ typedef struct {
     unsigned long long downloaded_pages;
     unsigned long long cached_files;
     unsigned long long unavailable_files;
+    unsigned long long missing_resources;
     unsigned long long mismatched_files;
     unsigned long long summary_written_ns;
     unsigned long long scanned_papers;
@@ -48,6 +49,7 @@ typedef struct {
     unsigned int year;
     int selection_fd;
     int unavailable_fd;
+    int missing_fd;
     int mismatch_fd;
     int metadata_only;
     int skip_unavailable_files;
@@ -57,6 +59,7 @@ typedef struct {
     ToolArray jobs;
     SeenSet seen_files;
     SeenSet seen_jobs;
+    SeenSet seen_missing;
 } Archive;
 
 static int write_summary(Archive *archive, int success, int force);
@@ -74,12 +77,13 @@ static void usage(void) {
         "  --max-pages N      Limit pages per collection (default: unlimited)\n"
         "  --max-files N      Limit new document downloads (default: unlimited)\n"
         "  --delay-ms N       Pause before each request (default: 500)\n"
-        "  --timeout-ms N     TLS and read timeout (default: 30000)\n"
+        "  --timeout-ms N     TLS and read timeout (default: 120000)\n"
         "  --ca-file FILE     PEM CA bundle (or SSL_CERT_FILE/system bundle)\n"
         "  --system URL       System URL; HTTP is allowed only on 127.0.0.1\n"
         "  --color MODE       Diagnostic colors: auto, always, never (default: auto)\n"
         "  --help             Show this help\n"
-        "Exit status: 0 complete, 1 error, 2 limits, 3 unavailable documents.\n");
+        "HTTP 404: report missing URLs, continue, and mark the archive incomplete.\n"
+        "Exit status: 0 complete, 1 error, 2 limits, 3 missing resources.\n");
 }
 
 static int options(Archive *archive, int argc, char **argv) {
@@ -90,8 +94,9 @@ static int options(Archive *archive, int argc, char **argv) {
     archive->page_size = 100;
     archive->selection_fd = -1;
     archive->unavailable_fd = -1;
+    archive->missing_fd = -1;
     archive->mismatch_fd = -1;
-    archive->http.timeout_ms = 30000;
+    archive->http.timeout_ms = 120000;
     archive->http.delay_ms = 500;
     tool_array_init(&archive->jobs, sizeof(Job));
     for (i = 1; i < argc; i++) {
@@ -266,13 +271,29 @@ static int page_shape(const Json *json, MetaKind kind) {
     return 0;
 }
 
+static int record_missing(Archive *archive, const char *url, const char *kind) {
+    char hash[65];
+    int fd = archive->missing_fd;
+    hash_text(url, hash);
+    if (hash_seen(&archive->seen_missing, hash, 0)) return 0;
+    if (rt_write_cstr(fd, "{\"url\":") != 0 ||
+        tool_json_write_string(fd, url) != 0 ||
+        tool_json_field_string(fd, "kind", kind) != 0 ||
+        tool_json_field_uint(fd, "status", 404) != 0 ||
+        rt_write_cstr(fd, "}\n") != 0)
+        return ris_error("cannot write missing resource report", url);
+    if (hash_seen(&archive->seen_missing, hash, 1) < 0) return -1;
+    archive->missing_resources++;
+    return write_summary(archive, 0, 0);
+}
+
 static int read_metadata(Archive *archive, const char *url, MetaKind kind,
                          Json *json, unsigned char **bytes) {
     char hash[65], name[80], path[PATH_CAPACITY], part[PATH_CAPACITY];
     PlatformDirEntry info;
     unsigned long long size;
     size_t length;
-    int cached;
+    int cached, result;
     hash_text(url, hash);
     rt_copy_string(name, sizeof(name), hash);
     memcpy(name + 64, ".json", 6);
@@ -283,8 +304,10 @@ static int read_metadata(Archive *archive, const char *url, MetaKind kind,
         if (info.is_dir || info.size > META_LIMIT)
             return ris_error("invalid metadata cache; use --refresh", path);
     } else {
-        if (http_download(&archive->http, url, part, META_LIMIT, RIS_UNKNOWN_SIZE, 0, &size) != 0)
-            return -1;
+        result = http_download(&archive->http, url, part, META_LIMIT, RIS_UNKNOWN_SIZE, 0, &size);
+        if (result == RIS_HTTP_NOT_FOUND &&
+            record_missing(archive, url, "metadata") != 0) return -1;
+        if (result != 0) return result;
     }
     if (tool_read_all_input(cached ? path : part, bytes, &length) != 0)
         return ris_error("cannot read metadata", cached ? path : part);
@@ -407,6 +430,10 @@ static int document(Archive *archive, const Json *json, size_t object) {
     }
     result = http_download(&archive->http, url, part, FILE_LIMIT, expected,
                            archive->accept_size_mismatch, &received);
+    if (result == RIS_HTTP_NOT_FOUND) {
+        if (record_missing(archive, url, "document") != 0) return -1;
+        return hash_seen(&archive->seen_files, hash, 1) < 0 ? -1 : 0;
+    }
     if (result == RIS_HTTP_ACCESS_DENIED && archive->skip_unavailable_files) {
         int fd = archive->unavailable_fd;
         if (rt_write_cstr(fd, "{\"id\":") != 0 ||
@@ -506,8 +533,9 @@ static int resource(Archive *archive, const Job *job) {
     unsigned char *bytes = 0;
     const char *const *keys = 0;
     size_t count = 0, i, type;
-    int result = 0;
-    if (read_metadata(archive, job->url, META_OBJECT, &json, &bytes) != 0) return -1;
+    int result = read_metadata(archive, job->url, META_OBJECT, &json, &bytes);
+    if (result == RIS_HTTP_NOT_FOUND) return 0;
+    if (result != 0) return -1;
     if (json_true(&json, json_get(&json, 0, "deleted"))) goto done;
     type = resource_type(&json);
     if (json_equals(&json, type, "https://schema.oparl.org/1.1/File")) {
@@ -600,8 +628,11 @@ static int collection(Archive *archive, const Job *job) {
         unsigned long long current, pages;
         size_t pagination, link;
         int has_next, result;
-        if (read_metadata(archive, url, job->kind == JOB_PAPERS ? META_INDEX : META_LIST,
-                          &json, &bytes) != 0) return -1;
+        result = read_metadata(archive, url, job->kind == JOB_PAPERS ? META_INDEX : META_LIST,
+                               &json, &bytes);
+        /* A missing page has no next link; other collections can still be processed. */
+        if (result == RIS_HTTP_NOT_FOUND) return 0;
+        if (result != 0) return -1;
         pagination = json_get(&json, 0, "pagination");
         json_uint(&json, json_get(&json, pagination, "currentPage"), &current);
         json_uint(&json, json_get(&json, pagination, "totalPages"), &pages);
@@ -699,8 +730,13 @@ static int run(Archive *archive) {
     if (archive->accept_size_mismatch &&
         open_manifest(archive, "size-mismatches.jsonl", &archive->mismatch_fd) != 0)
         return -1;
+    if (open_manifest(archive, "missing-resources.jsonl", &archive->missing_fd) != 0)
+        return -1;
     if (write_summary(archive, 0, 1) != 0) return -1;
-    if (read_metadata(archive, archive->system, META_SYSTEM, &system, &bytes) != 0) return -1;
+    result = read_metadata(archive, archive->system, META_SYSTEM, &system, &bytes);
+    if (result == RIS_HTTP_NOT_FOUND)
+        return finish_manifest(archive, "selection.jsonl", &archive->selection_fd);
+    if (result != 0) return -1;
     result = json_string(&system, json_get(&system, 0, "body"), bodies, sizeof(bodies));
     json_free(&system);
     rt_free(bytes);
@@ -728,7 +764,8 @@ static int write_summary(Archive *archive, int success, int force) {
     result = rt_write_cstr(fd, "{\"system\":") ||
              tool_json_write_string(fd, archive->system) ||
              tool_json_field_bool(fd, "complete", success && !archive->limited &&
-                                  archive->unavailable_files == 0) ||
+                                  archive->unavailable_files == 0 &&
+                                  archive->missing_resources == 0) ||
              tool_json_field_bool(fd, "metadataOnly", archive->metadata_only) ||
              tool_json_field_bool(fd, "skipUnavailableFiles", archive->skip_unavailable_files) ||
              tool_json_field_bool(fd, "acceptSizeMismatch", archive->accept_size_mismatch) ||
@@ -741,6 +778,7 @@ static int write_summary(Archive *archive, int success, int force) {
              tool_json_field_uint(fd, "newDocuments", archive->downloaded_files) ||
              tool_json_field_uint(fd, "cachedDocuments", archive->cached_files) ||
              tool_json_field_uint(fd, "unavailableDocuments", archive->unavailable_files) ||
+             tool_json_field_uint(fd, "missingResources", archive->missing_resources) ||
              tool_json_field_uint(fd, "sizeMismatchedDocuments", archive->mismatched_files) ||
              rt_write_cstr(fd, "}\n");
     if (platform_close(fd) != 0) result = -1;
@@ -763,6 +801,9 @@ int main(int argc, char **argv) {
     }
     result = run(&archive);
     if (result == 0 &&
+        finish_manifest(&archive, "missing-resources.jsonl", &archive.missing_fd) != 0)
+        result = -1;
+    if (result == 0 &&
         finish_manifest(&archive, "unavailable-files.jsonl", &archive.unavailable_fd) != 0)
         result = -1;
     if (result == 0 &&
@@ -771,8 +812,9 @@ int main(int argc, char **argv) {
     if (write_summary(&archive, result == 0, 1) != 0) result = -1;
     if (result == 0) {
         tool_write_styled(2, tool_get_global_color_mode(),
-                          archive.unavailable_files || archive.limited ?
+                          archive.missing_resources || archive.unavailable_files || archive.limited ?
                           TOOL_STYLE_BOLD_YELLOW : TOOL_STYLE_PLAIN,
+                          archive.missing_resources ? "INCOMPLETE (HTTP 404)" :
                           archive.unavailable_files ? "INCOMPLETE (unavailable documents)" :
                           archive.limited ? "INCOMPLETE (configured limits)" : "Complete");
         rt_write_cstr(2, ": new metadata pages=");
@@ -783,6 +825,8 @@ int main(int argc, char **argv) {
         rt_write_uint(2, archive.cached_files);
         rt_write_cstr(2, ", unavailable documents=");
         rt_write_uint(2, archive.unavailable_files);
+        rt_write_cstr(2, ", missing resources=");
+        rt_write_uint(2, archive.missing_resources);
         rt_write_cstr(2, ", size mismatches=");
         rt_write_uint(2, archive.mismatched_files);
         rt_write_char(2, '\n');
@@ -794,11 +838,18 @@ int main(int argc, char **argv) {
         ris_error("cannot close unavailable file report", 0);
         result = -1;
     }
+    if (archive.missing_fd >= 0 && platform_close(archive.missing_fd) != 0) {
+        ris_error("cannot close missing resource report", 0);
+        result = -1;
+    }
     if (archive.mismatch_fd >= 0 && platform_close(archive.mismatch_fd) != 0) {
         ris_error("cannot close size mismatch report", 0);
         result = -1;
     }
     rt_free(archive.seen_files.entries);
     rt_free(archive.seen_jobs.entries);
-    return result != 0 ? 1 : archive.unavailable_files != 0 ? 3 : archive.limited ? 2 : 0;
+    rt_free(archive.seen_missing.entries);
+    return result != 0 ? 1 :
+           archive.missing_resources != 0 || archive.unavailable_files != 0 ? 3 :
+           archive.limited ? 2 : 0;
 }

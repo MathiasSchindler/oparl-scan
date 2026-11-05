@@ -59,7 +59,10 @@ function yearResponse(url) {
       subordinatedPaper: [uri('papers/5')], underDirectionOf: [uri('organizations/1')],
     });
   if (url.pathname === '/oparl/papers/3')
-    return paper(3, '25/SVV/0403-001', { mainFile: uri('files/2') });
+    return paper(3, '25/SVV/0403-001', {
+      mainFile: uri('files/2'),
+      ...(mode === 'year-missing-resource' ? { relatedPaper: [uri('papers/5')] } : {}),
+    });
   if (url.pathname === '/oparl/papers/4')
     return paper(4, '25/OBR/0001', { mainFile: file(3) });
   if (url.pathname === '/oparl/papers/5')
@@ -98,6 +101,23 @@ const server = createServer((req, res) => {
   requests.push(req.url);
   const url = new URL(req.url, origin);
   let response;
+  if ((mode === 'missing-system' && url.pathname === '/oparl/system') ||
+      (mode === 'missing-bodies' && url.pathname === '/oparl/bodies') ||
+      (mode === 'missing-collection' && url.pathname === '/oparl/bodies/1/paper') ||
+      (mode === 'missing-page' && url.pathname === '/oparl/bodies/1/paper' &&
+       url.searchParams.get('page') === '2') ||
+      (mode === 'year-missing-index' && url.pathname === '/oparl/bodies/1/paper' &&
+       url.searchParams.get('page') === '2') ||
+      (mode === 'year-missing-resource' && url.pathname === '/oparl/papers/5')) {
+    res.writeHead(404);
+    res.end('missing metadata');
+    return;
+  }
+  if (mode === 'missing-then-fatal' && url.pathname === '/oparl/bodies/3/organization') {
+    res.writeHead(401);
+    res.end('metadata access denied');
+    return;
+  }
   if (mode === 'bad-json' && url.pathname === '/oparl/system') {
     res.end('{"data":[');
     return;
@@ -114,6 +134,10 @@ const server = createServer((req, res) => {
   if (mode === 'retry' && url.pathname === '/oparl/system' && failures++ < 2) {
     res.writeHead(503, { 'Retry-After': '0' });
     res.end('temporary failure');
+    return;
+  }
+  if (mode === 'closed-status' && url.pathname === '/oparl/system') {
+    req.socket.end();
     return;
   }
   if (url.pathname === '/oparl/system') {
@@ -149,7 +173,7 @@ const server = createServer((req, res) => {
     return;
   } else if (url.pathname.startsWith('/content/')) {
     if (url.pathname === '/content/1' &&
-        ['noauth', 'unauthorized', 'forbidden', 'missing-document', 'foreign-redirect'].includes(mode)) {
+        ['noauth', 'unauthorized', 'forbidden', 'missing-document', 'missing-then-fatal', 'foreign-redirect'].includes(mode)) {
       if (mode === 'noauth' || mode === 'foreign-redirect')
         res.writeHead(302, { Location: mode === 'noauth' ? './noauth' : 'https://example.test/private' });
       else
@@ -179,9 +203,18 @@ const server = createServer((req, res) => {
     return;
   }
   const text = JSON.stringify(response);
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.write(text.slice(0, 11));
-  res.end(text.slice(11));
+  const send = () => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.write(text.slice(0, 11));
+    res.end(text.slice(11));
+  };
+  if (mode === 'slow-status' && url.pathname === '/oparl/bodies/1/paper' &&
+      url.searchParams.get('page') === '2') {
+    const timer = setTimeout(send, 150);
+    res.once('close', () => clearTimeout(timer));
+  } else {
+    send();
+  }
 });
 
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -299,6 +332,95 @@ try {
   assert.equal(JSON.parse(await readFile(join(many, 'archive.json'))).selectedPapers, 129);
   assert.equal((await readdir(join(many, 'documents'))).length, 1, 'identity-set growth retains deduplication');
 
+  for (const [variant, missingPath, documents] of [
+    ['missing-system', '/oparl/system', 0],
+    ['missing-bodies', '/oparl/bodies?size=100', 0],
+    ['missing-collection', '/oparl/bodies/1/paper?size=100', 2],
+    ['missing-page', '/oparl/bodies/1/paper?page=2&size=100', 2],
+    ['year-missing-index', '/oparl/bodies/1/paper?page=2&size=100', 7],
+    ['year-missing-resource', '/oparl/papers/5', 7],
+  ]) {
+    mode = variant;
+    const directory = join(root, variant);
+    const args = variant.startsWith('year') ? ['--year', '2025'] : [];
+    start = requests.length;
+    const diagnostics = await run(directory, [...args, '--color', 'always'], 3);
+    assert.match(diagnostics, /HTTP \x1b\[0m404/);
+    assert.match(diagnostics, /\x1b\[1;33mINCOMPLETE \(HTTP 404\)\x1b\[0m/);
+    let state = JSON.parse(await readFile(join(directory, 'archive.json')));
+    assert.equal(state.complete, false);
+    assert.equal(state.missingResources, 1);
+    assert.equal((await readdir(join(directory, 'documents'))).length, documents,
+      'independent documents are still downloaded after a missing metadata response');
+    const missingReport = join(directory, 'missing-resources.jsonl');
+    const records = [{
+      url: `${origin}${missingPath}`, kind: 'metadata', status: 404,
+    }];
+    assert.deepEqual((await readFile(missingReport, 'utf8')).trim().split('\n').map(line => JSON.parse(line)), records);
+    assert.equal(requests.slice(start).filter(path => path === missingPath).length, 1,
+      'missing metadata is not retried within the run, including duplicate graph links');
+    const metadataDirectory = variant === 'year-missing-index' ? 'index' : 'metadata';
+    assert.ok(!(await readdir(join(directory, metadataDirectory))).includes(`${hash(`${origin}${missingPath}`)}.json`),
+      'HTTP error bodies are never published as metadata');
+    if (variant === 'missing-collection' || variant === 'missing-page')
+      assert.ok(requests.slice(start).includes('/oparl/bodies/3/file?size=100'),
+        'a missing collection page does not prevent processing other collections or bodies');
+
+    start = requests.length;
+    await run(directory, args, 3);
+    assert.deepEqual(requests.slice(start), [missingPath],
+      'resume retries the missing URL while reusing all completed work');
+    assert.deepEqual((await readFile(missingReport, 'utf8')).trim().split('\n').map(line => JSON.parse(line)), records,
+      'the report describes this run rather than accumulating duplicates across runs');
+
+    mode = variant.startsWith('year') ? 'year' : 'normal';
+    await run(directory, args);
+    state = JSON.parse(await readFile(join(directory, 'archive.json')));
+    assert.equal(state.complete, true, 'a previously missing URL can recover without refresh');
+    assert.equal(state.missingResources, 0);
+    assert.equal(await readFile(missingReport, 'utf8'), '');
+  }
+
+  mode = 'missing-document';
+  const missingDocument = join(root, mode);
+  start = requests.length;
+  assert.match(await run(missingDocument, [], 3), /HTTP 404/);
+  let missingState = JSON.parse(await readFile(join(missingDocument, 'archive.json')));
+  assert.equal(missingState.complete, false);
+  assert.equal(missingState.missingResources, 1);
+  assert.equal(missingState.unavailableDocuments, 0);
+  assert.equal(missingState.newDocuments, 1);
+  assert.equal(requests.slice(start).filter(path => path === '/content/1').length, 1);
+  assert.equal((await readdir(join(missingDocument, 'documents'))).length, 1);
+  assert.deepEqual(JSON.parse((await readFile(join(missingDocument, 'missing-resources.jsonl'), 'utf8')).trim()), {
+    url: file(1).accessUrl, kind: 'document', status: 404,
+  });
+  await run(missingDocument, ['--max-pages', '1', '--skip-unavailable-files'], 3);
+  missingState = JSON.parse(await readFile(join(missingDocument, 'archive.json')));
+  assert.equal(missingState.limited, true, 'missing resources take exit-code precedence over limits');
+  assert.equal(missingState.missingResources, 1);
+  mode = 'normal';
+  start = requests.length;
+  await run(missingDocument);
+  assert.deepEqual(requests.slice(start), ['/download/1', '/content/1']);
+  assert.equal(JSON.parse(await readFile(join(missingDocument, 'archive.json'))).complete, true);
+  assert.equal(await readFile(join(missingDocument, 'missing-resources.jsonl'), 'utf8'), '');
+
+  mode = 'missing-then-fatal';
+  const missingThenFatal = join(root, mode);
+  const fatalDiagnostics = await run(missingThenFatal, ['--skip-unavailable-files'], 1);
+  assert.match(fatalDiagnostics, /HTTP 404/);
+  assert.match(fatalDiagnostics, /HTTP 401/);
+  const fatalState = JSON.parse(await readFile(join(missingThenFatal, 'archive.json')));
+  assert.equal(fatalState.complete, false);
+  assert.equal(fatalState.missingResources, 1, 'a later fatal error does not erase the recorded 404');
+  assert.ok(!(await readdir(missingThenFatal)).includes('missing-resources.jsonl'));
+  assert.equal(JSON.parse((await readFile(join(missingThenFatal, 'missing-resources.jsonl.part'), 'utf8')).trim()).status,
+    404, 'an interrupted traversal retains its partial missing-resource report');
+  mode = 'normal';
+  await run(missingThenFatal);
+  assert.equal(await readFile(join(missingThenFatal, 'missing-resources.jsonl'), 'utf8'), '');
+
   for (const failure of ['bad-json', 'bad-chunk', 'missing-next', 'cycle', 'foreign-host', 'truncated']) {
     mode = failure;
     const directory = join(root, failure);
@@ -339,7 +461,7 @@ try {
   assert.equal(await readFile(report, 'utf8'), '', 'resolved access failures disappear from the new report');
   assert.equal(JSON.parse(await readFile(join(unavailable, 'archive.json'))).complete, true);
 
-  for (const variant of ['unauthorized', 'forbidden', 'missing-document', 'foreign-redirect', 'noauth-metadata']) {
+  for (const variant of ['unauthorized', 'forbidden', 'foreign-redirect', 'noauth-metadata']) {
     mode = variant;
     const directory = join(root, variant);
     const denied = variant === 'unauthorized' || variant === 'forbidden';
@@ -398,6 +520,33 @@ try {
       'accepting advisory metadata sizes never accepts truncated or unverified-length transfers');
   }
 
+  mode = 'closed-status';
+  start = requests.length;
+  const closedDiagnostics = await run(join(root, 'closed-status'), ['--metadata-only'], 1);
+  assert.match(closedDiagnostics, /cannot read HTTP status/);
+  assert.match(closedDiagnostics, /cause=server closed connection/);
+  assert.equal(requests.length - start, 3, 'a connection closed before its HTTP status is retried finitely');
+
+  mode = 'slow-status';
+  const slow = join(root, 'slow-status');
+  start = requests.length;
+  const timeoutDiagnostics = await run(slow, ['--metadata-only', '--timeout-ms', '50'], 1);
+  assert.match(timeoutDiagnostics, /cannot read HTTP status/);
+  assert.match(timeoutDiagnostics, /status read elapsed ms=\d+, read timeout ms=50, cause=read timeout/);
+  const slowPage = '/oparl/bodies/1/paper?page=2&size=100';
+  assert.equal(requests.slice(start).filter(path => path === slowPage).length, 3);
+  assert.equal(JSON.parse(await readFile(join(slow, 'archive.json'))).complete, false);
+  assert.ok(!(await readdir(join(slow, 'metadata'))).includes(`${hash(`${origin}${slowPage}`)}.json`),
+    'a timed-out metadata response must not be published');
+  const completedRequests = requests.slice(start).filter(path => path !== slowPage);
+  start = requests.length;
+  await run(slow, ['--metadata-only', '--timeout-ms', '500']);
+  assert.equal(requests.slice(start).filter(path => path === slowPage).length, 1,
+    'a larger timeout allows the slow page to finish without retries');
+  assert.ok(!requests.slice(start).some(path => completedRequests.includes(path)),
+    'resuming with a larger timeout reuses metadata completed before the failure');
+  assert.equal(JSON.parse(await readFile(join(slow, 'archive.json'))).complete, true);
+
   mode = 'retry';
   failures = 0;
   const retryDiagnostics = await run(join(root, 'retry'), ['--metadata-only', '--color', 'always']);
@@ -416,7 +565,7 @@ try {
     { ...colorEnv, CLICOLOR_FORCE: '1' });
   assert.ok(!disabledError.includes('\x1b'), 'explicit never overrides inherited color forcing');
   assert.match(await run(join(root, 'invalid-color'), ['--color', 'rainbow'], 1, colorEnv), /invalid color mode/);
-  console.log('Integration tests passed: pagination, bodies, collections, HTTP, resume, limits, refresh, errors, retries, reference-year selection, later linked proceedings/documents, access-denial reporting, size-mismatch policy, diagnostic colors and recovery');
+  console.log('Integration tests passed: pagination, bodies, collections, HTTP, resume, limits, refresh, errors, retries, reference-year selection, later linked proceedings/documents, default 404 continuation and reporting, access-denial reporting, size-mismatch policy, diagnostic colors, slow responses, transport diagnostics and recovery');
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));

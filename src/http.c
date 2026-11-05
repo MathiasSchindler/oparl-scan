@@ -22,6 +22,7 @@ typedef struct {
     Tls13Client *tls;
     Tls12Client *tls12;
     unsigned int timeout_ms;
+    const char *read_error;
     unsigned char buffer[16384];
     size_t position;
     size_t length;
@@ -205,12 +206,21 @@ static int reader_fill(Reader *reader) {
     } else {
         size_t ready;
         int result = platform_poll_fds(&reader->fd, 1, &ready, (int)reader->timeout_ms);
-        if (result <= 0) return -1;
+        if (result <= 0) {
+            reader->read_error = result == 0 ? "read timeout" : "socket polling failed";
+            return -1;
+        }
         count = platform_read(reader->fd, reader->buffer, sizeof(reader->buffer));
     }
-    if (count < 0) return -1;
+    if (count < 0) {
+        reader->read_error = reader->tls12 != 0 ? tls12_client_last_error(reader->tls12) :
+                             reader->tls != 0 ? tls13_client_last_error(reader->tls) :
+                             "socket read failed";
+        return -1;
+    }
     reader->position = 0;
     reader->length = (size_t)count;
+    if (count == 0) reader->read_error = "server closed connection";
     return count == 0 ? 0 : 1;
 }
 
@@ -320,6 +330,7 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
     ToolByteBuffer request;
     char line[8192], location[RIS_URL_CAPACITY];
     unsigned long long length = RIS_UNKNOWN_SIZE, total = 0;
+    unsigned long long status_started;
     size_t header_length = 0;
     int chunked = 0, status, result = -1, fd = -1, opened = 0;
     location[0] = '\0';
@@ -338,10 +349,24 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         tool_byte_buffer_append_cstr(&request, url.origin + (url.tls ? 8 : 7)) != 0 ||
         tool_byte_buffer_append_cstr(&request,
             "\r\nUser-Agent: OParl-Scan/1.0\r\nAccept: */*\r\n"
-            "Accept-Encoding: identity\r\nConnection: close\r\n\r\n") != 0 ||
-        connection_write(reader, request.data, request.size) != (long)request.size ||
-        reader_line(reader, line, sizeof(line)) != 0) {
-        ris_error("cannot send request or read HTTP status", source);
+            "Accept-Encoding: identity\r\nConnection: close\r\n\r\n") != 0) {
+        result = ris_error("cannot construct HTTP request", source);
+        goto done;
+    }
+    if (connection_write(reader, request.data, request.size) != (long)request.size) {
+        ris_error("cannot send HTTP request", source);
+        goto done;
+    }
+    status_started = platform_get_monotonic_time_ns();
+    if (reader_line(reader, line, sizeof(line)) != 0) {
+        ris_error("cannot read HTTP status", source);
+        rt_write_cstr(2, "oparl-scan: status read elapsed ms=");
+        rt_write_uint(2, (platform_get_monotonic_time_ns() - status_started) / 1000000ULL);
+        rt_write_cstr(2, ", read timeout ms=");
+        rt_write_uint(2, reader->timeout_ms);
+        rt_write_cstr(2, ", cause=");
+        rt_write_line(2, reader->read_error != 0 ? reader->read_error :
+                      "invalid or incomplete HTTP status line");
         goto done;
     }
     status = tool_parse_http_status(line);
@@ -425,7 +450,8 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         rt_write_uint(2, (unsigned long long)status);
         rt_write_cstr(2, ": ");
         rt_write_line(2, source);
-        result = status == 401 || status == 403 ? RIS_HTTP_ACCESS_DENIED :
+        result = status == 404 ? RIS_HTTP_NOT_FOUND :
+                 status == 401 || status == 403 ? RIS_HTTP_ACCESS_DENIED :
                  status == 408 || status == 429 || status >= 500 ? RESULT_RETRY : -1;
         goto done;
     }

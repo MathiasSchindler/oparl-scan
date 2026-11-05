@@ -6,6 +6,7 @@
 #define RIS_URL_CAPACITY 4096U
 #define RIS_UNKNOWN_SIZE (~0ULL)
 #define RIS_HTTP_ACCESS_DENIED (-3)
+#define RIS_HTTP_NOT_FOUND (-4)
 
 typedef struct {
     const char *ca_file;

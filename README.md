@@ -111,6 +111,32 @@ andere Werte fuehren zu einer ausdruecklichen Fehlermeldung. Weiterleitungen
 sind auf die oeffentliche API und `egov.potsdam.de/public/` beschraenkt.
 Zugangsdaten oder nichtoeffentliche Bereiche werden nicht verwendet.
 
+Einzelne grosse Listenseiten koennen erheblich langsamer antworten als der
+System-Endpunkt. Bei einem Live-Test brauchte beispielsweise Drucksachenseite
+210 mit 100 Eintraegen rund 47 Sekunden bis zum ersten Antwortbyte.
+Das fruehere Standardzeitlimit von 30 Sekunden reichte dafuer nicht aus.
+Der Standard betraegt jetzt 120 Sekunden; er kann mit `--timeout-ms`
+weiter angepasst werden. Bei Fehlern vor dem HTTP-Status werden Senden
+und Lesen getrennt gemeldet. Lesefehler nennen zusaetzlich die verstrichene
+Lesezeit, das konfigurierte Zeitlimit und den verfuegbaren Transportfehler.
+Die TLS-Helfer koennen dabei nicht jeden Verbindungsabbruch eindeutig von
+einem Zeitlimit unterscheiden.
+
+Zur schonenderen Wiederaufnahme des Jahrgangs 2024 beispielsweise denselben
+Archivordner und die bisherigen Pruefoptionen verwenden, ohne `--refresh`:
+
+```sh
+build/macos-aarch64/oparl-scan --year 2024 --output downloads/2024 \
+  --timeout-ms 120000 --delay-ms 1500 \
+  --skip-unavailable-files --accept-size-mismatch
+```
+
+Die beiden letzten Optionen nur beibehalten, wenn diese Ausnahmen auch
+bisher bewusst gewaehlt wurden. Bereits vollstaendige Metadaten und
+gueltige Dokumente werden wiederverwendet. Wiederholungen bleiben auf
+drei Versuche begrenzt; ein nicht antwortender Server fuehrt weiterhin
+zu einem ausdruecklichen Fehler und einem unvollstaendigen Archiv.
+
 ### Farben und Diagnosemeldungen
 
 Warnungen erhalten ein fettgelbes Praefix, Fehler ein fettrotes Praefix.
@@ -202,7 +228,7 @@ bestimmt. Unter Windows muss das Buendel per Option oder Umgebungsvariable
 bereitgestellt werden; der Windows-Zertifikatsspeicher wird nicht verwendet.
 Ein CA-Buendel ist Vertrauensmaterial, keine eingebundene Bibliothek.
 
-`--timeout-ms` betraegt standardmaessig 30000 und begrenzt TLS-Operationen
+`--timeout-ms` betraegt standardmaessig 120000 und begrenzt TLS-Operationen
 und das Lesen von Antworten, nicht die Gesamtlaufzeit. DNS-Aufloesung und
 TCP-Verbindungsaufbau verwenden newos' blockierende Plattform-API und
 werden davon nicht begrenzt. HTTP ohne TLS ist nur fuer ein ausdruecklich
@@ -213,6 +239,7 @@ gewaehltes Testsystem auf `127.0.0.1` erlaubt.
 ```text
 downloads/
   archive.json
+  missing-resources.jsonl                  # HTTP-404-Fehlstellen pro Lauf
   selection.jsonl                         # nur bei Jahrgangsauswahl
   index/<sha256-anfrage-url>.json          # ungefilterte Suchlaufseiten
   metadata/<sha256-anfrage-url>.json
@@ -265,6 +292,40 @@ Koerperschaftsliste. `--max-files N` begrenzt **neu heruntergeladene
 Dokumente pro Aufruf**; gecachte Dokumente verbrauchen dieses Budget
 nicht. Fuer eine vollstaendige Erfassung die Grenzen entfernen.
 
+### Fehlende URLs (HTTP 404)
+
+**HTTP 404 beendet den Lauf nicht.** Das gilt standardmaessig fuer
+Metadaten und Dokumentdownloads, ohne zusaetzliche Option. Die rote
+HTTP-Fehlermeldung bleibt sichtbar; das Programm verarbeitet die
+uebrigen ermittelten Ressourcen weiter. Es speichert weder Fehlerseiten
+als Dokumente noch Platzhalter als Metadaten.
+
+`missing-resources.jsonl` protokolliert jede betroffene angefragte URL
+einmal pro Lauf mit `url`, `kind` (`metadata` oder `document`) und
+`status: 404`. Bei Weiterleitungen ist `url` die urspruenglich
+angefragte URL; die HTTP-Diagnose nennt die URL der 404-Antwort.
+`archive.json` zaehlt diese URLs in `missingResources` und bleibt
+bei mindestens einer solchen Fehlstelle auf `complete: false`.
+Der Abschluss wird als `INCOMPLETE (HTTP 404)` ausgegeben, mit Exitcode `3`.
+Dieser hat Vorrang vor konfigurierten Grenzen; andere fatale Fehler
+beenden den Lauf weiterhin mit Exitcode `1`.
+
+Fehlt eine Sammlungsseite, ist deren naechster Seitenlink unbekannt.
+Das Programm beendet deshalb nur diese Sammlung, ohne weitere
+Seiten-URLs zu erfinden, und verarbeitet die anderen bekannten
+Sammlungen und Ressourcen. Fehlt bereits das System oder die
+Koerperschaftsliste, koennen keine weiteren Sammlungen ermittelt werden;
+der Lauf endet ebenfalls mit protokollierter Fehlstelle, nicht erfolgreich.
+
+Beim naechsten Aufruf werden fehlende Ressourcen erneut versucht,
+waehrend gueltige Cachedateien wiederverwendet werden. Es ist kein
+`--refresh` noetig. Der Bericht wird pro Lauf neu erstellt; behobene
+Fehlstellen verschwinden daraus. Waehrend des Laufs entsteht
+`missing-resources.jsonl.part`, die erst nach einem Durchlauf ohne
+fatalen Fehler umbenannt wird. Bei Abbruch bleibt der Teilbericht
+erhalten; ein alter veroeffentlichter Bericht gilt weiterhin fuer
+den vorherigen abgeschlossenen Lauf.
+
 ### Dokumente mit verweigertem Zugriff
 
 Einige oeffentlich gelistete Potsdamer Dokumente leiten auf `./noauth`
@@ -279,7 +340,7 @@ verzeichnet. Die uebrigen Downloads laufen weiter. Jede Zeile enthaelt
 `reason: "access-denied"`. Es werden weder Platzhalter noch
 Anmeldeseiten als Dokument gespeichert. Doppelte Datei-IDs werden pro
 Aufruf nur einmal versucht und protokolliert. Andere Fehler, darunter
-Zugriffsverweigerungen fuer Metadaten, HTTP 404, unerlaubte
+Zugriffsverweigerungen fuer Metadaten, unerlaubte
 Weiterleitungen, TLS-Fehler und fehlerhafte Antworten, fuehren weiterhin
 zum Abbruch.
 
@@ -336,9 +397,9 @@ wie der Bericht ueber nicht verfuegbare Dateien.
 - `1`: Netzwerk-, TLS-, JSON-, Seitennavigations-, Dateisystem- oder
   Dokumentfehler.
 - `2`: Wegen konfigurierter Grenzen absichtlich unvollstaendig.
-- `3`: Durchlauf beendet, aber wegen Zugriffsverweigerungen fehlen
-  Dokumente. Dies hat Vorrang vor Exitcode `2`; fatale Fehler liefern
-  weiterhin `1`.
+- `3`: Durchlauf beendet, aber wegen HTTP 404 fehlen Ressourcen oder
+  wegen Zugriffsverweigerungen fehlen Dokumente. Dies hat Vorrang
+  vor Exitcode `2`; fatale Fehler liefern weiterhin `1`.
 
 Im Modus `--metadata-only` bedeutet Vollstaendigkeit nur vollstaendige
 Metadaten, nicht vollstaendige Dokumentdownloads. Dies wird in
@@ -348,8 +409,8 @@ ist daher kein atomarer Datenbankschnappschuss zu einem einzigen Zeitpunkt.
 
 Die Grenzen betragen 32 MiB pro Metadatenantwort, 4 GiB pro Dokument
 und 64 Verschachtelungsebenen fuer JSON. Fehler beenden den Lauf,
-abgesehen von den oben beschriebenen, ausdruecklich aktivierten
-Ausnahmen. HTTP-Fehler und ungueltige Eingaben werden niemals durch
+abgesehen von HTTP 404 und den oben beschriebenen, ausdruecklich
+aktivierten Ausnahmen. HTTP-Fehler und ungueltige Eingaben werden niemals durch
 leere, scheinbar erfolgreiche Antworten ersetzt.
 
 ## Tests und Verifikation
@@ -370,10 +431,17 @@ Sie pruefen Seitennavigation, beide Koerperschaften, alle Sammlungstypen,
 eingebettete doppelte Dokumente, HTTP-Chunk-Kodierung, Weiterleitungen,
 Wiederaufnahme, reinen Metadatenbetrieb, Aktualisierung, ausdrueckliche
 Grenzen, fehlerhafte und abgebrochene Antworten sowie Wiederholungen.
+Langsame Antworten und Verbindungen ohne HTTP-Status werden getrennt
+geprueft, einschliesslich Wiederaufnahme mit einem hoeheren Zeitlimit,
+ohne zuvor abgeschlossene Metadaten erneut herunterzuladen.
 Hinzu kommen Jahrgangsauswahl, spaetere verknuepfte Vorgaenge und
 Dokumente, Graph-Deduplizierung, abweichende Organisationsfelder,
 Cache-Wiederverwendung und Archividentitaet.
 
+Weitere Tests decken HTTP 404 fuer System, Koerperschaftsliste,
+Sammlungen, Folgeseiten, verknuepfte Ressourcen und Dokumentdownloads
+ab, einschliesslich Fortsetzung, Berichten, Deduplizierung und
+Wiederaufnahme nach Behebung der Fehlstellen.
 Weitere Tests decken Zugriffsfehlstellen und ihre Behandlung bei
 Wiederaufnahme sowie Groessenabweichungen mit `Content-Length` und
 Chunk-Kodierung ab. Sie pruefen Berichte, erneute Cachevalidierung
