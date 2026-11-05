@@ -15,13 +15,27 @@ typedef struct {
     unsigned int timeout_ms;
     unsigned int delay_ms;
     int allow_loopback;
-    char tls12_hosts[2][256];
-    size_t tls12_count;
+    unsigned int workers;
+    struct RtTaskPool *pool;
+    struct HttpHost *hosts;
+    PlatformMutex state_lock;
 } HttpClient;
+
+typedef struct {
+    const char *url;
+    const char *path;
+    unsigned long long limit;
+    unsigned long long expected_size;
+    int accept_size_mismatch;
+    unsigned long long received;
+    int result;
+} HttpTransfer;
 
 int ris_error(const char *message, const char *detail);
 void ris_warning(const char *message, const char *detail);
 int http_valid_url(const HttpClient *client, const char *url);
+int http_same_host(const HttpClient *client, const char *a, const char *b);
+int http_download_batch(HttpClient *client, HttpTransfer *transfers, size_t count);
 int http_download(HttpClient *client, const char *url, const char *path,
                   unsigned long long limit, unsigned long long expected_size,
                   int accept_size_mismatch,

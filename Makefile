@@ -16,7 +16,8 @@ RUNTIME := $(filter-out src/platform/%,$(shell sed -n 's/^MACOS_FREESTANDING_RUN
 CRYPTO := $(sort $(shell grep -oE '"src/shared/crypto/[^"]+\.c"' $(NEWOS)/src/compiler/source_manifest.h | tr -d '"'))
 TLS := $(sort $(shell grep -oE '"src/shared/tls/[^"]+\.c"' $(NEWOS)/src/compiler/source_manifest.h | tr -d '"'))
 COMMON := $(addprefix $(NEWOS)/,$(sort $(RUNTIME) $(CRYPTO) $(TLS)))
-CPPFLAGS := -I$(NEWOS)/src/shared -Isrc -DNEWOS_HAVE_PTHREAD=0
+CPPFLAGS := -I$(NEWOS)/src/shared -Isrc -DNEWOS_HAVE_PTHREAD=0 \
+	-DNEWOS_RUNTIME_THREAD_SAFE_ALLOC=1 -DNEWOS_RUNTIME_ALLOC_LOCK=3
 CFLAGS := -std=c11 -Oz -Wall -Wextra -Wpedantic -ffreestanding -fno-builtin \
 	-fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections
@@ -75,7 +76,7 @@ $(PROGRAM): $(APP_OBJECTS) $(OBJECTS) $(LINK_DEPS)
 $(BUILD)/test-json$(EXE): $(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS))
 
-$(BUILD)/obj/%.o: %.c
+$(BUILD)/obj/%.o: %.c Makefile
 	@mkdir -p $(dir $@)
 	$(CC) --target=$(TRIPLE) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
@@ -93,6 +94,7 @@ $(BUILD)/imports/lib%.a: $(NEWOS)/src/platform/windows/imports/%.def
 test: $(PROGRAM) $(BUILD)/test-json$(EXE) check-deps
 	$(BUILD)/test-json$(EXE)
 	node tests/integration.mjs "$(abspath $(PROGRAM))"
+	node tests/concurrency.mjs "$(abspath $(PROGRAM))"
 
 check-deps: $(PROGRAM)
 	node tests/check-deps.mjs "$(abspath $(PROGRAM))"

@@ -4,10 +4,26 @@
 #include "tls/tls12_client.h"
 #include "tls/tls13_client.h"
 #include "crypto/x509.h"
+#include "concurrency.h"
 
 #define HEADER_LIMIT 65536U
 #define RESULT_RETRY (-2)
 #define RESULT_REDIRECT 1
+
+typedef struct HttpHost {
+    struct HttpHost *next;
+    char name[256];
+    unsigned int port;
+    PlatformMutex lock;
+    unsigned long long ready_ns;
+    int tls12;
+} HttpHost;
+
+static PlatformMutex diagnostic_lock;
+/* The pinned TLS 1.3 client uses shared ClientHello storage. */
+static PlatformMutex handshake_lock;
+/* The freestanding macOS resolver returns a shared addrinfo structure. */
+static PlatformMutex connect_lock;
 
 typedef struct {
     char host[256];
@@ -28,7 +44,7 @@ typedef struct {
     size_t length;
 } Reader;
 
-static void diagnostic(int style, const char *prefix, const char *message, const char *detail) {
+static void diagnostic_unlocked(int style, const char *prefix, const char *message, const char *detail) {
     tool_write_styled(2, tool_get_global_color_mode(), style, prefix);
     rt_write_cstr(2, message);
     if (detail != 0) {
@@ -39,12 +55,16 @@ static void diagnostic(int style, const char *prefix, const char *message, const
 }
 
 int ris_error(const char *message, const char *detail) {
-    diagnostic(TOOL_STYLE_BOLD_RED, "oparl-scan: error: ", message, detail);
+    platform_mutex_lock(&diagnostic_lock);
+    diagnostic_unlocked(TOOL_STYLE_BOLD_RED, "oparl-scan: error: ", message, detail);
+    platform_mutex_unlock(&diagnostic_lock);
     return -1;
 }
 
 void ris_warning(const char *message, const char *detail) {
-    diagnostic(TOOL_STYLE_BOLD_YELLOW, "oparl-scan: warning: ", message, detail);
+    platform_mutex_lock(&diagnostic_lock);
+    diagnostic_unlocked(TOOL_STYLE_BOLD_YELLOW, "oparl-scan: warning: ", message, detail);
+    platform_mutex_unlock(&diagnostic_lock);
 }
 
 static int copy_n(char *out, size_t capacity, const char *text, size_t length) {
@@ -97,6 +117,43 @@ int http_valid_url(const HttpClient *client, const char *url) {
     return url_parse(client, url, &parsed) == 0;
 }
 
+int http_same_host(const HttpClient *client, const char *a, const char *b) {
+    Url left, right;
+    return url_parse(client, a, &left) == 0 && url_parse(client, b, &right) == 0 &&
+           left.port == right.port && rt_strcmp(left.host, right.host) == 0;
+}
+
+static HttpHost *host_state(HttpClient *client, const Url *url) {
+    HttpHost *host;
+    platform_mutex_lock(&client->state_lock);
+    for (host = client->hosts; host != 0; host = host->next)
+        if (host->port == url->port && rt_strcmp(host->name, url->host) == 0) break;
+    if (host == 0) {
+        host = (HttpHost *)rt_malloc(sizeof(*host));
+        if (host != 0) {
+            rt_memset(host, 0, sizeof(*host));
+            rt_copy_string(host->name, sizeof(host->name), url->host);
+            host->port = url->port;
+            host->ready_ns = platform_get_monotonic_time_ns() +
+                             (unsigned long long)client->delay_ms * 1000000ULL;
+            host->next = client->hosts;
+            client->hosts = host;
+        }
+    }
+    platform_mutex_unlock(&client->state_lock);
+    return host;
+}
+
+static int host_wait(const HttpHost *host) {
+    for (;;) {
+        unsigned long long now = platform_get_monotonic_time_ns(), ms;
+        if (now >= host->ready_ns) return 0;
+        ms = (host->ready_ns - now + 999999ULL) / 1000000ULL;
+        if (platform_sleep_milliseconds((unsigned int)ms) != 0)
+            return ris_error("request delay failed", 0);
+    }
+}
+
 static int trust_load(HttpClient *client) {
     static const char *paths[] = {
         "/etc/ssl/cert.pem",
@@ -122,34 +179,52 @@ static int trust_load(HttpClient *client) {
     return 0;
 }
 
-static int connection_open(HttpClient *client, const Url *url, Reader *reader) {
+static int connect_tcp(const Url *url, int *fd) {
+    int result;
+    platform_mutex_lock(&connect_lock);
+    result = platform_connect_tcp(url->host, url->port, fd);
+    platform_mutex_unlock(&connect_lock);
+    return result;
+}
+
+/* Keep TLS scratch frames out of the HTTP receive frame on 512 KiB pool stacks. */
+static __attribute__((noinline)) int connection_open(HttpClient *client, const Url *url,
+                                                     HttpHost *host, Reader *reader) {
+    int trust_result = 0;
     rt_memset(reader, 0, sizeof(*reader));
     reader->fd = -1;
     reader->timeout_ms = client->timeout_ms;
-    if (url->tls && trust_load(client) != 0) return -1;
-    if (platform_connect_tcp(url->host, url->port, &reader->fd) != 0) {
+    if (url->tls) {
+        platform_mutex_lock(&client->state_lock);
+        trust_result = trust_load(client);
+        platform_mutex_unlock(&client->state_lock);
+    }
+    if (trust_result != 0) return -1;
+    if (connect_tcp(url, &reader->fd) != 0) {
         ris_error("TCP connection failed", url->host);
         return RESULT_RETRY;
     }
     if (url->tls) {
         CryptoX509DerCert certs[TLS13_MAX_PEER_CERTS];
-        size_t count, i;
+        size_t count;
         char status[256];
-        int legacy = 0;
-        for (i = 0; i < client->tls12_count; i++)
-            if (rt_strcmp(client->tls12_hosts[i], url->host) == 0) legacy = 1;
+        int legacy = host->tls12;
         if (!legacy) {
             reader->tls = (Tls13Client *)rt_malloc(sizeof(*reader->tls));
             if (reader->tls == 0) return ris_error("cannot allocate TLS state", 0);
             tls13_client_init(reader->tls, reader->fd, client->timeout_ms);
-            if (tls13_client_handshake(reader->tls, url->host, rt_strlen(url->host)) != 0) {
+            int handshake;
+            platform_mutex_lock(&handshake_lock);
+            handshake = tls13_client_handshake(reader->tls, url->host, rt_strlen(url->host));
+            platform_mutex_unlock(&handshake_lock);
+            if (handshake != 0) {
                 ris_warning("trying TLS 1.2 after TLS 1.3 failed",
                             tls13_client_last_error(reader->tls));
                 rt_free(reader->tls);
                 reader->tls = 0;
                 platform_close(reader->fd);
                 reader->fd = -1;
-                if (platform_connect_tcp(url->host, url->port, &reader->fd) != 0) {
+                if (connect_tcp(url, &reader->fd) != 0) {
                     ris_error("TCP reconnect for TLS 1.2 failed", url->host);
                     return RESULT_RETRY;
                 }
@@ -173,12 +248,7 @@ static int connection_open(HttpClient *client, const Url *url, Reader *reader) {
                                     client->trust, client->trust_length,
                                     status, sizeof(status)) != 0)
             return ris_error("TLS certificate verification failed", status);
-        if (legacy && client->tls12_count < 2) {
-            for (i = 0; i < client->tls12_count; i++)
-                if (rt_strcmp(client->tls12_hosts[i], url->host) == 0) break;
-            if (i == client->tls12_count)
-                rt_copy_string(client->tls12_hosts[client->tls12_count++], 256, url->host);
-        }
+        if (legacy) host->tls12 = 1;
     }
     return 0;
 }
@@ -197,7 +267,7 @@ static long connection_write(Reader *reader, const void *bytes, size_t size) {
     return rt_write_all(reader->fd, bytes, size) == 0 ? (long)size : -1;
 }
 
-static int reader_fill(Reader *reader) {
+static __attribute__((noinline)) int reader_fill(Reader *reader) {
     long count;
     if (reader->tls12 != 0) {
         count = tls12_client_read_app(reader->tls12, reader->buffer, sizeof(reader->buffer));
@@ -324,8 +394,9 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
                       unsigned long long limit, unsigned long long expected_size,
                       int accept_size_mismatch,
                       unsigned long long *size_out, char *redirect,
-                      unsigned int *retry_after) {
+                      unsigned int *retry_after, unsigned int attempt) {
     Url url;
+    HttpHost *host;
     Reader *reader;
     ToolByteBuffer request;
     char line[8192], location[RIS_URL_CAPACITY];
@@ -334,13 +405,22 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
     size_t header_length = 0;
     int chunked = 0, status, result = -1, fd = -1, opened = 0;
     location[0] = '\0';
+    *retry_after = 0;
     if (url_parse(client, source, &url) != 0) return ris_error("URL is not allowed", source);
-    if (platform_sleep_milliseconds(client->delay_ms) != 0)
-        return ris_error("request delay failed", 0);
+    host = host_state(client, &url);
+    if (host == 0) return ris_error("cannot allocate HTTP host state", source);
+    platform_mutex_lock(&host->lock);
+    if (host_wait(host) != 0) {
+        platform_mutex_unlock(&host->lock);
+        return -1;
+    }
     reader = (Reader *)rt_malloc(sizeof(*reader));
-    if (reader == 0) return ris_error("cannot allocate HTTP buffer", 0);
+    if (reader == 0) {
+        platform_mutex_unlock(&host->lock);
+        return ris_error("cannot allocate HTTP buffer", 0);
+    }
     tool_byte_buffer_init(&request);
-    result = connection_open(client, &url, reader);
+    result = connection_open(client, &url, host, reader);
     if (result != 0) goto done;
     result = RESULT_RETRY;
     if (tool_byte_buffer_append_cstr(&request, "GET ") != 0 ||
@@ -359,7 +439,8 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
     }
     status_started = platform_get_monotonic_time_ns();
     if (reader_line(reader, line, sizeof(line)) != 0) {
-        ris_error("cannot read HTTP status", source);
+        platform_mutex_lock(&diagnostic_lock);
+        diagnostic_unlocked(TOOL_STYLE_BOLD_RED, "oparl-scan: error: ", "cannot read HTTP status", source);
         rt_write_cstr(2, "oparl-scan: status read elapsed ms=");
         rt_write_uint(2, (platform_get_monotonic_time_ns() - status_started) / 1000000ULL);
         rt_write_cstr(2, ", read timeout ms=");
@@ -367,6 +448,7 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         rt_write_cstr(2, ", cause=");
         rt_write_line(2, reader->read_error != 0 ? reader->read_error :
                       "invalid or incomplete HTTP status line");
+        platform_mutex_unlock(&diagnostic_lock);
         goto done;
     }
     status = tool_parse_http_status(line);
@@ -445,11 +527,13 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         goto done;
     }
     if (status != 200) {
+        platform_mutex_lock(&diagnostic_lock);
         tool_write_styled(2, tool_get_global_color_mode(), TOOL_STYLE_BOLD_RED,
                           "oparl-scan: error: HTTP ");
         rt_write_uint(2, (unsigned long long)status);
         rt_write_cstr(2, ": ");
         rt_write_line(2, source);
+        platform_mutex_unlock(&diagnostic_lock);
         result = status == 404 ? RIS_HTTP_NOT_FOUND :
                  status == 401 || status == 403 ? RIS_HTTP_ACCESS_DENIED :
                  status == 408 || status == 429 || status >= 500 ? RESULT_RETRY : -1;
@@ -472,13 +556,17 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
     }
     if (expected_size != RIS_UNKNOWN_SIZE && total != expected_size) {
         int accepted = accept_size_mismatch && (chunked || length != RIS_UNKNOWN_SIZE);
-        if (accepted) ris_warning("accepting document size mismatch", source);
-        else ris_error("document size differs from OParl metadata", source);
+        platform_mutex_lock(&diagnostic_lock);
+        diagnostic_unlocked(accepted ? TOOL_STYLE_BOLD_YELLOW : TOOL_STYLE_BOLD_RED,
+                            accepted ? "oparl-scan: warning: " : "oparl-scan: error: ",
+                            accepted ? "accepting document size mismatch" :
+                            "document size differs from OParl metadata", source);
         rt_write_cstr(2, "oparl-scan: expected bytes=");
         rt_write_uint(2, expected_size);
         rt_write_cstr(2, ", received bytes=");
         rt_write_uint(2, total);
         rt_write_char(2, '\n');
+        platform_mutex_unlock(&diagnostic_lock);
         if (!accepted) {
             result = -1;
             goto done;
@@ -499,6 +587,16 @@ done:
     connection_close(reader);
     tool_byte_buffer_free(&request);
     rt_free(reader);
+    {
+        unsigned int delay = client->delay_ms;
+        if (result == RESULT_RETRY) {
+            unsigned int backoff = 1000U << attempt;
+            if (delay < backoff) delay = backoff;
+            if (delay < *retry_after) delay = *retry_after;
+        }
+        host->ready_ns = platform_get_monotonic_time_ns() + (unsigned long long)delay * 1000000ULL;
+    }
+    platform_mutex_unlock(&host->lock);
     return result;
 }
 
@@ -514,7 +612,7 @@ int http_download(HttpClient *client, const char *url, const char *path,
         rt_copy_string(current, sizeof(current), url);
         for (hops = 0; hops < 6; hops++) {
             result = fetch_once(client, current, path, limit, expected_size,
-                                accept_size_mismatch, size_out, redirect, &retry_after);
+                                accept_size_mismatch, size_out, redirect, &retry_after, attempt);
             if (result != RESULT_REDIRECT) break;
             rt_copy_string(current, sizeof(current), redirect);
         }
@@ -522,15 +620,63 @@ int http_download(HttpClient *client, const char *url, const char *path,
         if (result == RESULT_REDIRECT) return ris_error("too many HTTP redirects", url);
         if (result != RESULT_RETRY) return result;
         if (attempt == 2) return -1;
-        if (retry_after < (1000U << attempt)) retry_after = 1000U << attempt;
         ris_warning("retrying", url);
-        if (platform_sleep_milliseconds(retry_after) != 0)
-            return ris_error("retry delay failed", 0);
     }
     return -1;
 }
 
+typedef struct {
+    HttpClient *client;
+    HttpTransfer *transfers;
+} TransferBatch;
+
+static int transfer_batch(size_t begin, size_t end, unsigned int worker, void *arg) {
+    TransferBatch *batch = (TransferBatch *)arg;
+    size_t i;
+    (void)worker;
+    for (i = begin; i < end; i++) {
+        HttpTransfer *transfer = &batch->transfers[i];
+        transfer->result = http_download(batch->client, transfer->url, transfer->path,
+                                        transfer->limit, transfer->expected_size,
+                                        transfer->accept_size_mismatch, &transfer->received);
+    }
+    return 0;
+}
+
+int http_download_batch(HttpClient *client, HttpTransfer *transfers, size_t count) {
+    TransferBatch batch = {client, transfers};
+    unsigned int workers = client->workers;
+    if (count == 0 || count > 2) return ris_error("invalid HTTP batch size", 0);
+#if defined(_WIN32)
+    /* The pinned Windows fd table is not safe for concurrent socket allocation. */
+    workers = 1;
+#endif
+    if (count == 1 || client->workers == 1)
+        return transfer_batch(0, count, 0, &batch);
+    if (client->pool == 0) {
+        client->pool = (RtTaskPool *)rt_malloc(sizeof(*client->pool));
+        if (client->pool == 0) return ris_error("cannot allocate HTTP task pool", 0);
+        if (rt_task_pool_init(client->pool, workers) != 0)
+            ris_warning("cannot start HTTP workers; continuing serially", 0);
+        else if (rt_task_pool_width(client->pool) < client->workers)
+            ris_warning("parallel HTTP unavailable on this backend; continuing serially", 0);
+    }
+    return rt_parallel_for(client->pool, count, 1, transfer_batch, &batch);
+}
+
 void http_free(HttpClient *client) {
+    HttpHost *host = client->hosts;
+    if (client->pool != 0) {
+        rt_task_pool_destroy(client->pool);
+        rt_free(client->pool);
+        client->pool = 0;
+    }
+    while (host != 0) {
+        HttpHost *next = host->next;
+        rt_free(host);
+        host = next;
+    }
+    client->hosts = 0;
     rt_free(client->trust);
     client->trust = 0;
     client->trust_length = 0;

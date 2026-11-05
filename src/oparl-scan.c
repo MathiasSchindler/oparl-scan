@@ -9,6 +9,7 @@
 #define SUMMARY_INTERVAL_NS 500000000ULL
 #define PATH_CAPACITY 1024U
 #define DEFAULT_SYSTEM "https://www.potsdam.sitzung-online.de/oparl/system"
+#define PENDING_DOCUMENTS 32U
 
 typedef enum {
     JOB_COLLECTION, JOB_BODIES, JOB_PAPERS, JOB_RESOURCE
@@ -28,6 +29,15 @@ typedef struct {
     size_t capacity;
     size_t count;
 } SeenSet;
+
+typedef struct {
+    HttpTransfer transfer;
+    char id[RIS_URL_CAPACITY];
+    char url[RIS_URL_CAPACITY];
+    char filename[512];
+    char path[PATH_CAPACITY];
+    char part[PATH_CAPACITY];
+} DocumentDownload;
 
 typedef struct {
     HttpClient http;
@@ -60,9 +70,14 @@ typedef struct {
     SeenSet seen_files;
     SeenSet seen_jobs;
     SeenSet seen_missing;
+    DocumentDownload *pending[PENDING_DOCUMENTS];
+    size_t pending_count;
 } Archive;
 
 static int write_summary(Archive *archive, int success, int force);
+static int download_metadata(Archive *archive, const char *url, const char *path,
+                             unsigned long long *size);
+static int flush_documents(Archive *archive);
 
 static void usage(void) {
     rt_write_cstr(1,
@@ -76,7 +91,8 @@ static void usage(void) {
         "  --page-size N      Objects per page, 1..100 (default: 100)\n"
         "  --max-pages N      Limit pages per collection (default: unlimited)\n"
         "  --max-files N      Limit new document downloads (default: unlimited)\n"
-        "  --delay-ms N       Pause before each request (default: 500)\n"
+        "  --delay-ms N       Pause per destination between requests (default: 500)\n"
+        "  --workers N        Concurrent requests, 1..2 (default: 2; one per host)\n"
         "  --timeout-ms N     TLS and read timeout (default: 120000)\n"
         "  --ca-file FILE     PEM CA bundle (or SSL_CERT_FILE/system bundle)\n"
         "  --system URL       System URL; HTTP is allowed only on 127.0.0.1\n"
@@ -98,6 +114,7 @@ static int options(Archive *archive, int argc, char **argv) {
     archive->mismatch_fd = -1;
     archive->http.timeout_ms = 120000;
     archive->http.delay_ms = 500;
+    archive->http.workers = 2;
     tool_array_init(&archive->jobs, sizeof(Job));
     for (i = 1; i < argc; i++) {
         const char *flag = argv[i], *value;
@@ -146,6 +163,8 @@ static int options(Archive *archive, int argc, char **argv) {
                 archive->max_files = number;
             else if (rt_strcmp(flag, "--delay-ms") == 0 && number <= 3600000)
                 archive->http.delay_ms = (unsigned int)number;
+            else if (rt_strcmp(flag, "--workers") == 0 && number >= 1 && number <= 2)
+                archive->http.workers = (unsigned int)number;
             else if (rt_strcmp(flag, "--timeout-ms") == 0 && number >= 1 && number <= 3600000)
                 archive->http.timeout_ms = (unsigned int)number;
             else return ris_error("unknown option or value out of range", flag);
@@ -304,9 +323,7 @@ static int read_metadata(Archive *archive, const char *url, MetaKind kind,
         if (info.is_dir || info.size > META_LIMIT)
             return ris_error("invalid metadata cache; use --refresh", path);
     } else {
-        result = http_download(&archive->http, url, part, META_LIMIT, RIS_UNKNOWN_SIZE, 0, &size);
-        if (result == RIS_HTTP_NOT_FOUND &&
-            record_missing(archive, url, "metadata") != 0) return -1;
+        result = download_metadata(archive, url, part, &size);
         if (result != 0) return result;
     }
     if (tool_read_all_input(cached ? path : part, bytes, &length) != 0)
@@ -374,12 +391,118 @@ static int discover_collections(Archive *archive, const Json *json, size_t body)
     return 0;
 }
 
+static int complete_document(Archive *archive, const DocumentDownload *download) {
+    const char *id = download->id, *url = download->url, *filename = download->filename;
+    unsigned long long expected = download->transfer.expected_size;
+    unsigned long long received = download->transfer.received;
+    int result = download->transfer.result;
+    if (result == RIS_HTTP_NOT_FOUND) {
+        if (record_missing(archive, url, "document") != 0) return -1;
+        return 0;
+    }
+    if (result == RIS_HTTP_ACCESS_DENIED && archive->skip_unavailable_files) {
+        int fd = archive->unavailable_fd;
+        if (rt_write_cstr(fd, "{\"id\":") != 0 ||
+            tool_json_write_string(fd, id) != 0 ||
+            tool_json_field_string(fd, "url", url) != 0 ||
+            tool_json_field_string(fd, "fileName", filename) != 0 ||
+            tool_json_field_string(fd, "reason", "access-denied") != 0 ||
+            rt_write_cstr(fd, "}\n") != 0)
+            return ris_error("cannot write unavailable file report", id);
+        archive->unavailable_files++;
+        ris_warning("unavailable document recorded", id);
+        return 0;
+    }
+    if (result != 0) return -1;
+    if (expected != RIS_UNKNOWN_SIZE && received != expected) {
+        int fd = archive->mismatch_fd;
+        if (rt_write_cstr(fd, "{\"id\":") != 0 ||
+            tool_json_write_string(fd, id) != 0 ||
+            tool_json_field_string(fd, "url", url) != 0 ||
+            tool_json_field_string(fd, "fileName", filename) != 0 ||
+            tool_json_field_uint(fd, "expectedSize", expected) != 0 ||
+            tool_json_field_uint(fd, "actualSize", received) != 0 ||
+            rt_write_cstr(fd, "}\n") != 0)
+            return ris_error("cannot write size mismatch report", id);
+    }
+    if (platform_rename_path(download->part, download->path) != 0)
+        return ris_error("cannot publish document", download->path);
+    if (expected != RIS_UNKNOWN_SIZE && received != expected) archive->mismatched_files++;
+    archive->downloaded_files++;
+    rt_write_cstr(2, "document: ");
+    rt_write_line(2, download->path);
+    return 0;
+}
+
+/* Network tasks own only their transfer slots; archive state is merged after the join. */
+static int perform_downloads(Archive *archive, HttpTransfer *metadata,
+                             DocumentDownload *first, DocumentDownload *second) {
+    HttpTransfer transfers[2];
+    DocumentDownload *documents[2] = {first, second};
+    size_t count = 0, i, kept = 0;
+    int result = 0;
+    if (metadata != 0) transfers[count++] = *metadata;
+    for (i = 0; i < 2; i++)
+        if (documents[i] != 0) transfers[count++] = documents[i]->transfer;
+    if (http_download_batch(&archive->http, transfers, count) != 0) return -1;
+    count = 0;
+    if (metadata != 0) *metadata = transfers[count++];
+    for (i = 0; i < 2; i++) {
+        if (documents[i] == 0) continue;
+        documents[i]->transfer = transfers[count++];
+        if (complete_document(archive, documents[i]) != 0) result = -1;
+    }
+    for (i = 0; i < archive->pending_count; i++) {
+        DocumentDownload *download = archive->pending[i];
+        if (download == first || download == second) rt_free(download);
+        else archive->pending[kept++] = download;
+    }
+    archive->pending_count = kept;
+    if (result == 0) result = write_summary(archive, 0, 0);
+    return result;
+}
+
+static int download_metadata(Archive *archive, const char *url, const char *path,
+                             unsigned long long *size) {
+    HttpTransfer metadata = {url, path, META_LIMIT, RIS_UNKNOWN_SIZE, 0, 0, -1};
+    DocumentDownload *document = 0;
+    size_t i;
+    int result;
+    for (i = 0; i < archive->pending_count; i++) {
+        if (!http_same_host(&archive->http, url, archive->pending[i]->url)) {
+            document = archive->pending[i];
+            break;
+        }
+    }
+    result = perform_downloads(archive, &metadata, document, 0);
+    if (metadata.result == RIS_HTTP_NOT_FOUND &&
+        record_missing(archive, url, "metadata") != 0) return -1;
+    if (result != 0) return -1;
+    *size = metadata.received;
+    return metadata.result;
+}
+
+static int flush_documents(Archive *archive) {
+    while (archive->pending_count != 0) {
+        DocumentDownload *first = archive->pending[0], *second = 0;
+        size_t i;
+        for (i = 1; i < archive->pending_count; i++) {
+            if (!http_same_host(&archive->http, first->url, archive->pending[i]->url)) {
+                second = archive->pending[i];
+                break;
+            }
+        }
+        if (perform_downloads(archive, 0, first, second) != 0) return -1;
+    }
+    return 0;
+}
+
 static int document(Archive *archive, const Json *json, size_t object) {
     char id[RIS_URL_CAPACITY], url[RIS_URL_CAPACITY], filename[512];
     char hash[65], name[180], path[PATH_CAPACITY], part[PATH_CAPACITY];
-    unsigned long long expected = RIS_UNKNOWN_SIZE, received;
+    unsigned long long expected = RIS_UNKNOWN_SIZE;
     size_t token, i, used;
-    int result;
+    DocumentDownload *download, *other = 0;
     PlatformDirEntry info;
     if (archive->metadata_only || json_true(json, json_get(json, object, "deleted"))) return 0;
     if (json_string(json, json_get(json, object, "id"), id, sizeof(id)) != 0)
@@ -424,48 +547,37 @@ static int document(Archive *archive, const Json *json, size_t object) {
             return ris_error("document cache has wrong size; use --refresh", path);
         ris_warning("rechecking cached document with a size mismatch", id);
     }
+    if (archive->pending_count == PENDING_DOCUMENTS ||
+        (archive->max_files != 0 &&
+         archive->downloaded_files + archive->pending_count >= archive->max_files))
+        if (flush_documents(archive) != 0) return -1;
     if (archive->max_files != 0 && archive->downloaded_files >= archive->max_files) {
         archive->limited = 1;
         return 0;
     }
-    result = http_download(&archive->http, url, part, FILE_LIMIT, expected,
-                           archive->accept_size_mismatch, &received);
-    if (result == RIS_HTTP_NOT_FOUND) {
-        if (record_missing(archive, url, "document") != 0) return -1;
-        return hash_seen(&archive->seen_files, hash, 1) < 0 ? -1 : 0;
+    download = (DocumentDownload *)rt_malloc(sizeof(*download));
+    if (download == 0) return ris_error("cannot allocate document queue entry", id);
+    rt_copy_string(download->id, sizeof(download->id), id);
+    rt_copy_string(download->url, sizeof(download->url), url);
+    rt_copy_string(download->filename, sizeof(download->filename), filename);
+    rt_copy_string(download->path, sizeof(download->path), path);
+    rt_copy_string(download->part, sizeof(download->part), part);
+    download->transfer = (HttpTransfer){download->url, download->part, FILE_LIMIT, expected,
+                                        archive->accept_size_mismatch, 0, -1};
+    if (hash_seen(&archive->seen_files, hash, 1) < 0) {
+        rt_free(download);
+        return -1;
     }
-    if (result == RIS_HTTP_ACCESS_DENIED && archive->skip_unavailable_files) {
-        int fd = archive->unavailable_fd;
-        if (rt_write_cstr(fd, "{\"id\":") != 0 ||
-            tool_json_write_string(fd, id) != 0 ||
-            tool_json_field_string(fd, "url", url) != 0 ||
-            tool_json_field_string(fd, "fileName", filename) != 0 ||
-            tool_json_field_string(fd, "reason", "access-denied") != 0 ||
-            rt_write_cstr(fd, "}\n") != 0)
-            return ris_error("cannot write unavailable file report", id);
-        if (hash_seen(&archive->seen_files, hash, 1) < 0) return -1;
-        archive->unavailable_files++;
-        ris_warning("unavailable document recorded", id);
-        return 0;
-    }
-    if (result != 0) return -1;
-    if (expected != RIS_UNKNOWN_SIZE && received != expected) {
-        int fd = archive->mismatch_fd;
-        if (rt_write_cstr(fd, "{\"id\":") != 0 ||
-            tool_json_write_string(fd, id) != 0 ||
-            tool_json_field_string(fd, "url", url) != 0 ||
-            tool_json_field_string(fd, "fileName", filename) != 0 ||
-            tool_json_field_uint(fd, "expectedSize", expected) != 0 ||
-            tool_json_field_uint(fd, "actualSize", received) != 0 ||
-            rt_write_cstr(fd, "}\n") != 0)
-            return ris_error("cannot write size mismatch report", id);
-    }
-    if (platform_rename_path(part, path) != 0) return ris_error("cannot publish document", path);
-    if (expected != RIS_UNKNOWN_SIZE && received != expected) archive->mismatched_files++;
-    archive->downloaded_files++;
-    rt_write_cstr(2, "document: ");
-    rt_write_line(2, path);
-    return hash_seen(&archive->seen_files, hash, 1) < 0 ? -1 : 0;
+    for (i = 0; i < archive->pending_count; i++)
+        if (!http_same_host(&archive->http, url, archive->pending[i]->url)) {
+            other = archive->pending[i];
+            break;
+        }
+    archive->pending[archive->pending_count++] = download;
+    if (other != 0 || archive->http.workers == 1 ||
+        http_same_host(&archive->http, url, archive->system))
+        return perform_downloads(archive, 0, download, other);
+    return 0;
 }
 
 static int select_paper(Archive *archive, const Json *json, size_t object) {
@@ -800,6 +912,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     result = run(&archive);
+    if (result == 0 && flush_documents(&archive) != 0) result = -1;
     if (result == 0 &&
         finish_manifest(&archive, "missing-resources.jsonl", &archive.missing_fd) != 0)
         result = -1;
@@ -832,6 +945,7 @@ int main(int argc, char **argv) {
         rt_write_char(2, '\n');
     }
     http_free(&archive.http);
+    while (archive.pending_count != 0) rt_free(archive.pending[--archive.pending_count]);
     tool_array_free(&archive.jobs);
     if (archive.selection_fd >= 0) platform_close(archive.selection_fd);
     if (archive.unavailable_fd >= 0 && platform_close(archive.unavailable_fd) != 0) {

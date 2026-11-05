@@ -104,12 +104,72 @@ Auf allen Plattformen Schraegstriche `/` in Pfaden verwenden.
 Uebergeordnete Verzeichnisse des Ausgabeordners duerfen entsprechend der
 newos-Richtlinie zur Verzeichniserstellung keine symbolischen Links sein.
 
-Standardmaessig erfolgt immer nur eine Anfrage gleichzeitig, mit 500 ms Pause
-vor jeder Anfrage und bis zu drei Versuchen bei voruebergehenden Fehlern.
+Standardmaessig laufen hoechstens **zwei Anfragen gleichzeitig**, jedoch
+niemals zwei zum selben Zielhost und Port. Zwischen dem Ende einer Anfrage
+und dem Beginn der naechsten am selben Ziel liegen mindestens 500 ms.
+Bei voruebergehenden Fehlern erfolgen bis zu drei Versuche.
 Numerische `Retry-After`-Werte bis 300 Sekunden werden beruecksichtigt;
 andere Werte fuehren zu einer ausdruecklichen Fehlermeldung. Weiterleitungen
 sind auf die oeffentliche API und `egov.potsdam.de/public/` beschraenkt.
 Zugangsdaten oder nichtoeffentliche Bereiche werden nicht verwendet.
+
+### Parallelitaet und Serverpausen
+
+Ein Dokumentdownload von `egov.potsdam.de` kann sich mit einem
+Metadatenabruf von `www.potsdam.sitzung-online.de` ueberschneiden.
+`--delay-ms N` gilt dabei getrennt je Zielhost und Port; Zeit, die
+bereits mit Arbeit an einem anderen Ziel verbracht wurde, zaehlt als Pause.
+Auch jede Weiterleitung muss erst den freien Platz und die Pause ihres
+Zielhosts abwarten. Der bisherige Platz wird davor freigegeben.
+HTTP 429, voruebergehende Server- und Transportfehler sowie numerisches
+`Retry-After` verschieben die naechste zulaessige Anfrage an das betroffene
+Ziel, nicht nur den naechsten Versuch derselben URL.
+
+Mit `--workers 1` laesst sich die Ausfuehrung auf eine Anfrage insgesamt
+begrenzen. Der Standard ist `--workers 2`; groessere Werte sind nicht
+erlaubt. Cache, Archividentitaet, Dateiformate und Wiederaufnahme sind
+unabhaengig von dieser Einstellung. Es darf trotzdem nur ein Prozess
+in ein Ausgabeverzeichnis schreiben.
+
+Die Metadatensuche bleibt geordnet. Bis zu 32 bereits entdeckte,
+noch nicht heruntergeladene Dokumente werden mit kleinen
+Auftragsbeschreibungen vorgemerkt. Ein Abruf kann mit einem Dokument
+eines anderen Ziels zusammen ausgefuehrt werden; am Ende werden alle
+restlichen Auftraege abgearbeitet. Dokumentinhalte bleiben gestreamt,
+nicht im Arbeitsspeicher gesammelt. `--max-files` beruecksichtigt auch
+vorgemerkte Auftraege, damit die Grenze nicht durch Parallelitaet
+ueberschritten wird. Doppelte Datei-IDs werden bereits beim Vormerken
+erkannt.
+
+Das ist eine begrenzte Ueberlappung in Zweiergruppen, kein unbeschraenkter
+Hintergrunddownload: Fehlt ein unabhaengiger Auftrag, bleibt es bei einer
+Anfrage. Insbesondere wird der anfaengliche Drucksachen-Suchlauf auf
+einem einzigen Host dadurch nicht parallelisiert.
+
+Verwendet wird der vorhandene newos-Taskpool ohne libc oder pthreads.
+Der newos-I/O-Loop reicht hier noch nicht aus, weil die TLS-Schnittstelle
+blockiert. Deshalb werden hoechstens zwei abgeschlossene Netzwerkauftraege
+zusammengefuehrt, bevor der Koordinator Archivzaehler und Berichte aendert.
+Auch bei einem fatalen Fehler wird ein bereits gestarteter Partnerauftrag
+zu Ende abgewartet; erfolgreiche Dateien bleiben fuer die Wiederaufnahme
+erhalten. Nicht gestartete Auftraege werden dann verworfen.
+Gemeinsamer TLS-ClientHello-Speicher, Namensaufloesung und Diagnoseausgabe
+werden geschuetzt; TLS-Handshakes und HTTP-Empfang behalten getrennte
+Stackbereiche.
+
+Native Parallelitaet steht mit dem eingebundenen newos unter macOS/ARM64
+und Linux/x86-64 zur Verfuegung. Linux/ARM64 hat noch kein natives
+Worker-Backend. Unter Windows verwendet OParl-Scan ebenfalls die serielle
+Ausfuehrung, weil die eingebundene Windows-Dateideskriptortabelle noch nicht
+fuer parallele Socket-Zuweisung ausgelegt ist. In beiden Faellen wird bei
+einer sonst parallelen Zweiergruppe eine Warnung ausgegeben, statt unsichere
+Parallelitaet oder eine fremde Laufzeit zu verwenden.
+
+Unterschiedliche Hostnamen garantieren keine unabhaengige Infrastruktur.
+Auch kann die durchschnittliche Anfragerate steigen, weil zusaetzliche
+Ruhezeiten waehrend fremder Downloads entfallen. Die getrennten Limits
+begrenzen diese Last, machen sie aber nicht automatisch identisch mit
+einem vollstaendig nacheinander ausgefuehrten Download.
 
 Einzelne grosse Listenseiten koennen erheblich langsamer antworten als der
 System-Endpunkt. Bei einem Live-Test brauchte beispielsweise Drucksachenseite
@@ -448,6 +508,26 @@ Chunk-Kodierung ab. Sie pruefen Berichte, erneute Cachevalidierung
 und das Ablehnen abgebrochener oder nicht ausreichend eingerahmter
 Uebertragungen. Farbtests pruefen hervorgehobene Warnungen und Fehler,
 ungefaerbte Fortschrittsmeldungen und die Farbmodi fuer umgeleitete Ausgabe.
+
+Die Parallelitaetstests verwenden zwei unabhaengige lokale HTTP-Endpunkte.
+Sie messen echte Ueberlappung von Metadaten und Dokumenten, hoechstens
+zwei aktive Anfragen insgesamt, hoechstens eine je Ziel sowie die
+konfigurierte und die standardmaessige Pause. Weiterleitungen in beide
+Richtungen und eine andere URL am durch `Retry-After` pausierten Ziel
+werden ebenfalls geprueft. Hinzu kommen bytegleiche Archive im seriellen
+Modus, Queue-Grenzen, Downloadlimits, Fehlstellenberichte, gleichzeitige
+Fehler und Wiederaufnahme.
+
+Mit `OPARL_TEST_TLS_CERT` und `OPARL_TEST_TLS_KEY` laesst sich
+`node tests/concurrency.mjs /absoluter/pfad/zu/oparl-scan` zusaetzlich gegen
+zwei lokale HTTPS-Endpunkte ausfuehren. Die temporaere Testbescheinigung
+muss fuer `127.0.0.1` gelten; sie wird als CA-Buendel uebergeben.
+`OPARL_TEST_TLS12=1` beschraenkt den Dokument-Testserver auf TLS 1.2,
+waehrend der Metadaten-Testserver TLS 1.3 verwendet. Der TLS-1.2-Testserver
+erlaubt ausschliesslich fuer diese lokale Kompatibilitaetspruefung den
+aelteren ClientHello des eingebundenen newos. Die Zertifikatspruefung des
+Downloadprogramms bleibt unveraendert aktiv. Zertifikate und Testschluessel
+werden nicht mitgeliefert.
 
 Lokal unter macOS/ARM64 geprueft wurden native Ausfuehrung, lokale
 Testdaten, zertifikatsgepruefte Live-Downloads von API-Daten und PDFs
