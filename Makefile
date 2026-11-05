@@ -7,6 +7,8 @@ ARCH ?= $(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch64,x86_64)
 BUILD := build/$(TARGET)-$(ARCH)
 EXE := $(if $(filter windows,$(TARGET)),.exe,)
 PROGRAM := $(BUILD)/oparl-scan$(EXE)
+INDEX_PROGRAM := $(BUILD)/oparl-index$(EXE)
+SEARCH_PROGRAM := $(BUILD)/oparl-search$(EXE)
 
 ifeq ($(wildcard $(NEWOS)/Makefile),)
 $(error newos submodule is missing; run git submodule update --init --recursive)
@@ -16,6 +18,7 @@ RUNTIME := $(filter-out src/platform/%,$(shell sed -n 's/^MACOS_FREESTANDING_RUN
 CRYPTO := $(sort $(shell grep -oE '"src/shared/crypto/[^"]+\.c"' $(NEWOS)/src/compiler/source_manifest.h | tr -d '"'))
 TLS := $(sort $(shell grep -oE '"src/shared/tls/[^"]+\.c"' $(NEWOS)/src/compiler/source_manifest.h | tr -d '"'))
 COMMON := $(addprefix $(NEWOS)/,$(sort $(RUNTIME) $(CRYPTO) $(TLS) src/shared/hash_util.c))
+INDEX_COMMON := $(addprefix $(BUILD)/obj/$(NEWOS)/src/shared/,pdf.o pdf_writer.o compression/zlib.o compression/crc32.o)
 CPPFLAGS := -I$(NEWOS)/src/shared -Isrc -DNEWOS_HAVE_PTHREAD=0 \
 	-DNEWOS_RUNTIME_THREAD_SAFE_ALLOC=1 -DNEWOS_RUNTIME_ALLOC_LOCK=3
 CFLAGS := -std=c11 -Oz -Wall -Wextra -Wpedantic -ffreestanding -fno-builtin \
@@ -31,13 +34,17 @@ TRIPLE := arm64-apple-macos11
 SDKROOT ?= $(shell xcrun --sdk macosx --show-sdk-path)
 CPPFLAGS += -DNEWOS_MACOS_NEWLINKER -DNEWOS_CRYPTO_CURVE25519_FORCE_64BIT=1
 CFLAGS += -isysroot $(SDKROOT) -fno-common -fno-jump-tables -flto
+# Apple Silicon guarantees SHA-256 instructions; generic ARM64 targets do not.
+$(BUILD)/obj/$(NEWOS)/src/shared/crypto/sha256.o: CPPFLAGS += -DNEWOS_CRYPTO_SHA256_ENABLE_ARM_SHA=1
+$(BUILD)/obj/$(NEWOS)/src/shared/crypto/sha256.o: CFLAGS += -O3 -march=armv8-a+crypto
 PLATFORM := $(NEWOS)/src/platform/macos/freestanding.c $(NEWOS)/src/platform/macos/newlinker_runtime.c
 START := $(NEWOS)/src/platform/macos/newlinker_start.S
 NEWOS_HOST := $(if $(filter Darwin,$(HOST_OS)),macos,linux)-$(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch64,x86_64)
 LINKER := $(NEWOS)/build/host-$(NEWOS_HOST)/linker
 LINK_DEPS := $(LINKER)
 define link
-$(LINKER) --target=mach-o-arm64 --macho-compact --gc-sections --lto-cc="$(CC)" -o $@ $(1)
+$(LINKER) --target=mach-o-arm64 --macho-compact --gc-sections --lto-cc="$(CC)" -o $@.part $(1)
+mv -f $@.part $@
 endef
 else ifeq ($(TARGET),linux)
 TRIPLE := $(ARCH)-unknown-linux-elf
@@ -65,14 +72,23 @@ endif
 
 OBJECTS := $(addprefix $(BUILD)/obj/,$(addsuffix .o,$(basename $(COMMON) $(PLATFORM) $(START))))
 APP_OBJECTS := $(addprefix $(BUILD)/obj/,$(APP:.c=.o))
+INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o json.o pdf-text.o)
+SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-web.o json.o)
 
 .DEFAULT_GOAL := all
-.PHONY: all test check-deps
-all: $(PROGRAM)
+.PHONY: all test check-deps benchmark
+all: $(PROGRAM) $(INDEX_PROGRAM) $(SEARCH_PROGRAM)
 
 $(PROGRAM): $(APP_OBJECTS) $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(APP_OBJECTS) $(OBJECTS))
 
+$(INDEX_PROGRAM): $(INDEX_OBJECTS) $(INDEX_COMMON) $(OBJECTS) $(LINK_DEPS)
+	$(call link,$(INDEX_OBJECTS) $(INDEX_COMMON) $(OBJECTS))
+
+$(SEARCH_PROGRAM): $(SEARCH_OBJECTS) $(OBJECTS) $(LINK_DEPS)
+	$(call link,$(SEARCH_OBJECTS) $(OBJECTS))
+
+$(BUILD)/obj/src/search.o $(BUILD)/obj/src/oparl-index.o $(BUILD)/obj/src/oparl-search.o $(BUILD)/obj/src/search-web.o $(BUILD)/obj/src/pdf-text.o: CFLAGS += -O3
 $(BUILD)/test-json$(EXE): $(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS))
 
@@ -91,12 +107,18 @@ $(BUILD)/imports/lib%.a: $(NEWOS)/src/platform/windows/imports/%.def
 	@mkdir -p $(dir $@)
 	llvm-dlltool -m $(if $(filter aarch64,$(ARCH)),arm64,i386:x86-64) -d $< -l $@
 
-test: $(PROGRAM) $(BUILD)/test-json$(EXE) check-deps
+test: all $(BUILD)/test-json$(EXE) check-deps
 	$(BUILD)/test-json$(EXE)
 	node tests/integration.mjs "$(abspath $(PROGRAM))"
 	node tests/concurrency.mjs "$(abspath $(PROGRAM))"
+	node tests/search.mjs "$(abspath $(INDEX_PROGRAM))" "$(abspath $(SEARCH_PROGRAM))"
 
-check-deps: $(PROGRAM)
+check-deps: all
 	node tests/check-deps.mjs "$(abspath $(PROGRAM))"
+	node tests/check-deps.mjs "$(abspath $(INDEX_PROGRAM))"
+	node tests/check-deps.mjs "$(abspath $(SEARCH_PROGRAM))"
 
--include $(OBJECTS:.o=.d) $(APP_OBJECTS:.o=.d) $(BUILD)/obj/tests/test-json.d
+benchmark: all
+	node tests/benchmark-search.mjs "$(abspath $(SEARCH_PROGRAM))" build/search/index.ops
+
+-include $(OBJECTS:.o=.d) $(APP_OBJECTS:.o=.d) $(INDEX_OBJECTS:.o=.d) $(SEARCH_OBJECTS:.o=.d) $(INDEX_COMMON:.o=.d) $(BUILD)/obj/tests/test-json.d
