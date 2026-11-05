@@ -1,290 +1,361 @@
 # OParl-Scan
 
-OParl-Scan aims to make public council information easier to archive and
-analyze through OParl APIs across municipalities. Potsdam is the first
-supported endpoint and the initial focus for data analysis:
+OParl-Scan soll oeffentliche Ratsinformationen ueber OParl-Schnittstellen
+kommunenuebergreifend archivieren und fuer Auswertungen erschliessen.
+Potsdam ist der erste unterstuetzte Endpunkt und der Ausgangspunkt der
+Datenanalyse:
 
 <https://www.potsdam.sitzung-online.de/oparl/system>
 
-The current tool is a freestanding C downloader. It archives the system,
-every published body, and all their organization,
-person, meeting, membership, location, legislative-term, agenda-item, paper,
-consultation, and file collections. Document binaries can be disabled.
-Both bodies are discovered from the API, not hardcoded.
+Das aktuelle Werkzeug ist ein freistehendes C-Downloadprogramm. Es archiviert
+das System, alle veroeffentlichten Koerperschaften und deren Sammlungen von
+Organisationen, Personen, Sitzungen, Mitgliedschaften, Orten, Wahlperioden,
+Tagesordnungspunkten, Drucksachen, Beratungen und Dateien. Der Download der
+eigentlichen Dokumentdateien kann abgeschaltet werden. Die beiden
+Koerperschaften werden aus der API ermittelt, nicht fest im Code vorgegeben.
 
-The production host/path allowlist and reference-year convention currently
-target Potsdam. Other endpoints need explicit support; setting `--system`
-alone does not enable arbitrary production hosts. The project name describes
-the broader goal, not a claim that every OParl implementation is supported.
+Die erlaubten Produktionshosts und URL-Pfade sowie die Jahrgangsauswahl sind
+derzeit auf Potsdam abgestimmt. Weitere Endpunkte brauchen ausdrueckliche
+Unterstuetzung; allein eine andere Angabe fuer `--system` schaltet keine
+beliebigen Hosts frei. Der Projektname beschreibt das allgemeinere Ziel,
+nicht die bereits vollstaendige Unterstuetzung aller OParl-Implementierungen.
 
-## Dependencies and build
+## Abhaengigkeiten und Kompilieren
 
-The executable uses **no standard C library, CRT, libcurl, OpenSSL, external
-JSON library, subprocesses, or shell commands**. It uses newos's shared runtime,
-buffers, Unicode handling, SHA-256, JSON output, TLS and X.509 implementation,
-and its operating-system backends. `src/json.c` supplies the reading side:
-newos's `src/shared/tool_json.c` writes JSON but does not parse it.
+Das ausfuehrbare Programm verwendet **keine Standard-C-Bibliothek, CRT,
+libcurl, OpenSSL, externe JSON-Bibliothek, Unterprozesse oder Shellbefehle**.
+Es nutzt die gemeinsame Laufzeit, Puffer, Unicode-Verarbeitung, SHA-256,
+JSON-Ausgabe, TLS- und X.509-Implementierung sowie die Betriebssystem-Backends
+von newos. [src/json.c](src/json.c) ergaenzt den lesenden JSON-Parser:
+newos' `src/shared/tool_json.c` schreibt JSON, liest es aber nicht.
 
-`vendor/newos` is a pinned Git submodule of the public
-[newos repository](https://github.com/mathiasschindler/newos), under CC0.
-Its sources are fetched separately, not copied into OParl-Scan's Git history.
-The submodule records the exact revision used by the build.
+`vendor/newos` ist ein auf eine bestimmte Revision festgelegtes Git-Submodul
+des oeffentlichen [newos-Repositories](https://github.com/mathiasschindler/newos)
+unter CC0. Der Quellcode wird separat bezogen und nicht in die Git-Historie von
+OParl-Scan kopiert. Das Submodul legt die genaue Revision fuer den Build fest.
 
-Clone the project with its dependency:
+Projekt einschliesslich Abhaengigkeit klonen:
 
 ```sh
 git clone --recurse-submodules https://github.com/MathiasSchindler/oparl-scan.git
 cd oparl-scan
 ```
 
-For an existing clone without submodules, run:
+Bei einem vorhandenen Klon ohne initialisierte Submodule:
 
 ```sh
 git submodule update --init --recursive
 ```
 
-Build-time tools are Clang/LLVM, GNU make, and a POSIX build shell with grep,
-sed and mkdir. macOS additionally needs the Apple command-line tools/SDK.
-Windows builds need LLVM's lld and llvm-dlltool; Git Bash or MSYS2 can provide
-the build shell. None of those build tools is required to run the executable.
+Zum Kompilieren werden Clang/LLVM, GNU make und eine POSIX-Shell mit grep,
+sed und mkdir benoetigt. Unter macOS kommen Apples Kommandozeilenwerkzeuge
+und SDK hinzu. Windows-Builds brauchen LLVMs lld und llvm-dlltool; Git Bash
+oder MSYS2 koennen die Build-Shell bereitstellen. Zur Ausfuehrung des
+fertigen Programms sind diese Build-Werkzeuge nicht erforderlich.
 
 ```sh
-make -j4                                    # native macOS/ARM64 or Linux
+make -j4                                    # nativ unter macOS/ARM64 oder Linux
 make -j4 TARGET=linux ARCH=x86_64
 make -j4 TARGET=linux ARCH=aarch64
 make -j4 TARGET=windows ARCH=x86_64
 make -j4 TARGET=windows ARCH=aarch64
 ```
 
-Output: `build/<target>-<arch>/oparl-scan`, with `.exe` on Windows.
-The pinned newos no-import macOS backend supports Apple Silicon.
-The macOS build bootstraps newos's linker as a hosted build-time tool; the
-resulting downloader uses newos's startup and Mach-O linker, with no dylib
-imports. Linux produces static ELF files without a dynamic loader. Windows
-imports only the native KERNEL32, WS2_32, and BCRYPT operating-system DLLs,
-not the Microsoft CRT.
+Die Ausgabe liegt unter `build/<target>-<arch>/oparl-scan`, unter Windows
+mit der Endung `.exe`. Das verwendete macOS-Backend ohne Bibliotheksimporte
+unterstuetzt Apple Silicon. Der macOS-Build erstellt zunaechst den newos-Linker
+als Build-Werkzeug mit Host-Laufzeit. Das fertige Downloadprogramm verwendet
+dagegen newos' Programmstart und Mach-O-Linker ohne dylib-Importe.
+Linux-Builds sind statische ELF-Dateien ohne dynamischen Loader. Windows
+importiert nur die Betriebssystem-DLLs KERNEL32, WS2_32 und BCRYPT,
+nicht die Microsoft-CRT.
 
-Build products in `build/` and local captures in `downloads/` are excluded
-from Git. The repository contains code, not downloaded council data.
+Build-Ergebnisse in `build/` und lokale Downloads in `downloads/` sind von
+Git ausgeschlossen. Das Repository enthaelt Programmcode, nicht die
+heruntergeladenen Ratsinformationen.
 
-## Usage
+## Verwendung
 
 ```sh
-# Full archive: metadata of both bodies and all public document files.
+# Vollstaendiges Archiv: Metadaten beider Koerperschaften und Dokumentdateien.
 build/macos-aarch64/oparl-scan --output downloads
 
-# Metadata only.
+# Nur Metadaten.
 build/macos-aarch64/oparl-scan --output downloads --metadata-only
 
-# Proceedings originating in 2025, including later consultations and documents.
+# Vorgaenge des Jahrgangs 2025, einschliesslich spaeterer Beratungen und Dateien.
 build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025
 
-# Keep downloading public files when individual documents deny access.
+# Bei Zugriffsverweigerungen einzelner Dokumente mit den anderen fortfahren.
 build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
   --skip-unavailable-files
 
-# Also accept and record complete transfers with incorrect OParl size metadata.
+# Zusaetzlich vollstaendige Downloads mit falscher OParl-Groesse akzeptieren.
 build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
   --skip-unavailable-files --accept-size-mismatch
 
-# Small live smoke test, deliberately incomplete (exit status 2).
+# Kleiner Live-Test, absichtlich unvollstaendig: Exitcode 2.
 build/macos-aarch64/oparl-scan --output build/live-smoke \
   --page-size 2 --max-pages 1 --max-files 1
 ```
 
-On Linux or Windows, substitute the corresponding executable path.
-Use forward slashes in paths on every platform. Output directory parents must
-not be symbolic links, following newos's directory-creation policy.
+Unter Linux und Windows den passenden Programmpfad einsetzen.
+Auf allen Plattformen Schraegstriche `/` in Pfaden verwenden.
+Uebergeordnete Verzeichnisse des Ausgabeordners duerfen entsprechend der
+newos-Richtlinie zur Verzeichniserstellung keine symbolischen Links sein.
 
-The default is one sequential request at a time, with a 500 ms pause before
-each request and up to three attempts for transient failures. Numeric
-`Retry-After` values up to 300 seconds are respected; other values stop with
-an explicit error. HTTP redirects are restricted to the public API and
-`egov.potsdam.de/public/`. No credentials or non-public areas are used.
+Standardmaessig erfolgt immer nur eine Anfrage gleichzeitig, mit 500 ms Pause
+vor jeder Anfrage und bis zu drei Versuchen bei voruebergehenden Fehlern.
+Numerische `Retry-After`-Werte bis 300 Sekunden werden beruecksichtigt;
+andere Werte fuehren zu einer ausdruecklichen Fehlermeldung. Weiterleitungen
+sind auf die oeffentliche API und `egov.potsdam.de/public/` beschraenkt.
+Zugangsdaten oder nichtoeffentliche Bereiche werden nicht verwendet.
 
-### Selecting a reference year
+### Farben und Diagnosemeldungen
 
-`--year 2025` means references starting with **`25/`**, including `25/SVV/...`,
-`25/OBR/...` and suffixes such as `25/SVV/0403-001`. It does **not** filter the
-Paper's `date`, meeting dates, or document timestamps. For example, the real
-`25/SVV/1216` currently has a Paper date in March 2026 and is still included.
-Supported reference years are 2000 through 2099.
+Warnungen erhalten ein fettgelbes Praefix, Fehler ein fettrotes Praefix.
+Ein unvollstaendiger Abschluss wird ebenfalls fettgelb hervorgehoben.
+Normale Fortschrittsmeldungen wie `metadata:` und `document:` bleiben
+ungefaerbt. Die englischen Meldungstexte, Optionsnamen und JSON-Feldnamen
+bleiben unveraendert.
 
-The program first scans the complete Paper lists of both bodies. No verified
-server-side reference filter is available: the tested `paperNumber` parameter
-is ignored by this API. This metadata-only discovery scan is necessary to avoid
-missing late-created, renumbered, or out-of-order records. Its unfiltered raw
-responses are stored separately under `index/`.
+Die Farben verwenden ausschliesslich die vorhandenen newos-Helfer:
 
-Matching Papers are retrieved individually. Their main files, attachments,
-parent/child and related Papers, consultations, specific agenda items,
-resolution files, and linked meetings are followed recursively, with identity
-deduplication to stop cycles. This includes linked proceedings and documents
-from later years. The API's nonstandard lowercase `agendaitem` field is
-supported alongside `agendaItem`.
+- `--color auto`: Standard; Farben bei Terminalausgabe auf stderr,
+  normalerweise keine ANSI-Codes in umgeleiteten Logs.
+- `--color always`: Farben bewusst auch bei Umleitung erzwingen.
+- `--color never`: Farben immer abschalten, auch bei geerbten
+  Umgebungsvariablen zur Farberzwingung.
 
-Potsdam Organization objects also use nonstandard `"Type"` for the OParl
-class URI while `"type"` contains `"at"` or `"gr"`. These exact combinations
-are recognized as Organizations during validation and traversal. The archived
-JSON is kept unchanged; missing/invalid class URIs and mismatched resource
-IDs still fail explicitly.
+Im automatischen Modus werden die newos-Konventionen fuer `NO_COLOR`,
+`CLICOLOR`, `CLICOLOR_FORCE` und `TERM=dumb` beruecksichtigt.
+`CLICOLOR_FORCE` kann Farben auch bei Umleitung erzwingen und hat dabei
+Vorrang vor `NO_COLOR`; `--color never` verhindert dies zuverlaessig.
+Textpraefixe wie `warning:` und `error:` bleiben auch ohne Farben sichtbar.
+Archivdateien und JSON-Berichte erhalten keine Farbcodes.
 
-For linked meetings, the archive includes invitations, protocols, attachments,
-and organizational/location context. The raw Meeting JSON can contain the
-whole agenda, and meeting-wide PDFs can cover other proceedings. However,
-unrelated agenda items are not recursively expanded or downloaded individually:
-otherwise one selected proceeding would eventually pull in the entire RIS.
-Organization and person records provide context without expanding reverse
-membership and collection links.
-
-`selection.jsonl` lists the matching seed Paper IDs and references; linked
-follow-up Papers may have other reference years. `archive.json` records
-`referenceYear`, `scannedPapers`, `selectedPapers`, and `processedResources`,
-and is updated during the run. `selectedPapers` counts roots, not all linked
-context objects. Each year/system must use a separate output directory;
-attempting to mix them is rejected without replacing the existing identity.
-
-### TLS and trust
-
-HTTPS uses newos's shared TLS 1.3 implementation, with a TLS 1.2 fallback
-for the document server. Certificate chain, hostname, and validity checks
-are performed explicitly through shared X.509 code on **every platform**.
-There is no insecure/skip-verification option.
-
-The trust bundle is read from `--ca-file FILE`, then `SSL_CERT_FILE`, or the
-first available standard Unix PEM bundle. Windows needs a PEM bundle supplied
-via the option or environment variable; the Windows certificate store is not
-used. A CA bundle is trust data, not a linked library.
-
-`--timeout-ms` defaults to 30000 and bounds TLS operations and response reads,
-not the total runtime. DNS resolution and TCP connection establishment use
-newos's blocking platform API and are not covered by this timeout.
-HTTP without TLS is allowed only for an explicitly selected `127.0.0.1`
-test system.
-
-### Archive and resuming
-
+```sh
+# Garantiert farbcodefreies Protokoll.
+build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
+  --color never 2>downloads/2025.log
 ```
+
+### Auswahl eines Drucksachenjahrgangs
+
+`--year 2025` waehlt Kennzeichen mit dem Praefix **`25/`**, darunter
+`25/SVV/...`, `25/OBR/...` und Ergaenzungen wie `25/SVV/0403-001`.
+Die Auswahl richtet sich **nicht** nach dem Feld `date` der Drucksache,
+nach Sitzungsterminen oder Dateizeitstempeln. Beispielsweise hat die echte
+Drucksache `25/SVV/1216` ein Datum im Maerz 2026 und wird trotzdem erfasst.
+Unterstuetzt werden die Jahrgaenge 2000 bis 2099.
+
+Zunaechst liest das Programm die vollstaendigen Drucksachenlisten beider
+Koerperschaften. Ein verlaesslicher serverseitiger Kennzeichenfilter ist
+nicht bekannt: Der getestete Parameter `paperNumber` wird von dieser API
+ignoriert. Dieser reine Metadaten-Suchlauf verhindert, dass spaet angelegte,
+umnummerierte oder ausserhalb der Reihenfolge stehende Vorgaenge fehlen.
+Die ungefilterten Originalantworten liegen getrennt unter `index/`.
+
+Passende Drucksachen werden einzeln abgerufen. Hauptdateien, Anlagen,
+uebergeordnete, untergeordnete und verwandte Drucksachen, Beratungen,
+zugehoerige Tagesordnungspunkte, Beschlussdateien und Sitzungen werden
+rekursiv verfolgt. Eine Deduplizierung anhand der Identitaeten verhindert
+Zyklen. Auch verknuepfte Vorgaenge und Unterlagen spaeterer Jahre sind
+enthalten. Neben `agendaItem` wird das nichtstandardisierte Potsdamer Feld
+`agendaitem` unterstuetzt.
+
+Bei Potsdamer Organisationsobjekten steht die OParl-Klassen-URI teilweise
+abweichend vom Standard in `"Type"`, waehrend `"type"` den Wert `"at"` oder
+`"gr"` enthaelt. Genau diese Kombinationen werden bei Validierung und
+Verarbeitung als Organisationen erkannt. Das archivierte JSON bleibt
+unveraendert; fehlende oder ungueltige Klassen-URIs und abweichende
+Ressourcen-IDs fuehren weiterhin zu Fehlern.
+
+Zu verknuepften Sitzungen werden Einladungen, Protokolle, Anlagen und
+Organisations- beziehungsweise Ortsinformationen erfasst. Das originale
+Meeting-JSON kann die gesamte Tagesordnung enthalten; sitzungsweite PDFs
+koennen weitere Vorgaenge behandeln. Unbeteiligte Tagesordnungspunkte werden
+jedoch nicht rekursiv expandiert oder einzeln heruntergeladen, weil sonst
+ein einzelner Vorgang schliesslich das gesamte RIS nachziehen wuerde.
+Organisations- und Personendatensaetze liefern Kontext, ohne rueckwaertige
+Mitgliedschafts- oder Sammlungsverknuepfungen weiter zu verfolgen.
+
+`selection.jsonl` verzeichnet IDs und Kennzeichen der ausgewaehlten
+Ausgangsdrucksachen. Verknuepfte Folgedrucksachen koennen andere Jahrgaenge
+haben. `archive.json` enthaelt unter anderem `referenceYear`,
+`scannedPapers`, `selectedPapers` und `processedResources` und wird waehrend
+des Laufs aktualisiert. `selectedPapers` zaehlt nur die Ausgangsdrucksachen,
+nicht alle Kontextobjekte. Fuer jeden Jahrgang und jedes System ist ein
+eigenes Ausgabeverzeichnis noetig. Eine Vermischung wird abgelehnt, ohne die
+vorhandene Archividentitaet zu ersetzen.
+
+### TLS und Zertifikatspruefung
+
+HTTPS nutzt newos' gemeinsame TLS-1.3-Implementierung mit einem Rueckfall
+auf TLS 1.2 fuer den Dokumentserver. Zertifikatskette, Hostname und
+Gueltigkeit werden auf **jeder Plattform** ausdruecklich mit dem gemeinsamen
+X.509-Code geprueft. Eine Option zum Abschalten dieser Pruefung gibt es nicht.
+
+Das PEM-Buendel vertrauenswuerdiger Zertifikate wird ueber `--ca-file FILE`,
+danach `SSL_CERT_FILE` oder den ersten verfuegbaren Standardpfad unter Unix
+bestimmt. Unter Windows muss das Buendel per Option oder Umgebungsvariable
+bereitgestellt werden; der Windows-Zertifikatsspeicher wird nicht verwendet.
+Ein CA-Buendel ist Vertrauensmaterial, keine eingebundene Bibliothek.
+
+`--timeout-ms` betraegt standardmaessig 30000 und begrenzt TLS-Operationen
+und das Lesen von Antworten, nicht die Gesamtlaufzeit. DNS-Aufloesung und
+TCP-Verbindungsaufbau verwenden newos' blockierende Plattform-API und
+werden davon nicht begrenzt. HTTP ohne TLS ist nur fuer ein ausdruecklich
+gewaehltes Testsystem auf `127.0.0.1` erlaubt.
+
+### Archivstruktur und Wiederaufnahme
+
+```text
 downloads/
   archive.json
-  selection.jsonl                         # reference-year mode only
-  index/<sha256-request-url>.json          # unfiltered discovery pages, year mode only
-  metadata/<sha256-request-url>.json
-  documents/<sha256-oparl-file-id>-<sanitized-original-filename>
+  selection.jsonl                         # nur bei Jahrgangsauswahl
+  index/<sha256-anfrage-url>.json          # ungefilterte Suchlaufseiten
+  metadata/<sha256-anfrage-url>.json
+  documents/<sha256-oparl-datei-id>-<bereinigter-originalname>
 ```
 
-Metadata pages retain the original UTF-8 JSON, including relationships,
-pagination links, file IDs, original filenames, download URLs, and timestamps.
-Hashes are lowercase hex SHA-256 of the UTF-8 URL/ID string, not of file bytes.
-Filenames are restricted to ASCII letters, numbers, `.`, `_` and `-`, and
-the original-name suffix is limited to 100 bytes. IDs prevent collisions
-between documents with the same filename. `archive.json` identifies the system
-and records completion status and per-run counters.
+Die Metadatenseiten behalten das originale UTF-8-JSON mit Beziehungen,
+Seitennavigation, Datei-IDs, Originalnamen, Download-URLs und Zeitstempeln.
+Die Hashes sind kleingeschriebene hexadezimale SHA-256-Werte der
+UTF-8-URL beziehungsweise -ID, keine Hashes des Dateiinhalts.
+Dateinamen werden auf ASCII-Buchstaben, Ziffern, `.`, `_` und `-`
+beschraenkt; der Originalnamenanteil ist auf 100 Bytes begrenzt.
+IDs verhindern Kollisionen bei gleichen Dateinamen. `archive.json`
+identifiziert das System und speichert Abschlussstatus und Zaehler pro Lauf.
 
-Downloads are streamed to `.part` files and renamed only after completion.
-Metadata is validated before publication, and supplied OParl document sizes
-are checked. The same File ID is downloaded only once per run, even if it
-appears inline in several collections.
+Downloads werden in `.part`-Dateien gestreamt und erst nach erfolgreichem
+Abschluss umbenannt. Metadaten werden vor der Veroeffentlichung validiert;
+von OParl angegebene Dokumentgroessen werden geprueft. Dieselbe Datei-ID
+wird pro Lauf nur einmal heruntergeladen, auch wenn sie in mehreren
+Sammlungen eingebettet vorkommt.
 
-Run the same command again to resume. Valid cached metadata is read locally;
-existing documents are checked against their declared size and skipped.
-Incomplete `.part` files are restarted, not resumed byte by byte.
-Cache reuse is for resuming an archive, **not an incremental synchronization**:
-it does not recheck remote modifications or detect same-size local corruption.
-Use `--refresh` to replace cached metadata and documents, or use a new output
-directory for another capture. Old files are not automatically deleted.
-Do not run two processes against the same output directory.
+Zur Wiederaufnahme denselben Befehl erneut ausfuehren. Gueltige
+zwischengespeicherte Metadaten werden lokal gelesen. Vorhandene Dokumente
+werden anhand ihrer angegebenen Groesse geprueft und uebersprungen.
+Unvollstaendige `.part`-Dateien werden neu begonnen, nicht byteweise
+fortgesetzt. Der Cache dient der Wiederaufnahme, **nicht einer
+inkrementellen Synchronisierung**: Aenderungen am Server und lokale
+Beschaedigungen bei unveraenderter Dateigroesse werden nicht erkannt.
+`--refresh` ersetzt Metadaten und Dokumente; alternativ fuer eine neue
+Erfassung ein neues Verzeichnis verwenden. Alte Dateien werden nicht
+automatisch geloescht. Nie zwei Prozesse gleichzeitig dasselbe
+Ausgabeverzeichnis verwenden lassen.
 
-Local cache replay remains single-threaded. Progress summaries are published
-at most twice per second during traversal, rather than rewriting the status
-file for every cached resource. The initial incomplete status and final status
-are always written immediately. Counters may briefly lag during a run;
-resuming relies on the cached files, not on the last progress counter.
+Der lokale Cache-Abgleich bleibt einstrangig. Fortschrittsstaende werden
+hoechstens zweimal pro Sekunde geschrieben, nicht nach jeder gecachten
+Ressource. Der anfaengliche unvollstaendige Status und der Abschlussstatus
+werden immer sofort geschrieben. Laufende Zaehler koennen kurz nachlaufen;
+die Wiederaufnahme stuetzt sich auf die Dateien, nicht auf den letzten
+gespeicherten Zaehlerstand.
 
-A local macOS/ARM64 cache-only comparison, scanning 31,183 Paper records and
-replaying 1,833 seed Papers with 1,832 cached documents, improved from about
-3.10 seconds to 0.86 seconds on warm runs. This isolates initial Paper replay,
-not the complete linked-resource graph or network downloads. No worker threads
-or additional network concurrency were needed.
+Ein lokaler macOS/ARM64-Vergleich mit 31.183 gesichteten Drucksachen,
+1.833 Ausgangsdrucksachen und 1.832 gecachten Dokumenten verbesserte sich
+bei warmem Cache von etwa 3,10 auf 0,86 Sekunden. Gemessen wurde isoliert
+der anfaengliche Drucksachenabgleich, nicht der gesamte verknuepfte Graph
+oder Netzwerkdownloads. Dafuer waren weder zusaetzliche Threads noch
+parallele Netzwerkanfragen noetig.
 
-`--max-pages N` limits pages **per collection**, including the bodies list.
-`--max-files N` limits **new document downloads per invocation**; cached
-documents do not consume this budget. Remove limits to finish the archive.
+`--max-pages N` begrenzt Seiten **pro Sammlung**, einschliesslich der
+Koerperschaftsliste. `--max-files N` begrenzt **neu heruntergeladene
+Dokumente pro Aufruf**; gecachte Dokumente verbrauchen dieses Budget
+nicht. Fuer eine vollstaendige Erfassung die Grenzen entfernen.
 
-### Documents that deny access
+### Dokumente mit verweigertem Zugriff
 
-Some publicly listed Potsdam documents redirect to `./noauth`. This is not
-a document download, and the program never follows that authentication route.
-By default it stops with an explicit error.
+Einige oeffentlich gelistete Potsdamer Dokumente leiten auf `./noauth`
+weiter. Das ist kein Dokumentdownload; dieser Authentifizierungsroute
+wird niemals gefolgt. Standardmaessig bricht das Programm mit einer
+ausdruecklichen Fehlermeldung ab.
 
-With `--skip-unavailable-files`, document responses with that exact redirect
-or HTTP 401/403 are instead recorded in `unavailable-files.jsonl`, and the
-remaining downloads continue. Each line contains the File's `id`, requested
-`url`, original `fileName`, and `reason: "access-denied"`. No placeholder or
-authentication page is saved as a document. Duplicate File IDs are tried and
-reported once per invocation. Other failures, including metadata access
-denials, HTTP 404, disallowed redirects, TLS failures, and malformed responses,
-still stop the run.
+Mit `--skip-unavailable-files` werden Dokumentantworten mit genau dieser
+Weiterleitung oder HTTP 401/403 stattdessen in `unavailable-files.jsonl`
+verzeichnet. Die uebrigen Downloads laufen weiter. Jede Zeile enthaelt
+`id`, angefragte `url`, urspruenglichen `fileName` und
+`reason: "access-denied"`. Es werden weder Platzhalter noch
+Anmeldeseiten als Dokument gespeichert. Doppelte Datei-IDs werden pro
+Aufruf nur einmal versucht und protokolliert. Andere Fehler, darunter
+Zugriffsverweigerungen fuer Metadaten, HTTP 404, unerlaubte
+Weiterleitungen, TLS-Fehler und fehlerhafte Antworten, fuehren weiterhin
+zum Abbruch.
 
-`archive.json` records `skipUnavailableFiles` and `unavailableDocuments`.
-Any recorded missing documents keep `complete: false`, even when traversal
-finishes. Reports are recreated per invocation; missing files are retried on
-resume, while successfully downloaded files are reused normally. If all
-previously denied files become available, the next report is empty and the
-archive can become complete without `--refresh`.
+`archive.json` enthaelt `skipUnavailableFiles` und `unavailableDocuments`.
+Bei fehlenden Dokumenten bleibt `complete: false`, auch wenn der
+Suchlauf beendet ist. Der Bericht wird bei jedem Aufruf neu erstellt;
+fehlende Dateien werden erneut versucht, erfolgreiche Downloads normal
+wiederverwendet. Werden alle zuvor gesperrten Dateien verfuegbar,
+ist der naechste Bericht leer und das Archiv kann ohne `--refresh`
+vollstaendig werden.
 
-The report is written to `unavailable-files.jsonl.part` while running and
-published by rename when traversal finishes without a fatal error. After an
-interruption or fatal error, that partial report remains; a previous published
-report, if present, still describes the previous finished traversal.
+Waehrend des Laufs entsteht `unavailable-files.jsonl.part`. Nach einem
+Durchlauf ohne fatalen Fehler wird sie umbenannt. Bei Unterbrechung oder
+fatalem Fehler bleibt der Teilbericht erhalten. Ein eventuell noch
+vorhandener veroeffentlichter Bericht beschreibt dann weiterhin den
+vorherigen abgeschlossenen Durchlauf.
 
-### Incorrect OParl file sizes
+### Falsche OParl-Dateigroessen
 
-The default size check remains strict. Some Potsdam entries announce the wrong
-size even in freshly fetched metadata: File `2912324`, for example, announces
-83,930 bytes but the document server supplies an 83,944-byte PDF.
+Die Groessenpruefung bleibt standardmaessig streng. Manche Potsdamer
+Eintraege geben selbst in frisch abgerufenen Metadaten eine falsche
+Groesse an: Datei `2912324` nennt beispielsweise 83.930 Bytes,
+der Dokumentserver liefert aber eine PDF mit 83.944 Bytes.
 
-`--accept-size-mismatch` explicitly treats the OParl size as advisory when
-HTTP transfer completeness is independently verified by `Content-Length` or
-valid chunked framing. Truncated transfers still fail. A mismatched response
-without either framing mechanism is not accepted. A fully transferred size
-mismatch is not retried as a transient network failure.
+Mit `--accept-size-mismatch` wird die OParl-Groesse ausdruecklich als
+unverbindlich behandelt, wenn die vollstaendige HTTP-Uebertragung durch
+`Content-Length` oder gueltige Chunk-Kodierung unabhaengig bestaetigt
+ist. Abgebrochene Uebertragungen bleiben Fehler. Eine abweichende Antwort
+ohne eine dieser beiden Rahmeninformationen wird nicht akzeptiert.
+Eine vollstaendig uebertragene Groessenabweichung wird nicht wie ein
+voruebergehender Netzwerkfehler erneut versucht.
 
-Accepted files are saved normally and listed in `size-mismatches.jsonl`
-with `id`, `url`, `fileName`, `expectedSize`, and `actualSize`. Original OParl
-JSON is not altered. `archive.json` records `acceptSizeMismatch` and
-`sizeMismatchedDocuments`. Accepted discrepancies are not missing files, so
-they do not prevent completion under this explicitly selected policy; access
-denials and configured limits still do.
+Akzeptierte Dateien werden normal gespeichert und in
+`size-mismatches.jsonl` mit `id`, `url`, `fileName`, `expectedSize`
+und `actualSize` verzeichnet. Das originale OParl-JSON wird nicht
+veraendert. `archive.json` enthaelt `acceptSizeMismatch` und
+`sizeMismatchedDocuments`. Akzeptierte Abweichungen sind keine fehlenden
+Dateien und verhindern daher unter dieser ausdruecklich gewaehlten
+Pruefregel keinen vollstaendigen Abschluss. Zugriffsfehlstellen und
+konfigurierte Grenzen tun dies weiterhin.
 
-A cached file whose size disagrees with OParl is fetched again in this mode,
-even if a previous run accepted it. This avoids trusting a potentially
-corrupted local file solely because size checks were relaxed. Other valid
-cached files are reused, and no global `--refresh` is needed. The discrepancy
-report is recreated each run, using the same `.part`/publish lifecycle as
-the unavailable-file report.
+Eine Cachedatei mit abweichender Groesse wird in diesem Modus erneut
+heruntergeladen, auch wenn ein frueherer Lauf sie bereits akzeptiert
+hat. So wird eine moeglicherweise beschaedigte lokale Datei nicht
+allein wegen der gelockerten Groessenpruefung als gueltig behandelt.
+Andere gueltige Cachedateien werden wiederverwendet; ein globales
+`--refresh` ist nicht noetig. Der Abweichungsbericht wird bei jedem
+Lauf neu erstellt und folgt demselben `.part`-/Umbenennungsverfahren
+wie der Bericht ueber nicht verfuegbare Dateien.
 
-Exit codes:
+### Exitcodes und Grenzen
 
-- `0`: all discovered collections processed, within the selected mode.
-- `1`: explicit network, TLS, JSON, pagination, filesystem, or document error.
-- `2`: intentionally incomplete because of configured limits.
-- `3`: traversal finished, but document access denials left files missing.
-  This takes precedence over exit code `2`; fatal errors still return `1`.
+- `0`: Alle ermittelten Sammlungen wurden im gewaehlten Modus verarbeitet.
+- `1`: Netzwerk-, TLS-, JSON-, Seitennavigations-, Dateisystem- oder
+  Dokumentfehler.
+- `2`: Wegen konfigurierter Grenzen absichtlich unvollstaendig.
+- `3`: Durchlauf beendet, aber wegen Zugriffsverweigerungen fehlen
+  Dokumente. Dies hat Vorrang vor Exitcode `2`; fatale Fehler liefern
+  weiterhin `1`.
 
-In metadata-only mode, completion means metadata completion, not document
-completion; this distinction is recorded in `archive.json`.
-An interrupted run leaves `complete: false`. OParl is a live API, so an archive
-is not an atomic point-in-time database snapshot.
+Im Modus `--metadata-only` bedeutet Vollstaendigkeit nur vollstaendige
+Metadaten, nicht vollstaendige Dokumentdownloads. Dies wird in
+`archive.json` festgehalten. Ein unterbrochener Lauf hinterlaesst
+`complete: false`. OParl ist eine laufend veraenderliche API; ein Archiv
+ist daher kein atomarer Datenbankschnappschuss zu einem einzigen Zeitpunkt.
 
-Limits are 32 MiB per metadata page, 4 GiB per document, and JSON nesting
-depth 64. Errors stop the run except for explicitly opted-in document access
-denials described above; HTTP failures and invalid input are never replaced
-with empty successful responses.
+Die Grenzen betragen 32 MiB pro Metadatenantwort, 4 GiB pro Dokument
+und 64 Verschachtelungsebenen fuer JSON. Fehler beenden den Lauf,
+abgesehen von den oben beschriebenen, ausdruecklich aktivierten
+Ausnahmen. HTTP-Fehler und ungueltige Eingaben werden niemals durch
+leere, scheinbar erfolgreiche Antworten ersetzt.
 
-## Tests and verification
+## Tests und Verifikation
 
-Node.js is needed only for tests and executable dependency inspection:
+Node.js wird nur fuer Tests und die Pruefung der Laufzeitabhaengigkeiten
+benoetigt:
 
 ```sh
 make test
@@ -293,24 +364,32 @@ make TARGET=linux ARCH=x86_64 check-deps
 make TARGET=windows ARCH=aarch64 check-deps
 ```
 
-Parser tests run as a freestanding newos executable. The integration tests
-use a temporary local fixture server, with pagination, both bodies, all
-collection types, inline duplicate documents, chunked HTTP, redirects,
-resuming, metadata-only mode, refresh, explicit limits, malformed responses,
-truncation, retries, reference-year selection, later linked proceedings and
-documents, graph deduplication, legacy Organization types and cache reuse,
-archive identity checks, and access-denial reporting, continuation, and
-recovery across resumed runs. Size-policy tests cover Content-Length and
-chunked responses, reporting, cache revalidation, and rejection of truncated
-or unframed mismatched transfers.
+Die Parser-Tests laufen als freistehendes newos-Programm. Die
+Integrationstests verwenden einen temporaeren lokalen Testserver.
+Sie pruefen Seitennavigation, beide Koerperschaften, alle Sammlungstypen,
+eingebettete doppelte Dokumente, HTTP-Chunk-Kodierung, Weiterleitungen,
+Wiederaufnahme, reinen Metadatenbetrieb, Aktualisierung, ausdrueckliche
+Grenzen, fehlerhafte und abgebrochene Antworten sowie Wiederholungen.
+Hinzu kommen Jahrgangsauswahl, spaetere verknuepfte Vorgaenge und
+Dokumente, Graph-Deduplizierung, abweichende Organisationsfelder,
+Cache-Wiederverwendung und Archividentitaet.
 
-Verified locally on macOS/ARM64: native execution, fixture tests, certificate-
-verified live API and PDF downloads, and metadata-cache reuse. Linux and
-Windows x86-64/ARM64 builds are cross-compiled and checked for runtime imports;
-they have not been executed on those operating systems here. No full live
-mass download is started by building or running the test suite.
+Weitere Tests decken Zugriffsfehlstellen und ihre Behandlung bei
+Wiederaufnahme sowie Groessenabweichungen mit `Content-Length` und
+Chunk-Kodierung ab. Sie pruefen Berichte, erneute Cachevalidierung
+und das Ablehnen abgebrochener oder nicht ausreichend eingerahmter
+Uebertragungen. Farbtests pruefen hervorgehobene Warnungen und Fehler,
+ungefaerbte Fortschrittsmeldungen und die Farbmodi fuer umgeleitete Ausgabe.
 
-## License
+Lokal unter macOS/ARM64 geprueft wurden native Ausfuehrung, lokale
+Testdaten, zertifikatsgepruefte Live-Downloads von API-Daten und PDFs
+sowie Cache-Wiederverwendung. Linux- und Windows-Builds fuer x86-64
+und ARM64 werden plattformuebergreifend kompiliert und auf ihre
+Laufzeitimporte geprueft; auf diesen Betriebssystemen wurden sie hier
+nicht ausgefuehrt. Weder Kompilieren noch Testlauf starten einen
+vollstaendigen Massendownload.
 
-OParl-Scan is released under [CC0 1.0 Universal](LICENSE).
-The separately fetched newos submodule is also under CC0.
+## Lizenz
+
+OParl-Scan steht unter [CC0 1.0 Universal](LICENSE).
+Das separat bezogene newos-Submodul steht ebenfalls unter CC0.

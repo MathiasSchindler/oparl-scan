@@ -27,15 +27,23 @@ typedef struct {
     size_t length;
 } Reader;
 
-int ris_error(const char *message, const char *detail) {
-    rt_write_cstr(2, "oparl-scan: ");
+static void diagnostic(int style, const char *prefix, const char *message, const char *detail) {
+    tool_write_styled(2, tool_get_global_color_mode(), style, prefix);
     rt_write_cstr(2, message);
     if (detail != 0) {
         rt_write_cstr(2, ": ");
         rt_write_cstr(2, detail);
     }
     rt_write_char(2, '\n');
+}
+
+int ris_error(const char *message, const char *detail) {
+    diagnostic(TOOL_STYLE_BOLD_RED, "oparl-scan: error: ", message, detail);
     return -1;
+}
+
+void ris_warning(const char *message, const char *detail) {
+    diagnostic(TOOL_STYLE_BOLD_YELLOW, "oparl-scan: warning: ", message, detail);
 }
 
 static int copy_n(char *out, size_t capacity, const char *text, size_t length) {
@@ -134,8 +142,8 @@ static int connection_open(HttpClient *client, const Url *url, Reader *reader) {
             if (reader->tls == 0) return ris_error("cannot allocate TLS state", 0);
             tls13_client_init(reader->tls, reader->fd, client->timeout_ms);
             if (tls13_client_handshake(reader->tls, url->host, rt_strlen(url->host)) != 0) {
-                rt_write_cstr(2, "oparl-scan: trying TLS 1.2 after TLS 1.3 failed: ");
-                rt_write_line(2, tls13_client_last_error(reader->tls));
+                ris_warning("trying TLS 1.2 after TLS 1.3 failed",
+                            tls13_client_last_error(reader->tls));
                 rt_free(reader->tls);
                 reader->tls = 0;
                 platform_close(reader->fd);
@@ -412,7 +420,8 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         goto done;
     }
     if (status != 200) {
-        rt_write_cstr(2, "oparl-scan: HTTP ");
+        tool_write_styled(2, tool_get_global_color_mode(), TOOL_STYLE_BOLD_RED,
+                          "oparl-scan: error: HTTP ");
         rt_write_uint(2, (unsigned long long)status);
         rt_write_cstr(2, ": ");
         rt_write_line(2, source);
@@ -437,8 +446,8 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
     }
     if (expected_size != RIS_UNKNOWN_SIZE && total != expected_size) {
         int accepted = accept_size_mismatch && (chunked || length != RIS_UNKNOWN_SIZE);
-        ris_error(accepted ? "accepting document size mismatch" :
-                  "document size differs from OParl metadata", source);
+        if (accepted) ris_warning("accepting document size mismatch", source);
+        else ris_error("document size differs from OParl metadata", source);
         rt_write_cstr(2, "oparl-scan: expected bytes=");
         rt_write_uint(2, expected_size);
         rt_write_cstr(2, ", received bytes=");
@@ -488,8 +497,7 @@ int http_download(HttpClient *client, const char *url, const char *path,
         if (result != RESULT_RETRY) return result;
         if (attempt == 2) return -1;
         if (retry_after < (1000U << attempt)) retry_after = 1000U << attempt;
-        rt_write_cstr(2, "oparl-scan: retrying: ");
-        rt_write_line(2, url);
+        ris_warning("retrying", url);
         if (platform_sleep_milliseconds(retry_after) != 0)
             return ris_error("retry delay failed", 0);
     }

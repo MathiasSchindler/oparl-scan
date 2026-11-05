@@ -77,6 +77,7 @@ static void usage(void) {
         "  --timeout-ms N     TLS and read timeout (default: 30000)\n"
         "  --ca-file FILE     PEM CA bundle (or SSL_CERT_FILE/system bundle)\n"
         "  --system URL       System URL; HTTP is allowed only on 127.0.0.1\n"
+        "  --color MODE       Diagnostic colors: auto, always, never (default: auto)\n"
         "  --help             Show this help\n"
         "Exit status: 0 complete, 1 error, 2 limits, 3 unavailable documents.\n");
 }
@@ -121,6 +122,12 @@ static int options(Archive *archive, int argc, char **argv) {
         if (rt_strcmp(flag, "--output") == 0) archive->output = value;
         else if (rt_strcmp(flag, "--system") == 0) archive->system = value;
         else if (rt_strcmp(flag, "--ca-file") == 0) archive->http.ca_file = value;
+        else if (rt_strcmp(flag, "--color") == 0) {
+            int mode;
+            if (tool_parse_color_mode(value, &mode) != 0)
+                return ris_error("invalid color mode; use auto, always or never", value);
+            tool_set_global_color_mode(mode);
+        }
         else {
             if (rt_parse_uint(value, &number) != 0)
                 return ris_error("invalid numeric option", flag);
@@ -392,8 +399,7 @@ static int document(Archive *archive, const Json *json, size_t object) {
         }
         if (!archive->accept_size_mismatch)
             return ris_error("document cache has wrong size; use --refresh", path);
-        rt_write_cstr(2, "rechecking cached document with a size mismatch: ");
-        rt_write_line(2, id);
+        ris_warning("rechecking cached document with a size mismatch", id);
     }
     if (archive->max_files != 0 && archive->downloaded_files >= archive->max_files) {
         archive->limited = 1;
@@ -412,8 +418,7 @@ static int document(Archive *archive, const Json *json, size_t object) {
             return ris_error("cannot write unavailable file report", id);
         if (hash_seen(&archive->seen_files, hash, 1) < 0) return -1;
         archive->unavailable_files++;
-        rt_write_cstr(2, "unavailable document recorded: ");
-        rt_write_line(2, id);
+        ris_warning("unavailable document recorded", id);
         return 0;
     }
     if (result != 0) return -1;
@@ -765,8 +770,11 @@ int main(int argc, char **argv) {
         result = -1;
     if (write_summary(&archive, result == 0, 1) != 0) result = -1;
     if (result == 0) {
-        rt_write_cstr(2, archive.unavailable_files ? "INCOMPLETE (unavailable documents)" :
-                     archive.limited ? "INCOMPLETE (configured limits)" : "Complete");
+        tool_write_styled(2, tool_get_global_color_mode(),
+                          archive.unavailable_files || archive.limited ?
+                          TOOL_STYLE_BOLD_YELLOW : TOOL_STYLE_PLAIN,
+                          archive.unavailable_files ? "INCOMPLETE (unavailable documents)" :
+                          archive.limited ? "INCOMPLETE (configured limits)" : "Complete");
         rt_write_cstr(2, ": new metadata pages=");
         rt_write_uint(2, archive.downloaded_pages);
         rt_write_cstr(2, ", new documents=");

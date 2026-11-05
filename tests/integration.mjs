@@ -187,11 +187,11 @@ const server = createServer((req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 origin = `http://127.0.0.1:${server.address().port}`;
 
-async function run(directory, args = [], expected = 0) {
+async function run(directory, args = [], expected = 0, env = {}) {
   const child = spawn(binary, [
     '--system', `${origin}/oparl/system`, '--output', directory,
     '--delay-ms', '0', '--timeout-ms', '1000', ...args,
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
   let stderr = '';
   child.stdout.resume();
   child.stderr.on('data', chunk => { stderr += chunk; });
@@ -311,7 +311,9 @@ try {
   const unavailable = join(root, 'unavailable');
   assert.match(await run(unavailable, [], 1), /access denied/);
   start = requests.length;
-  await run(unavailable, ['--skip-unavailable-files'], 3);
+  const unavailableDiagnostics = await run(unavailable, ['--skip-unavailable-files', '--color', 'always'], 3);
+  assert.match(unavailableDiagnostics, /\x1b\[1;33moparl-scan: warning: \x1b\[0munavailable document recorded/);
+  assert.match(unavailableDiagnostics, /\x1b\[1;33mINCOMPLETE \(unavailable documents\)\x1b\[0m/);
   const unavailableSummary = JSON.parse(await readFile(join(unavailable, 'archive.json')));
   assert.equal(unavailableSummary.complete, false);
   assert.equal(unavailableSummary.skipUnavailableFiles, true);
@@ -361,7 +363,8 @@ try {
     assert.match(stderr, new RegExp(`expected bytes=${pdf.length + 7}, received bytes=${pdf.length}`));
     assert.equal(requests.slice(start).filter(path => path === '/content/1').length, 1,
       'a complete but mismatched size is not a transient transfer failure');
-    await run(directory, ['--accept-size-mismatch']);
+    const mismatchDiagnostics = await run(directory, ['--accept-size-mismatch', '--color', 'always']);
+    assert.match(mismatchDiagnostics, /\x1b\[1;33moparl-scan: warning: \x1b\[0maccepting document size mismatch/);
     const state = JSON.parse(await readFile(join(directory, 'archive.json')));
     assert.equal(state.complete, true, 'all files acquired under the explicit acceptance policy');
     assert.equal(state.acceptSizeMismatch, true);
@@ -397,9 +400,23 @@ try {
 
   mode = 'retry';
   failures = 0;
-  await run(join(root, 'retry'), ['--metadata-only']);
+  const retryDiagnostics = await run(join(root, 'retry'), ['--metadata-only', '--color', 'always']);
   assert.equal(failures, 3, 'transient failure is retried twice before success');
-  console.log('Integration tests passed: pagination, bodies, collections, HTTP, resume, limits, refresh, errors, retries, reference-year selection, later linked proceedings/documents, access-denial reporting, size-mismatch policy and recovery');
+  assert.match(retryDiagnostics, /\x1b\[1;31moparl-scan: error: HTTP \x1b\[0m503/);
+  assert.match(retryDiagnostics, /\x1b\[1;33moparl-scan: warning: \x1b\[0mretrying/);
+  assert.ok(retryDiagnostics.split('\n').filter(line => line.startsWith('metadata: '))
+    .every(line => !line.includes('\x1b')), 'ordinary progress output stays unstyled');
+  const colorEnv = { CLICOLOR_FORCE: '0', CLICOLOR: '1', NO_COLOR: undefined, TERM: 'xterm-256color' };
+  const plainError = await run(join(root, 'color-auto'), ['--invalid', '1'], 1, colorEnv);
+  assert.match(plainError, /oparl-scan: error: unknown option/);
+  assert.ok(!plainError.includes('\x1b'), 'automatic colors stay off in redirected logs');
+  const forcedError = await run(join(root, 'color-always'), ['--color', 'always', '--invalid', '1'], 1, colorEnv);
+  assert.match(forcedError, /\x1b\[1;31moparl-scan: error: \x1b\[0munknown option/);
+  const disabledError = await run(join(root, 'color-never'), ['--color', 'never', '--invalid', '1'], 1,
+    { ...colorEnv, CLICOLOR_FORCE: '1' });
+  assert.ok(!disabledError.includes('\x1b'), 'explicit never overrides inherited color forcing');
+  assert.match(await run(join(root, 'invalid-color'), ['--color', 'rainbow'], 1, colorEnv), /invalid color mode/);
+  console.log('Integration tests passed: pagination, bodies, collections, HTTP, resume, limits, refresh, errors, retries, reference-year selection, later linked proceedings/documents, access-denial reporting, size-mismatch policy, diagnostic colors and recovery');
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));

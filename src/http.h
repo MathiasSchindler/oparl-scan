@@ -19,6 +19,7 @@ typedef struct {
 } HttpClient;
 
 int ris_error(const char *message, const char *detail);
+void ris_warning(const char *message, const char *detail);
 int http_valid_url(const HttpClient *client, const char *url);
 int http_download(HttpClient *client, const char *url, const char *path,
                   unsigned long long limit, unsigned long long expected_size,
