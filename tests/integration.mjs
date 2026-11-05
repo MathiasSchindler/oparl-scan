@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readdir, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +18,8 @@ const hash = text => createHash('sha256').update(text).digest('hex');
 const file = id => ({
   id: `${origin}/oparl/files/${id}`, type: `${schema}File`,
   fileName: id === 1 ? '../../evil\\name.pdf' : 'Protokoll \u{1f333}.pdf',
-  size: pdf.length, accessUrl: `${origin}/download/${id}`,
+  size: pdf.length + (mode.startsWith('size-') && id === 1 ? 7 : 0),
+  accessUrl: `${origin}/download/${id}`,
 });
 const page = (data, current = 1, total = 1, next) => ({
   data, pagination: { currentPage: current, totalPages: total, totalElements: total ? data.length : 0 },
@@ -80,8 +81,15 @@ function yearResponse(url) {
       invitation: file(6), verbatimProtocol: file(7), auxiliaryFile: [file(8)],
       agendaItem: [{ id: uri('agendaItems/99'), type: `${schema}AgendaItem`, resolutionFile: file(99) }],
     };
-  if (url.pathname === '/oparl/organizations/1')
-    return { id: uri('organizations/1'), type: `${schema}Organization`, body: uri('bodies/1') };
+  if (url.pathname === '/oparl/organizations/1') {
+    const organization = { id: uri('organizations/1'), type: `${schema}Organization`, body: uri('bodies/1') };
+    if (mode.startsWith('year-org-')) {
+      organization.type = mode === 'year-org-gr' ? 'gr' : 'at';
+      if (mode !== 'year-org-missing-type')
+        organization.Type = `${schema}${mode === 'year-org-invalid-type' ? 'File' : 'Organization'}`;
+    }
+    return organization;
+  }
   if (url.pathname === '/oparl/files/2') return file(2);
   return undefined;
 }
@@ -96,6 +104,11 @@ const server = createServer((req, res) => {
   }
   if (mode === 'bad-chunk' && url.pathname === '/oparl/system') {
     req.socket.end('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nZ\r\nbad\r\n');
+    return;
+  }
+  if (mode === 'noauth-metadata' && url.pathname === '/oparl/system') {
+    res.writeHead(302, { Location: './noauth' });
+    res.end();
     return;
   }
   if (mode === 'retry' && url.pathname === '/oparl/system' && failures++ < 2) {
@@ -135,12 +148,27 @@ const server = createServer((req, res) => {
     res.end();
     return;
   } else if (url.pathname.startsWith('/content/')) {
-    if (mode === 'truncated') {
+    if (url.pathname === '/content/1' &&
+        ['noauth', 'unauthorized', 'forbidden', 'missing-document', 'foreign-redirect'].includes(mode)) {
+      if (mode === 'noauth' || mode === 'foreign-redirect')
+        res.writeHead(302, { Location: mode === 'noauth' ? './noauth' : 'https://example.test/private' });
+      else
+        res.writeHead(mode === 'unauthorized' ? 401 : mode === 'forbidden' ? 403 : 404);
+      res.end('not a document');
+    } else if (mode === 'size-unframed' && url.pathname === '/content/1') {
+      req.socket.end(Buffer.concat([
+        Buffer.from('HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nConnection: close\r\n\r\n'),
+        pdf,
+      ]));
+    } else if (mode === 'truncated') {
       res.writeHead(200, { 'Content-Length': pdf.length + 20 });
       res.write(pdf);
       res.socket.end();
     } else {
-      res.writeHead(200, { 'Content-Type': 'application/pdf' });
+      res.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        ...(mode === 'size-mismatch' ? { 'Content-Length': pdf.length } : {}),
+      });
       res.write(pdf.subarray(0, 9));
       res.end(pdf.subarray(9));
     }
@@ -244,6 +272,27 @@ try {
     mode = variant;
     await run(join(root, variant), ['--year', '2025'], variant === 'year-wrong-id' ? 1 : 0);
   }
+  const organizationMetadata = `${hash(`${origin}/oparl/organizations/1`)}.json`;
+  for (const subtype of ['at', 'gr']) {
+    mode = `year-org-${subtype}`;
+    const directory = join(root, mode);
+    await run(directory, ['--year', '2025']);
+    const organization = JSON.parse(await readFile(join(directory, 'metadata', organizationMetadata)));
+    assert.equal(organization.type, subtype, 'original subtype is preserved');
+    assert.equal(organization.Type, `${schema}Organization`, 'original uppercase Type is preserved');
+    start = requests.length;
+    await run(directory, ['--year', '2025']);
+    assert.equal(requests.length, start, 'legacy Organization metadata is reused from cache');
+  }
+  for (const variant of ['year-org-invalid-type', 'year-org-missing-type']) {
+    mode = variant;
+    const directory = join(root, mode);
+    const stderr = await run(directory, ['--year', '2025'], 1);
+    assert.match(stderr, /unexpected OParl response shape/);
+    assert.equal(JSON.parse(await readFile(join(directory, 'archive.json'))).complete, false);
+    assert.ok(!(await readdir(join(directory, 'metadata'))).includes(organizationMetadata),
+      'invalid legacy types must not be published as valid metadata');
+  }
   mode = 'year-many';
   const many = join(root, 'many');
   await run(many, ['--year', '2025']);
@@ -258,11 +307,99 @@ try {
     if (failure === 'truncated')
       assert.equal((await readdir(join(directory, 'documents'))).length, 0);
   }
+  mode = 'noauth';
+  const unavailable = join(root, 'unavailable');
+  assert.match(await run(unavailable, [], 1), /access denied/);
+  start = requests.length;
+  await run(unavailable, ['--skip-unavailable-files'], 3);
+  const unavailableSummary = JSON.parse(await readFile(join(unavailable, 'archive.json')));
+  assert.equal(unavailableSummary.complete, false);
+  assert.equal(unavailableSummary.skipUnavailableFiles, true);
+  assert.equal(unavailableSummary.unavailableDocuments, 1);
+  assert.equal(unavailableSummary.newDocuments, 1, 'other public files are still downloaded');
+  assert.equal((await readdir(join(unavailable, 'documents'))).length, 1, 'no denial page is stored as a document');
+  const report = join(unavailable, 'unavailable-files.jsonl');
+  const records = (await readFile(report, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(records, [{
+    id: file(1).id, url: file(1).accessUrl, fileName: file(1).fileName, reason: 'access-denied',
+  }]);
+  assert.equal(requests.slice(start).filter(path => path === '/content/1').length, 1,
+    'duplicate references to a denied File are tried and reported only once per run');
+  assert.ok(!requests.some(path => path.includes('noauth')), 'authentication redirects are never followed');
+  start = requests.length;
+  await run(unavailable, ['--skip-unavailable-files'], 3);
+  assert.equal(requests.slice(start).filter(path => path === '/content/1').length, 1,
+    'a missing file is retried on resume rather than treated as cached');
+  assert.deepEqual((await readFile(report, 'utf8')).trim().split('\n').map(line => JSON.parse(line)), records);
+  mode = 'normal';
+  await run(unavailable, ['--skip-unavailable-files']);
+  assert.equal((await readdir(join(unavailable, 'documents'))).length, 2);
+  assert.equal(await readFile(report, 'utf8'), '', 'resolved access failures disappear from the new report');
+  assert.equal(JSON.parse(await readFile(join(unavailable, 'archive.json'))).complete, true);
+
+  for (const variant of ['unauthorized', 'forbidden', 'missing-document', 'foreign-redirect', 'noauth-metadata']) {
+    mode = variant;
+    const directory = join(root, variant);
+    const denied = variant === 'unauthorized' || variant === 'forbidden';
+    await run(directory, ['--skip-unavailable-files'], denied ? 3 : 1);
+    const state = JSON.parse(await readFile(join(directory, 'archive.json')));
+    assert.equal(state.complete, false);
+    assert.equal(state.unavailableDocuments, denied ? 1 : 0,
+      'only document access denials may be continued');
+    if (denied) {
+      assert.equal((await readdir(join(directory, 'documents'))).length, 1);
+      assert.equal(JSON.parse((await readFile(join(directory, 'unavailable-files.jsonl'), 'utf8')).trim()).id,
+        file(1).id);
+    }
+  }
+
+  for (const variant of ['size-mismatch', 'size-chunked']) {
+    mode = variant;
+    const directory = join(root, variant);
+    start = requests.length;
+    const stderr = await run(directory, [], 1);
+    assert.match(stderr, new RegExp(`expected bytes=${pdf.length + 7}, received bytes=${pdf.length}`));
+    assert.equal(requests.slice(start).filter(path => path === '/content/1').length, 1,
+      'a complete but mismatched size is not a transient transfer failure');
+    await run(directory, ['--accept-size-mismatch']);
+    const state = JSON.parse(await readFile(join(directory, 'archive.json')));
+    assert.equal(state.complete, true, 'all files acquired under the explicit acceptance policy');
+    assert.equal(state.acceptSizeMismatch, true);
+    assert.equal(state.sizeMismatchedDocuments, 1);
+    const mismatchReport = join(directory, 'size-mismatches.jsonl');
+    assert.deepEqual(JSON.parse((await readFile(mismatchReport, 'utf8')).trim()), {
+      id: file(1).id, url: file(1).accessUrl, fileName: file(1).fileName,
+      expectedSize: pdf.length + 7, actualSize: pdf.length,
+    });
+    const names = await readdir(join(directory, 'documents'));
+    assert.equal(names.length, 2);
+    for (const name of names)
+      assert.deepEqual(await readFile(join(directory, 'documents', name)), pdf);
+    if (variant === 'size-mismatch') {
+      const cached = join(directory, 'documents', names.find(name => name.startsWith(hash(file(1).id))));
+      await writeFile(cached, 'corrupted');
+      start = requests.length;
+      await run(directory, ['--accept-size-mismatch']);
+      assert.deepEqual(await readFile(cached), pdf, 'wrong-size caches must be revalidated by a fresh download');
+      assert.equal(requests.slice(start).filter(path => path === '/content/1').length, 1);
+      assert.ok(!requests.slice(start).some(path => path === '/content/2'), 'unaffected cached documents are reused');
+      assert.equal((await readFile(mismatchReport, 'utf8')).trim().split('\n').length, 1);
+    }
+  }
+  for (const variant of ['size-unframed', 'truncated']) {
+    mode = variant;
+    const directory = join(root, `${variant}-accept-size`);
+    await run(directory, ['--accept-size-mismatch'], 1);
+    assert.equal(JSON.parse(await readFile(join(directory, 'archive.json'))).complete, false);
+    assert.equal((await readdir(join(directory, 'documents'))).length, 0,
+      'accepting advisory metadata sizes never accepts truncated or unverified-length transfers');
+  }
+
   mode = 'retry';
   failures = 0;
   await run(join(root, 'retry'), ['--metadata-only']);
   assert.equal(failures, 3, 'transient failure is retried twice before success');
-  console.log('Integration tests passed: pagination, bodies, collections, HTTP, resume, limits, refresh, errors, retries, reference-year selection and later linked proceedings/documents');
+  console.log('Integration tests passed: pagination, bodies, collections, HTTP, resume, limits, refresh, errors, retries, reference-year selection, later linked proceedings/documents, access-denial reporting, size-mismatch policy and recovery');
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));

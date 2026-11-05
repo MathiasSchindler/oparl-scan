@@ -304,6 +304,7 @@ static int redirect_url(const Url *base, const char *location, char *out, size_t
 
 static int fetch_once(HttpClient *client, const char *source, const char *path,
                       unsigned long long limit, unsigned long long expected_size,
+                      int accept_size_mismatch,
                       unsigned long long *size_out, char *redirect,
                       unsigned int *retry_after) {
     Url url;
@@ -397,6 +398,11 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         }
     }
     if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+        if (rt_strcmp(location, "./noauth") == 0) {
+            ris_error("access denied (redirect to ./noauth)", source);
+            result = RIS_HTTP_ACCESS_DENIED;
+            goto done;
+        }
         if (redirect_url(&url, location, redirect, RIS_URL_CAPACITY) != 0 ||
             !http_valid_url(client, redirect)) {
             result = ris_error("redirect is not allowed", location);
@@ -410,7 +416,8 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         rt_write_uint(2, (unsigned long long)status);
         rt_write_cstr(2, ": ");
         rt_write_line(2, source);
-        result = status == 408 || status == 429 || status >= 500 ? RESULT_RETRY : -1;
+        result = status == 401 || status == 403 ? RIS_HTTP_ACCESS_DENIED :
+                 status == 408 || status == 429 || status >= 500 ? RESULT_RETRY : -1;
         goto done;
     }
     if ((chunked && length != RIS_UNKNOWN_SIZE) ||
@@ -429,8 +436,18 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         goto done;
     }
     if (expected_size != RIS_UNKNOWN_SIZE && total != expected_size) {
-        ris_error("document size differs from OParl metadata", source);
-        goto done;
+        int accepted = accept_size_mismatch && (chunked || length != RIS_UNKNOWN_SIZE);
+        ris_error(accepted ? "accepting document size mismatch" :
+                  "document size differs from OParl metadata", source);
+        rt_write_cstr(2, "oparl-scan: expected bytes=");
+        rt_write_uint(2, expected_size);
+        rt_write_cstr(2, ", received bytes=");
+        rt_write_uint(2, total);
+        rt_write_char(2, '\n');
+        if (!accepted) {
+            result = -1;
+            goto done;
+        }
     }
     if (platform_close(fd) != 0) {
         fd = -1;
@@ -452,6 +469,7 @@ done:
 
 int http_download(HttpClient *client, const char *url, const char *path,
                   unsigned long long limit, unsigned long long expected_size,
+                  int accept_size_mismatch,
                   unsigned long long *size_out) {
     unsigned int attempt;
     for (attempt = 0; attempt < 3; attempt++) {
@@ -461,13 +479,14 @@ int http_download(HttpClient *client, const char *url, const char *path,
         rt_copy_string(current, sizeof(current), url);
         for (hops = 0; hops < 6; hops++) {
             result = fetch_once(client, current, path, limit, expected_size,
-                                size_out, redirect, &retry_after);
+                                accept_size_mismatch, size_out, redirect, &retry_after);
             if (result != RESULT_REDIRECT) break;
             rt_copy_string(current, sizeof(current), redirect);
         }
         if (result == 0) return 0;
         if (result == RESULT_REDIRECT) return ris_error("too many HTTP redirects", url);
-        if (result != RESULT_RETRY || attempt == 2) return -1;
+        if (result != RESULT_RETRY) return result;
+        if (attempt == 2) return -1;
         if (retry_after < (1000U << attempt)) retry_after = 1000U << attempt;
         rt_write_cstr(2, "oparl-scan: retrying: ");
         rt_write_line(2, url);

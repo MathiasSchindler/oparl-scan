@@ -5,6 +5,7 @@
 
 #define RIS_URL_CAPACITY 4096U
 #define RIS_UNKNOWN_SIZE (~0ULL)
+#define RIS_HTTP_ACCESS_DENIED (-3)
 
 typedef struct {
     const char *ca_file;
@@ -21,6 +22,7 @@ int ris_error(const char *message, const char *detail);
 int http_valid_url(const HttpClient *client, const char *url);
 int http_download(HttpClient *client, const char *url, const char *path,
                   unsigned long long limit, unsigned long long expected_size,
+                  int accept_size_mismatch,
                   unsigned long long *size_out);
 void http_free(HttpClient *client);
 

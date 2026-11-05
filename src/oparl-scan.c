@@ -6,6 +6,7 @@
 
 #define META_LIMIT (32ULL * 1024ULL * 1024ULL)
 #define FILE_LIMIT (4ULL * 1024ULL * 1024ULL * 1024ULL)
+#define SUMMARY_INTERVAL_NS 500000000ULL
 #define PATH_CAPACITY 1024U
 #define DEFAULT_SYSTEM "https://www.potsdam.sitzung-online.de/oparl/system"
 
@@ -38,12 +39,19 @@ typedef struct {
     unsigned long long downloaded_files;
     unsigned long long downloaded_pages;
     unsigned long long cached_files;
+    unsigned long long unavailable_files;
+    unsigned long long mismatched_files;
+    unsigned long long summary_written_ns;
     unsigned long long scanned_papers;
     unsigned long long selected_papers;
     unsigned long long processed_resources;
     unsigned int year;
     int selection_fd;
+    int unavailable_fd;
+    int mismatch_fd;
     int metadata_only;
+    int skip_unavailable_files;
+    int accept_size_mismatch;
     int refresh;
     int limited;
     ToolArray jobs;
@@ -51,13 +59,15 @@ typedef struct {
     SeenSet seen_jobs;
 } Archive;
 
-static int write_summary(const Archive *archive, int success);
+static int write_summary(Archive *archive, int success, int force);
 
 static void usage(void) {
     rt_write_cstr(1,
         "Usage: oparl-scan [OPTIONS]\n"
         "  --output DIR       Archive directory (default: downloads)\n"
         "  --metadata-only    Do not download document binaries\n"
+        "  --skip-unavailable-files  Report access-denied documents and continue\n"
+        "  --accept-size-mismatch   Report complete transfers with wrong OParl sizes\n"
         "  --year YYYY        Select reference prefix YY/, including later follow-ups\n"
         "  --refresh          Replace cached metadata and documents\n"
         "  --page-size N      Objects per page, 1..100 (default: 100)\n"
@@ -68,7 +78,7 @@ static void usage(void) {
         "  --ca-file FILE     PEM CA bundle (or SSL_CERT_FILE/system bundle)\n"
         "  --system URL       System URL; HTTP is allowed only on 127.0.0.1\n"
         "  --help             Show this help\n"
-        "Exit status: 0 complete, 1 error, 2 incomplete due to limits.\n");
+        "Exit status: 0 complete, 1 error, 2 limits, 3 unavailable documents.\n");
 }
 
 static int options(Archive *archive, int argc, char **argv) {
@@ -78,6 +88,8 @@ static int options(Archive *archive, int argc, char **argv) {
     archive->system = DEFAULT_SYSTEM;
     archive->page_size = 100;
     archive->selection_fd = -1;
+    archive->unavailable_fd = -1;
+    archive->mismatch_fd = -1;
     archive->http.timeout_ms = 30000;
     archive->http.delay_ms = 500;
     tool_array_init(&archive->jobs, sizeof(Job));
@@ -90,6 +102,14 @@ static int options(Archive *archive, int argc, char **argv) {
         }
         if (rt_strcmp(flag, "--metadata-only") == 0) {
             archive->metadata_only = 1;
+            continue;
+        }
+        if (rt_strcmp(flag, "--skip-unavailable-files") == 0) {
+            archive->skip_unavailable_files = 1;
+            continue;
+        }
+        if (rt_strcmp(flag, "--accept-size-mismatch") == 0) {
+            archive->accept_size_mismatch = 1;
             continue;
         }
         if (rt_strcmp(flag, "--refresh") == 0) {
@@ -201,6 +221,16 @@ static int temporary_path(const char *path, char out[PATH_CAPACITY]) {
     return 0;
 }
 
+static size_t resource_type(const Json *json) {
+    size_t type = json_get(json, 0, "type");
+    if (json_equals(json, type, "at") || json_equals(json, type, "gr")) {
+        size_t legacy = json_get(json, 0, "Type");
+        if (json_equals(json, legacy, "https://schema.oparl.org/1.1/Organization"))
+            return legacy;
+    }
+    return type;
+}
+
 static int page_shape(const Json *json, MetaKind kind) {
     const JsonToken *root = json_token(json, 0), *data;
     unsigned long long current, pages, total;
@@ -215,7 +245,7 @@ static int page_shape(const Json *json, MetaKind kind) {
     if (kind == META_OBJECT) {
         char id[RIS_URL_CAPACITY], type[256];
         return json_string(json, json_get(json, 0, "id"), id, sizeof(id)) == 0 &&
-               json_string(json, json_get(json, 0, "type"), type, sizeof(type)) == 0 &&
+               json_string(json, resource_type(json), type, sizeof(type)) == 0 &&
                rt_strncmp(type, "https://schema.oparl.org/1.1/", 29) == 0 ? 0 : -1;
     }
     data = json_token(json, json_get(json, 0, "data"));
@@ -246,7 +276,7 @@ static int read_metadata(Archive *archive, const char *url, MetaKind kind,
         if (info.is_dir || info.size > META_LIMIT)
             return ris_error("invalid metadata cache; use --refresh", path);
     } else {
-        if (http_download(&archive->http, url, part, META_LIMIT, RIS_UNKNOWN_SIZE, &size) != 0)
+        if (http_download(&archive->http, url, part, META_LIMIT, RIS_UNKNOWN_SIZE, 0, &size) != 0)
             return -1;
     }
     if (tool_read_all_input(cached ? path : part, bytes, &length) != 0)
@@ -319,6 +349,7 @@ static int document(Archive *archive, const Json *json, size_t object) {
     char hash[65], name[180], path[PATH_CAPACITY], part[PATH_CAPACITY];
     unsigned long long expected = RIS_UNKNOWN_SIZE, received;
     size_t token, i, used;
+    int result;
     PlatformDirEntry info;
     if (archive->metadata_only || json_true(json, json_get(json, object, "deleted"))) return 0;
     if (json_string(json, json_get(json, object, "id"), id, sizeof(id)) != 0)
@@ -353,17 +384,52 @@ static int document(Archive *archive, const Json *json, size_t object) {
     if (archive_path(archive, "documents", name, path) != 0 ||
         temporary_path(path, part) != 0) return -1;
     if (!archive->refresh && platform_get_path_info(path, &info) == 0) {
-        if (info.is_dir || (expected != RIS_UNKNOWN_SIZE && expected != info.size))
+        if (info.is_dir)
             return ris_error("document cache has wrong size; use --refresh", path);
-        archive->cached_files++;
-        return hash_seen(&archive->seen_files, hash, 1) < 0 ? -1 : 0;
+        if (expected == RIS_UNKNOWN_SIZE || expected == info.size) {
+            archive->cached_files++;
+            return hash_seen(&archive->seen_files, hash, 1) < 0 ? -1 : 0;
+        }
+        if (!archive->accept_size_mismatch)
+            return ris_error("document cache has wrong size; use --refresh", path);
+        rt_write_cstr(2, "rechecking cached document with a size mismatch: ");
+        rt_write_line(2, id);
     }
     if (archive->max_files != 0 && archive->downloaded_files >= archive->max_files) {
         archive->limited = 1;
         return 0;
     }
-    if (http_download(&archive->http, url, part, FILE_LIMIT, expected, &received) != 0) return -1;
+    result = http_download(&archive->http, url, part, FILE_LIMIT, expected,
+                           archive->accept_size_mismatch, &received);
+    if (result == RIS_HTTP_ACCESS_DENIED && archive->skip_unavailable_files) {
+        int fd = archive->unavailable_fd;
+        if (rt_write_cstr(fd, "{\"id\":") != 0 ||
+            tool_json_write_string(fd, id) != 0 ||
+            tool_json_field_string(fd, "url", url) != 0 ||
+            tool_json_field_string(fd, "fileName", filename) != 0 ||
+            tool_json_field_string(fd, "reason", "access-denied") != 0 ||
+            rt_write_cstr(fd, "}\n") != 0)
+            return ris_error("cannot write unavailable file report", id);
+        if (hash_seen(&archive->seen_files, hash, 1) < 0) return -1;
+        archive->unavailable_files++;
+        rt_write_cstr(2, "unavailable document recorded: ");
+        rt_write_line(2, id);
+        return 0;
+    }
+    if (result != 0) return -1;
+    if (expected != RIS_UNKNOWN_SIZE && received != expected) {
+        int fd = archive->mismatch_fd;
+        if (rt_write_cstr(fd, "{\"id\":") != 0 ||
+            tool_json_write_string(fd, id) != 0 ||
+            tool_json_field_string(fd, "url", url) != 0 ||
+            tool_json_field_string(fd, "fileName", filename) != 0 ||
+            tool_json_field_uint(fd, "expectedSize", expected) != 0 ||
+            tool_json_field_uint(fd, "actualSize", received) != 0 ||
+            rt_write_cstr(fd, "}\n") != 0)
+            return ris_error("cannot write size mismatch report", id);
+    }
     if (platform_rename_path(part, path) != 0) return ris_error("cannot publish document", path);
+    if (expected != RIS_UNKNOWN_SIZE && received != expected) archive->mismatched_files++;
     archive->downloaded_files++;
     rt_write_cstr(2, "document: ");
     rt_write_line(2, path);
@@ -434,31 +500,32 @@ static int resource(Archive *archive, const Job *job) {
     Json json;
     unsigned char *bytes = 0;
     const char *const *keys = 0;
-    size_t count = 0, i;
+    size_t count = 0, i, type;
     int result = 0;
     if (read_metadata(archive, job->url, META_OBJECT, &json, &bytes) != 0) return -1;
     if (json_true(&json, json_get(&json, 0, "deleted"))) goto done;
-    if (json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/File")) {
+    type = resource_type(&json);
+    if (json_equals(&json, type, "https://schema.oparl.org/1.1/File")) {
         result = document(archive, &json, 0);
         goto done;
     }
-    if (json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/Paper")) {
+    if (json_equals(&json, type, "https://schema.oparl.org/1.1/Paper")) {
         keys = paper;
         count = sizeof(paper) / sizeof(paper[0]);
-    } else if (json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/Consultation")) {
+    } else if (json_equals(&json, type, "https://schema.oparl.org/1.1/Consultation")) {
         keys = consultation;
         count = sizeof(consultation) / sizeof(consultation[0]);
-    } else if (json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/AgendaItem")) {
+    } else if (json_equals(&json, type, "https://schema.oparl.org/1.1/AgendaItem")) {
         keys = agenda;
         count = sizeof(agenda) / sizeof(agenda[0]);
-    } else if (json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/Meeting")) {
+    } else if (json_equals(&json, type, "https://schema.oparl.org/1.1/Meeting")) {
         keys = meeting;
         count = sizeof(meeting) / sizeof(meeting[0]);
-    } else if (!json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/Organization") &&
-               !json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/Person") &&
-               !json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/Location") &&
-               !json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/LegislativeTerm") &&
-               !json_equals(&json, json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/Membership")) {
+    } else if (!json_equals(&json, type, "https://schema.oparl.org/1.1/Organization") &&
+               !json_equals(&json, type, "https://schema.oparl.org/1.1/Person") &&
+               !json_equals(&json, type, "https://schema.oparl.org/1.1/Location") &&
+               !json_equals(&json, type, "https://schema.oparl.org/1.1/LegislativeTerm") &&
+               !json_equals(&json, type, "https://schema.oparl.org/1.1/Membership")) {
         result = ris_error("unsupported linked OParl resource type", job->url);
         goto done;
     }
@@ -473,7 +540,7 @@ done:
     rt_free(bytes);
     if (result == 0) {
         archive->processed_resources++;
-        result = write_summary(archive, 0);
+        result = write_summary(archive, 0, 0);
     }
     return result;
 }
@@ -548,7 +615,7 @@ static int collection(Archive *archive, const Job *job) {
         }
         json_free(&json);
         rt_free(bytes);
-        if (result == 0) result = write_summary(archive, 0);
+        if (result == 0) result = write_summary(archive, 0, 0);
         if (result != 0 || !has_next) return result;
         seen++;
         if (archive->max_pages != 0 && seen >= archive->max_pages) {
@@ -586,16 +653,25 @@ static int validate_archive(const Archive *archive) {
     return valid ? 0 : ris_error("archive has a different system/year; use a separate output directory", path);
 }
 
-static int finish_selection(Archive *archive) {
+static int open_manifest(const Archive *archive, const char *name, int *fd) {
+    char path[PATH_CAPACITY], part[PATH_CAPACITY];
+    if (rt_join_path(archive->output, name, path, sizeof(path)) != 0 ||
+        temporary_path(path, part) != 0)
+        return ris_error("manifest path is too long", name);
+    *fd = platform_open_write(part, 0644);
+    return *fd < 0 ? ris_error("cannot open archive manifest", part) : 0;
+}
+
+static int finish_manifest(const Archive *archive, const char *name, int *fd) {
     char path[PATH_CAPACITY], part[PATH_CAPACITY];
     int result;
-    if (archive->selection_fd < 0) return 0;
-    result = platform_close(archive->selection_fd);
-    archive->selection_fd = -1;
-    if (rt_join_path(archive->output, "selection.jsonl", path, sizeof(path)) != 0 ||
+    if (*fd < 0) return 0;
+    result = platform_close(*fd);
+    *fd = -1;
+    if (rt_join_path(archive->output, name, path, sizeof(path)) != 0 ||
         temporary_path(path, part) != 0 || result != 0 ||
         platform_rename_path(part, path) != 0)
-        return ris_error("cannot publish selected paper index", 0);
+        return ris_error("cannot publish archive manifest", name);
     return 0;
 }
 
@@ -608,14 +684,17 @@ static int run(Archive *archive) {
     if (prepare_directory(archive, "metadata") != 0 ||
         (!archive->metadata_only && prepare_directory(archive, "documents") != 0)) return -1;
     if (archive->year != 0) {
-        char path[PATH_CAPACITY];
         if (prepare_directory(archive, "index") != 0 ||
-            rt_join_path(archive->output, "selection.jsonl.part", path, sizeof(path)) != 0)
+            open_manifest(archive, "selection.jsonl", &archive->selection_fd) != 0)
             return -1;
-        archive->selection_fd = platform_open_write(path, 0644);
-        if (archive->selection_fd < 0) return ris_error("cannot open selected paper index", path);
     }
-    if (write_summary(archive, 0) != 0) return -1;
+    if (archive->skip_unavailable_files &&
+        open_manifest(archive, "unavailable-files.jsonl", &archive->unavailable_fd) != 0)
+        return -1;
+    if (archive->accept_size_mismatch &&
+        open_manifest(archive, "size-mismatches.jsonl", &archive->mismatch_fd) != 0)
+        return -1;
+    if (write_summary(archive, 0, 1) != 0) return -1;
     if (read_metadata(archive, archive->system, META_SYSTEM, &system, &bytes) != 0) return -1;
     result = json_string(&system, json_get(&system, 0, "body"), bodies, sizeof(bodies));
     json_free(&system);
@@ -624,23 +703,30 @@ static int run(Archive *archive) {
     for (i = 0; i < archive->jobs.count; i++) {
         Job job = *(const Job *)tool_array_get_const(&archive->jobs, i);
         if (job.kind == JOB_RESOURCE) {
-            if (finish_selection(archive) != 0 || resource(archive, &job) != 0) return -1;
+            if (finish_manifest(archive, "selection.jsonl", &archive->selection_fd) != 0 ||
+                resource(archive, &job) != 0) return -1;
         } else if (collection(archive, &job) != 0) return -1;
     }
-    return finish_selection(archive);
+    return finish_manifest(archive, "selection.jsonl", &archive->selection_fd);
 }
 
-static int write_summary(const Archive *archive, int success) {
+static int write_summary(Archive *archive, int success, int force) {
     char path[PATH_CAPACITY], part[PATH_CAPACITY];
+    unsigned long long now = platform_get_monotonic_time_ns();
     int fd, result;
+    if (!force && archive->summary_written_ns != 0 && now >= archive->summary_written_ns &&
+        now - archive->summary_written_ns < SUMMARY_INTERVAL_NS) return 0;
     if (rt_join_path(archive->output, "archive.json", path, sizeof(path)) != 0 ||
         temporary_path(path, part) != 0) return ris_error("summary path is too long", 0);
     fd = platform_open_write(part, 0644);
     if (fd < 0) return ris_error("cannot write archive summary", path);
     result = rt_write_cstr(fd, "{\"system\":") ||
              tool_json_write_string(fd, archive->system) ||
-             tool_json_field_bool(fd, "complete", success && !archive->limited) ||
+             tool_json_field_bool(fd, "complete", success && !archive->limited &&
+                                  archive->unavailable_files == 0) ||
              tool_json_field_bool(fd, "metadataOnly", archive->metadata_only) ||
+             tool_json_field_bool(fd, "skipUnavailableFiles", archive->skip_unavailable_files) ||
+             tool_json_field_bool(fd, "acceptSizeMismatch", archive->accept_size_mismatch) ||
              tool_json_field_bool(fd, "limited", archive->limited) ||
              tool_json_field_uint(fd, "referenceYear", archive->year) ||
              tool_json_field_uint(fd, "scannedPapers", archive->scanned_papers) ||
@@ -649,10 +735,13 @@ static int write_summary(const Archive *archive, int success) {
              tool_json_field_uint(fd, "newMetadataPages", archive->downloaded_pages) ||
              tool_json_field_uint(fd, "newDocuments", archive->downloaded_files) ||
              tool_json_field_uint(fd, "cachedDocuments", archive->cached_files) ||
+             tool_json_field_uint(fd, "unavailableDocuments", archive->unavailable_files) ||
+             tool_json_field_uint(fd, "sizeMismatchedDocuments", archive->mismatched_files) ||
              rt_write_cstr(fd, "}\n");
     if (platform_close(fd) != 0) result = -1;
     if (result != 0 || platform_rename_path(part, path) != 0)
         return ris_error("cannot publish archive summary", path);
+    archive->summary_written_ns = now;
     return 0;
 }
 
@@ -668,21 +757,40 @@ int main(int argc, char **argv) {
         return 1;
     }
     result = run(&archive);
-    if (write_summary(&archive, result == 0) != 0) result = -1;
+    if (result == 0 &&
+        finish_manifest(&archive, "unavailable-files.jsonl", &archive.unavailable_fd) != 0)
+        result = -1;
+    if (result == 0 &&
+        finish_manifest(&archive, "size-mismatches.jsonl", &archive.mismatch_fd) != 0)
+        result = -1;
+    if (write_summary(&archive, result == 0, 1) != 0) result = -1;
     if (result == 0) {
-        rt_write_cstr(2, archive.limited ? "INCOMPLETE (configured limits)" : "Complete");
+        rt_write_cstr(2, archive.unavailable_files ? "INCOMPLETE (unavailable documents)" :
+                     archive.limited ? "INCOMPLETE (configured limits)" : "Complete");
         rt_write_cstr(2, ": new metadata pages=");
         rt_write_uint(2, archive.downloaded_pages);
         rt_write_cstr(2, ", new documents=");
         rt_write_uint(2, archive.downloaded_files);
         rt_write_cstr(2, ", cached documents=");
         rt_write_uint(2, archive.cached_files);
+        rt_write_cstr(2, ", unavailable documents=");
+        rt_write_uint(2, archive.unavailable_files);
+        rt_write_cstr(2, ", size mismatches=");
+        rt_write_uint(2, archive.mismatched_files);
         rt_write_char(2, '\n');
     }
     http_free(&archive.http);
     tool_array_free(&archive.jobs);
     if (archive.selection_fd >= 0) platform_close(archive.selection_fd);
+    if (archive.unavailable_fd >= 0 && platform_close(archive.unavailable_fd) != 0) {
+        ris_error("cannot close unavailable file report", 0);
+        result = -1;
+    }
+    if (archive.mismatch_fd >= 0 && platform_close(archive.mismatch_fd) != 0) {
+        ris_error("cannot close size mismatch report", 0);
+        result = -1;
+    }
     rt_free(archive.seen_files.entries);
     rt_free(archive.seen_jobs.entries);
-    return result != 0 ? 1 : archive.limited ? 2 : 0;
+    return result != 0 ? 1 : archive.unavailable_files != 0 ? 3 : archive.limited ? 2 : 0;
 }

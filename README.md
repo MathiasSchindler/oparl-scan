@@ -79,6 +79,14 @@ build/macos-aarch64/oparl-scan --output downloads --metadata-only
 # Proceedings originating in 2025, including later consultations and documents.
 build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025
 
+# Keep downloading public files when individual documents deny access.
+build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
+  --skip-unavailable-files
+
+# Also accept and record complete transfers with incorrect OParl size metadata.
+build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
+  --skip-unavailable-files --accept-size-mismatch
+
 # Small live smoke test, deliberately incomplete (exit status 2).
 build/macos-aarch64/oparl-scan --output build/live-smoke \
   --page-size 2 --max-pages 1 --max-files 1
@@ -114,6 +122,12 @@ resolution files, and linked meetings are followed recursively, with identity
 deduplication to stop cycles. This includes linked proceedings and documents
 from later years. The API's nonstandard lowercase `agendaitem` field is
 supported alongside `agendaItem`.
+
+Potsdam Organization objects also use nonstandard `"Type"` for the OParl
+class URI while `"type"` contains `"at"` or `"gr"`. These exact combinations
+are recognized as Organizations during validation and traversal. The archived
+JSON is kept unchanged; missing/invalid class URIs and mismatched resource
+IDs still fail explicitly.
 
 For linked meetings, the archive includes invitations, protocols, attachments,
 and organizational/location context. The raw Meeting JSON can contain the
@@ -181,15 +195,82 @@ Use `--refresh` to replace cached metadata and documents, or use a new output
 directory for another capture. Old files are not automatically deleted.
 Do not run two processes against the same output directory.
 
+Local cache replay remains single-threaded. Progress summaries are published
+at most twice per second during traversal, rather than rewriting the status
+file for every cached resource. The initial incomplete status and final status
+are always written immediately. Counters may briefly lag during a run;
+resuming relies on the cached files, not on the last progress counter.
+
+A local macOS/ARM64 cache-only comparison, scanning 31,183 Paper records and
+replaying 1,833 seed Papers with 1,832 cached documents, improved from about
+3.10 seconds to 0.86 seconds on warm runs. This isolates initial Paper replay,
+not the complete linked-resource graph or network downloads. No worker threads
+or additional network concurrency were needed.
+
 `--max-pages N` limits pages **per collection**, including the bodies list.
 `--max-files N` limits **new document downloads per invocation**; cached
 documents do not consume this budget. Remove limits to finish the archive.
+
+### Documents that deny access
+
+Some publicly listed Potsdam documents redirect to `./noauth`. This is not
+a document download, and the program never follows that authentication route.
+By default it stops with an explicit error.
+
+With `--skip-unavailable-files`, document responses with that exact redirect
+or HTTP 401/403 are instead recorded in `unavailable-files.jsonl`, and the
+remaining downloads continue. Each line contains the File's `id`, requested
+`url`, original `fileName`, and `reason: "access-denied"`. No placeholder or
+authentication page is saved as a document. Duplicate File IDs are tried and
+reported once per invocation. Other failures, including metadata access
+denials, HTTP 404, disallowed redirects, TLS failures, and malformed responses,
+still stop the run.
+
+`archive.json` records `skipUnavailableFiles` and `unavailableDocuments`.
+Any recorded missing documents keep `complete: false`, even when traversal
+finishes. Reports are recreated per invocation; missing files are retried on
+resume, while successfully downloaded files are reused normally. If all
+previously denied files become available, the next report is empty and the
+archive can become complete without `--refresh`.
+
+The report is written to `unavailable-files.jsonl.part` while running and
+published by rename when traversal finishes without a fatal error. After an
+interruption or fatal error, that partial report remains; a previous published
+report, if present, still describes the previous finished traversal.
+
+### Incorrect OParl file sizes
+
+The default size check remains strict. Some Potsdam entries announce the wrong
+size even in freshly fetched metadata: File `2912324`, for example, announces
+83,930 bytes but the document server supplies an 83,944-byte PDF.
+
+`--accept-size-mismatch` explicitly treats the OParl size as advisory when
+HTTP transfer completeness is independently verified by `Content-Length` or
+valid chunked framing. Truncated transfers still fail. A mismatched response
+without either framing mechanism is not accepted. A fully transferred size
+mismatch is not retried as a transient network failure.
+
+Accepted files are saved normally and listed in `size-mismatches.jsonl`
+with `id`, `url`, `fileName`, `expectedSize`, and `actualSize`. Original OParl
+JSON is not altered. `archive.json` records `acceptSizeMismatch` and
+`sizeMismatchedDocuments`. Accepted discrepancies are not missing files, so
+they do not prevent completion under this explicitly selected policy; access
+denials and configured limits still do.
+
+A cached file whose size disagrees with OParl is fetched again in this mode,
+even if a previous run accepted it. This avoids trusting a potentially
+corrupted local file solely because size checks were relaxed. Other valid
+cached files are reused, and no global `--refresh` is needed. The discrepancy
+report is recreated each run, using the same `.part`/publish lifecycle as
+the unavailable-file report.
 
 Exit codes:
 
 - `0`: all discovered collections processed, within the selected mode.
 - `1`: explicit network, TLS, JSON, pagination, filesystem, or document error.
 - `2`: intentionally incomplete because of configured limits.
+- `3`: traversal finished, but document access denials left files missing.
+  This takes precedence over exit code `2`; fatal errors still return `1`.
 
 In metadata-only mode, completion means metadata completion, not document
 completion; this distinction is recorded in `archive.json`.
@@ -197,8 +278,9 @@ An interrupted run leaves `complete: false`. OParl is a live API, so an archive
 is not an atomic point-in-time database snapshot.
 
 Limits are 32 MiB per metadata page, 4 GiB per document, and JSON nesting
-depth 64. Errors stop the run; HTTP failures and invalid input are never
-replaced with empty successful responses.
+depth 64. Errors stop the run except for explicitly opted-in document access
+denials described above; HTTP failures and invalid input are never replaced
+with empty successful responses.
 
 ## Tests and verification
 
@@ -216,7 +298,11 @@ use a temporary local fixture server, with pagination, both bodies, all
 collection types, inline duplicate documents, chunked HTTP, redirects,
 resuming, metadata-only mode, refresh, explicit limits, malformed responses,
 truncation, retries, reference-year selection, later linked proceedings and
-documents, graph deduplication, and archive identity checks.
+documents, graph deduplication, legacy Organization types and cache reuse,
+archive identity checks, and access-denial reporting, continuation, and
+recovery across resumed runs. Size-policy tests cover Content-Length and
+chunked responses, reporting, cache revalidation, and rejection of truncated
+or unframed mismatched transfers.
 
 Verified locally on macOS/ARM64: native execution, fixture tests, certificate-
 verified live API and PDF downloads, and metadata-cache reuse. Linux and
