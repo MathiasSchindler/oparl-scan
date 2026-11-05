@@ -9,6 +9,7 @@
 #define HEADER_LIMIT 65536U
 #define RESULT_RETRY (-2)
 #define RESULT_REDIRECT 1
+#define RESULT_GET 2
 
 typedef struct HttpHost {
     struct HttpHost *next;
@@ -121,6 +122,18 @@ int http_same_host(const HttpClient *client, const char *a, const char *b) {
     Url left, right;
     return url_parse(client, a, &left) == 0 && url_parse(client, b, &right) == 0 &&
            left.port == right.port && rt_strcmp(left.host, right.host) == 0;
+}
+
+static int validator_text(const char *text) {
+    size_t i;
+    for (i = 0; text[i] != '\0'; i++)
+        if ((unsigned char)text[i] < 32U || (unsigned char)text[i] >= 127U) return 0;
+    return 1;
+}
+
+int http_valid_validators(const HttpClient *client, const HttpValidators *validators) {
+    return http_valid_url(client, validators->url) &&
+           validator_text(validators->etag) && validator_text(validators->modified);
 }
 
 static HttpHost *host_state(HttpClient *client, const Url *url) {
@@ -390,10 +403,8 @@ static int redirect_url(const Url *base, const char *location, char *out, size_t
     return result;
 }
 
-static int fetch_once(HttpClient *client, const char *source, const char *path,
-                      unsigned long long limit, unsigned long long expected_size,
-                      int accept_size_mismatch,
-                      unsigned long long *size_out, char *redirect,
+static int fetch_once(HttpClient *client, const char *source, HttpTransfer *transfer,
+                      int probe, int use_condition, char *redirect,
                       unsigned int *retry_after, unsigned int attempt) {
     Url url;
     HttpHost *host;
@@ -404,6 +415,14 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
     unsigned long long status_started;
     size_t header_length = 0;
     int chunked = 0, status, result = -1, fd = -1, opened = 0;
+    const HttpValidators *condition = transfer->condition;
+    HttpValidators *validators = &transfer->validators;
+    const char *path = transfer->path;
+    unsigned long long limit = transfer->limit, expected_size = transfer->expected_size;
+    int conditional = use_condition && condition != 0 &&
+                      rt_strcmp(condition->url, source) == 0 &&
+                      (condition->etag[0] != '\0' || condition->modified[0] != '\0');
+    rt_memset(validators, 0, sizeof(*validators));
     location[0] = '\0';
     *retry_after = 0;
     if (url_parse(client, source, &url) != 0) return ris_error("URL is not allowed", source);
@@ -423,13 +442,20 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
     result = connection_open(client, &url, host, reader);
     if (result != 0) goto done;
     result = RESULT_RETRY;
-    if (tool_byte_buffer_append_cstr(&request, "GET ") != 0 ||
+    if (tool_byte_buffer_append_cstr(&request, probe ? "HEAD " : "GET ") != 0 ||
         tool_byte_buffer_append_cstr(&request, url.path) != 0 ||
         tool_byte_buffer_append_cstr(&request, " HTTP/1.1\r\nHost: ") != 0 ||
         tool_byte_buffer_append_cstr(&request, url.origin + (url.tls ? 8 : 7)) != 0 ||
         tool_byte_buffer_append_cstr(&request,
             "\r\nUser-Agent: OParl-Scan/1.0\r\nAccept: */*\r\n"
-            "Accept-Encoding: identity\r\nConnection: close\r\n\r\n") != 0) {
+            "Accept-Encoding: identity\r\nConnection: close\r\n") != 0 ||
+        (conditional &&
+         (tool_byte_buffer_append_cstr(&request, condition->etag[0] != '\0' ?
+                                      "If-None-Match: " : "If-Modified-Since: ") != 0 ||
+          tool_byte_buffer_append_cstr(&request, condition->etag[0] != '\0' ?
+                                      condition->etag : condition->modified) != 0 ||
+          tool_byte_buffer_append_cstr(&request, "\r\n") != 0)) ||
+        tool_byte_buffer_append_cstr(&request, "\r\n") != 0) {
         result = ris_error("cannot construct HTTP request", source);
         goto done;
     }
@@ -510,6 +536,17 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
                 goto done;
             }
             *retry_after = (unsigned int)seconds * 1000U;
+        } else if (tool_name_equals_ignore_case_ascii_n(line, colon, "ETag") ||
+                   tool_name_equals_ignore_case_ascii_n(line, colon, "Last-Modified")) {
+            int etag = tool_name_equals_ignore_case_ascii_n(line, colon, "ETag");
+            char *target = etag ? validators->etag : validators->modified;
+            size_t capacity = etag ? sizeof(validators->etag) : sizeof(validators->modified);
+            if (!validator_text(value) || rt_strlen(value) >= capacity ||
+                (target[0] != '\0' && rt_strcmp(target, value) != 0)) {
+                result = ris_error("invalid or oversized HTTP cache validator", source);
+                goto done;
+            }
+            rt_copy_string(target, capacity, value);
         }
     }
     if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
@@ -524,6 +561,30 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
             goto done;
         }
         result = RESULT_REDIRECT;
+        goto done;
+    }
+    if (probe && (status == 405 || status == 501)) {
+        ris_warning("HEAD unsupported; checking document with GET", source);
+        result = RESULT_GET;
+        goto done;
+    }
+    if (status == 304) {
+        if (!conditional) {
+            result = ris_error("unsolicited HTTP 304 without a verified cache", source);
+            goto done;
+        }
+        if (length != RIS_UNKNOWN_SIZE && length != transfer->cached_size) {
+            ris_warning("304 size contradicts cached content; checking with GET", source);
+            result = RESULT_GET;
+            goto done;
+        }
+        rt_copy_string(validators->url, sizeof(validators->url), source);
+        if (validators->etag[0] == '\0')
+            rt_copy_string(validators->etag, sizeof(validators->etag), condition->etag);
+        if (validators->modified[0] == '\0')
+            rt_copy_string(validators->modified, sizeof(validators->modified), condition->modified);
+        transfer->received = transfer->cached_size;
+        result = RIS_HTTP_NOT_MODIFIED;
         goto done;
     }
     if (status != 200) {
@@ -544,6 +605,19 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         result = ris_error("ambiguous or oversized HTTP response", source);
         goto done;
     }
+    rt_copy_string(validators->url, sizeof(validators->url), source);
+    if (probe) {
+        int same = conditional && (condition->etag[0] != '\0' ?
+                   rt_strcmp(condition->etag, validators->etag) == 0 :
+                   rt_strcmp(condition->modified, validators->modified) == 0);
+        if (same && (length == RIS_UNKNOWN_SIZE || length == transfer->cached_size)) {
+            transfer->received = transfer->cached_size;
+            result = RIS_HTTP_NOT_MODIFIED;
+        } else {
+            result = RESULT_GET;
+        }
+        goto done;
+    }
     fd = platform_open_write(path, 0644);
     if (fd < 0) {
         result = ris_error("cannot create download", path);
@@ -555,7 +629,7 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         goto done;
     }
     if (expected_size != RIS_UNKNOWN_SIZE && total != expected_size) {
-        int accepted = accept_size_mismatch && (chunked || length != RIS_UNKNOWN_SIZE);
+        int accepted = transfer->accept_size_mismatch && (chunked || length != RIS_UNKNOWN_SIZE);
         platform_mutex_lock(&diagnostic_lock);
         diagnostic_unlocked(accepted ? TOOL_STYLE_BOLD_YELLOW : TOOL_STYLE_BOLD_RED,
                             accepted ? "oparl-scan: warning: " : "oparl-scan: error: ",
@@ -578,7 +652,8 @@ static int fetch_once(HttpClient *client, const char *source, const char *path,
         goto done;
     }
     fd = -1;
-    *size_out = total;
+    transfer->received = total;
+    transfer->framed = chunked || length != RIS_UNKNOWN_SIZE;
     result = 0;
 done:
     if (fd >= 0) platform_close(fd);
@@ -600,23 +675,30 @@ done:
     return result;
 }
 
-int http_download(HttpClient *client, const char *url, const char *path,
-                  unsigned long long limit, unsigned long long expected_size,
-                  int accept_size_mismatch,
-                  unsigned long long *size_out) {
+int http_download(HttpClient *client, HttpTransfer *transfer) {
     unsigned int attempt;
+    const char *url = transfer->url;
+    if (transfer->condition != 0 && !http_valid_validators(client, transfer->condition))
+        return ris_error("invalid request cache validators", url);
     for (attempt = 0; attempt < 3; attempt++) {
         char current[RIS_URL_CAPACITY], redirect[RIS_URL_CAPACITY];
         unsigned int hops, retry_after = 0;
         int result = -1;
+        int probe = transfer->probe, use_condition = 1;
         rt_copy_string(current, sizeof(current), url);
         for (hops = 0; hops < 6; hops++) {
-            result = fetch_once(client, current, path, limit, expected_size,
-                                accept_size_mismatch, size_out, redirect, &retry_after, attempt);
+            result = fetch_once(client, current, transfer, probe, use_condition,
+                                redirect, &retry_after, attempt);
+            if (result == RESULT_GET) {
+                probe = 0;
+                use_condition = 0;
+                result = fetch_once(client, current, transfer, probe, use_condition,
+                                    redirect, &retry_after, attempt);
+            }
             if (result != RESULT_REDIRECT) break;
             rt_copy_string(current, sizeof(current), redirect);
         }
-        if (result == 0) return 0;
+        if (result == 0 || result == RIS_HTTP_NOT_MODIFIED) return result;
         if (result == RESULT_REDIRECT) return ris_error("too many HTTP redirects", url);
         if (result != RESULT_RETRY) return result;
         if (attempt == 2) return -1;
@@ -636,9 +718,7 @@ static int transfer_batch(size_t begin, size_t end, unsigned int worker, void *a
     (void)worker;
     for (i = begin; i < end; i++) {
         HttpTransfer *transfer = &batch->transfers[i];
-        transfer->result = http_download(batch->client, transfer->url, transfer->path,
-                                        transfer->limit, transfer->expected_size,
-                                        transfer->accept_size_mismatch, &transfer->received);
+        transfer->result = http_download(batch->client, transfer);
     }
     return 0;
 }

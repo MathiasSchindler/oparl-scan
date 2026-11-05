@@ -13,13 +13,15 @@ const pdf = Buffer.from('%PDF-1.4\nfixture document\n%%EOF\n');
 let origin;
 let mode = 'normal';
 let requests = [];
+const exchanges = [];
 let failures = 0;
 const hash = text => createHash('sha256').update(text).digest('hex');
 const file = id => ({
   id: `${origin}/oparl/files/${id}`, type: `${schema}File`,
   fileName: id === 1 ? '../../evil\\name.pdf' : 'Protokoll \u{1f333}.pdf',
-  size: pdf.length + (mode.startsWith('size-') && id === 1 ? 7 : 0),
-  accessUrl: `${origin}/download/${id}`,
+  size: mode === 'unknown-unframed' && id === 1 ? undefined :
+    pdf.length + (mode.startsWith('size-') && id === 1 ? 7 : 0),
+  accessUrl: `${origin}/download/${id}${mode === 'long-url' ? `?source=${'x'.repeat(300)}` : ''}`,
 });
 const page = (data, current = 1, total = 1, next) => ({
   data, pagination: { currentPage: current, totalPages: total, totalElements: total ? data.length : 0 },
@@ -44,12 +46,15 @@ function yearResponse(url) {
       return paper(Number(url.pathname.split('/').at(-1)), '25/SVV/fixture', { mainFile: file(1) });
   }
   if (url.pathname === '/oparl/bodies/1/paper') {
+    if (mode === 'year-update' && url.searchParams.get('page') === '3')
+      return page([paper(6, '25/SVV/NEW')], 3, 3);
     if (url.searchParams.get('page') === '2')
-      return page([paper(3, '25/SVV/0403-001')], 2, 2);
+      return page([paper(3, '25/SVV/0403-001')], 2, mode === 'year-update' ? 3 : 2,
+        mode === 'year-update' ? `${origin}/oparl/bodies/1/paper?page=3&size=100` : undefined);
     return page([
       paper(1, '24/SVV/1216', { date: '2025-01-02', mainFile: file(99) }),
       paper(2, '25/SVV/1216'),
-    ], 1, 2, `${origin}/oparl/bodies/1/paper?page=2&size=100`);
+    ], 1, mode === 'year-update' ? 3 : 2, `${origin}/oparl/bodies/1/paper?page=2&size=100`);
   }
   if (url.pathname === '/oparl/bodies/3/paper')
     return page([paper(4, '25/OBR/0001')]);
@@ -57,6 +62,7 @@ function yearResponse(url) {
     return paper(mode === 'year-wrong-id' ? 999 : 2, '25/SVV/1216', {
       mainFile: file(1), consultation: [{ id: consultation, type: `${schema}Consultation` }],
       subordinatedPaper: [uri('papers/5')], underDirectionOf: [uri('organizations/1')],
+      ...(mode === 'year-update' ? { auxiliaryFile: [file(10)] } : {}),
     });
   if (url.pathname === '/oparl/papers/3')
     return paper(3, '25/SVV/0403-001', {
@@ -67,10 +73,13 @@ function yearResponse(url) {
     return paper(4, '25/OBR/0001', { mainFile: file(3) });
   if (url.pathname === '/oparl/papers/5')
     return paper(5, '26/SVV/0001', { mainFile: file(4), superordinatedPaper: [uri('papers/2')] });
+  if (url.pathname === '/oparl/papers/6' && mode === 'year-update')
+    return paper(6, '25/SVV/NEW', { mainFile: file(9) });
   if (url.pathname === '/oparl/consultations/1')
     return {
       id: consultation, type: `${schema}Consultation`, paper: uri('papers/2'),
-      [mode === 'year-camel' ? 'agendaItem' : 'agendaitem']: uri('agendaItems/1'),
+      [mode === 'year-camel' ? 'agendaItem' : 'agendaitem']:
+        uri(mode === 'year-update' ? 'agendaItems/2' : 'agendaItems/1'),
       meeting: uri('meetings/1'), organization: [uri('organizations/1')],
     };
   if (url.pathname === '/oparl/agendaItems/1')
@@ -78,10 +87,16 @@ function yearResponse(url) {
       id: uri('agendaItems/1'), type: `${schema}AgendaItem`, meeting: uri('meetings/1'),
       consultation, resolutionFile: file(5),
     };
+  if (url.pathname === '/oparl/agendaItems/2' && mode === 'year-update')
+    return {
+      id: uri('agendaItems/2'), type: `${schema}AgendaItem`, meeting: uri('meetings/1'),
+      consultation, resolutionFile: file(12),
+    };
   if (url.pathname === '/oparl/meetings/1')
     return {
       id: uri('meetings/1'), type: `${schema}Meeting`, start: '2026-01-21T15:00:00+01:00',
       invitation: file(6), verbatimProtocol: file(7), auxiliaryFile: [file(8)],
+      ...(mode === 'year-update' ? { resultsProtocol: file(11) } : {}),
       agendaItem: [{ id: uri('agendaItems/99'), type: `${schema}AgendaItem`, resolutionFile: file(99) }],
     };
   if (url.pathname === '/oparl/organizations/1') {
@@ -99,6 +114,10 @@ function yearResponse(url) {
 
 const server = createServer((req, res) => {
   requests.push(req.url);
+  exchanges.push({
+    url: req.url, method: req.method,
+    etag: req.headers['if-none-match'], modified: req.headers['if-modified-since'],
+  });
   const url = new URL(req.url, origin);
   let response;
   if ((mode === 'missing-system' && url.pathname === '/oparl/system') ||
@@ -120,6 +139,11 @@ const server = createServer((req, res) => {
   }
   if (mode === 'bad-json' && url.pathname === '/oparl/system') {
     res.end('{"data":[');
+    return;
+  }
+  if (mode === 'unsolicited-304' && url.pathname === '/oparl/system') {
+    res.writeHead(304);
+    res.end();
     return;
   }
   if (mode === 'bad-chunk' && url.pathname === '/oparl/system') {
@@ -168,10 +192,19 @@ const server = createServer((req, res) => {
       response = page([], 1, 0);
     }
   } else if (url.pathname.startsWith('/download/')) {
-    res.writeHead(302, { Location: url.pathname.replace('/download/', '/content/') });
+    res.writeHead(302, { Location: url.pathname.replace('/download/',
+      mode === 'changed-redirect' ? '/replacement/' : '/content/') });
     res.end();
     return;
-  } else if (url.pathname.startsWith('/content/')) {
+  } else if (url.pathname.startsWith('/content/') || url.pathname.startsWith('/replacement/')) {
+    const first = url.pathname.endsWith('/1');
+    const changed = first && ['year-update', 'last-modified-changed', 'changed-redirect'].includes(mode);
+    const content = changed ? Buffer.from(pdf.toString().replace('fixture', 'updated')) : pdf;
+    const modified = mode === 'last-modified-changed' ?
+      'Thu, 05 Nov 2026 16:00:00 GMT' : 'Wed, 04 Nov 2026 16:00:00 GMT';
+    const validators = first && mode.startsWith('last-modified') ? { 'Last-Modified': modified } :
+      first && mode === 'no-validators' ? {} :
+        { ETag: `"${hash(mode === 'changed-redirect' ? pdf : content)}"` };
     if (url.pathname === '/content/1' &&
         ['noauth', 'unauthorized', 'forbidden', 'missing-document', 'missing-then-fatal', 'foreign-redirect'].includes(mode)) {
       if (mode === 'noauth' || mode === 'foreign-redirect')
@@ -179,9 +212,15 @@ const server = createServer((req, res) => {
       else
         res.writeHead(mode === 'unauthorized' ? 401 : mode === 'forbidden' ? 403 : 404);
       res.end('not a document');
-    } else if (mode === 'size-unframed' && url.pathname === '/content/1') {
+    } else if (first && req.method === 'HEAD' && mode === 'unsupported-head') {
+      res.writeHead(405);
+      res.end();
+    } else if (validators.ETag && req.headers['if-none-match'] === validators.ETag) {
+      res.writeHead(304, validators);
+      res.end();
+    } else if (['size-unframed', 'unknown-unframed'].includes(mode) && url.pathname === '/content/1') {
       req.socket.end(Buffer.concat([
-        Buffer.from('HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nConnection: close\r\n\r\n'),
+        Buffer.from(`HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nETag: "${hash(pdf)}"\r\nConnection: close\r\n\r\n`),
         pdf,
       ]));
     } else if (mode === 'truncated') {
@@ -191,10 +230,11 @@ const server = createServer((req, res) => {
     } else {
       res.writeHead(200, {
         'Content-Type': 'application/pdf',
-        ...(mode === 'size-mismatch' ? { 'Content-Length': pdf.length } : {}),
+        ...validators,
+        ...(mode === 'size-chunked' ? {} : { 'Content-Length': content.length }),
       });
-      res.write(pdf.subarray(0, 9));
-      res.end(pdf.subarray(9));
+      res.write(content.subarray(0, 9));
+      res.end(content.subarray(9));
     }
     return;
   } else {
@@ -204,7 +244,13 @@ const server = createServer((req, res) => {
   }
   const text = JSON.stringify(response);
   const send = () => {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const etag = `"${hash(text)}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { ETag: etag });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', ETag: etag });
     res.write(text.slice(0, 11));
     res.end(text.slice(11));
   };
@@ -252,11 +298,15 @@ try {
   assert.ok(requests.some(path => path.includes('/bodies/3/file')));
   const paperPage = join(archive, 'metadata', `${hash(`${origin}/oparl/bodies/1/paper?page=2&size=100`)}.json`);
   assert.equal(JSON.parse(await readFile(paperPage)).data[0].name, 'second page');
-  const count = requests.length;
+  let count = exchanges.length;
   await run(archive);
-  assert.equal(requests.length, count, 'resume makes no network requests for cached resources');
+  assert.ok(exchanges.slice(count).some(request => request.url.startsWith('/oparl/')),
+    'a normal rerun revalidates metadata rather than trusting the old discovery graph');
+  assert.equal(exchanges.slice(count).filter(request =>
+    request.url.startsWith('/content/') && request.method === 'GET').length, 0,
+  'unchanged documents are revalidated without downloading their bodies');
   await run(archive, ['--refresh']);
-  assert.equal(requests.filter(path => path.startsWith('/content/')).length, 4,
+  assert.equal(exchanges.filter(request => request.url.startsWith('/content/') && request.method === 'GET').length, 4,
     'refresh downloads each unique document once, including inline duplicates');
 
   const metadata = join(root, 'metadata-only');
@@ -296,11 +346,95 @@ try {
     'year mode does not crawl global non-paper collections');
   start = requests.length;
   await run(year, ['--year', '2025']);
-  assert.equal(requests.length, start, 'year resume is completely local when cached');
+  assert.ok(requests.length > start, 'year reruns revalidate both discovery and linked resources');
+  start = requests.length;
   await run(year, ['--year', '2024'], 1);
   assert.equal(JSON.parse(await readFile(join(year, 'archive.json'))).referenceYear, 2025,
     'another year cannot overwrite the archive identity');
   assert.equal(requests.length, start);
+
+  mode = 'year-update';
+  start = exchanges.length;
+  await run(year, ['--year', '2025', '--skip-unavailable-files', '--accept-size-mismatch']);
+  const updated = JSON.parse(await readFile(join(year, 'archive.json')));
+  assert.equal(updated.selectedPapers, 4, 'new papers on a newly added page are discovered');
+  assert.equal(updated.newDocuments, 5, 'new links and same-size changed documents are fetched');
+  assert.ok(exchanges.slice(start).some(request => request.url === '/oparl/agendaItems/2'),
+    'changed consultations expose new linked resources');
+  const changedDocument = (await readdir(join(year, 'documents'))).find(name => name.startsWith(hash(file(1).id)));
+  assert.deepEqual(await readFile(join(year, 'documents', changedDocument)),
+    Buffer.from(pdf.toString().replace('fixture', 'updated')));
+  assert.equal((await readdir(join(year, 'documents'))).length, 12,
+    'old files are retained while newly linked files are added');
+  start = exchanges.length;
+  await run(year, ['--year', '2025', '--skip-unavailable-files', '--accept-size-mismatch']);
+  assert.equal(JSON.parse(await readFile(join(year, 'archive.json'))).newDocuments, 0);
+  assert.ok(!exchanges.slice(start).some(request => request.url.startsWith('/content/') && request.method === 'GET'),
+    'a repeated update does not transfer unchanged documents');
+
+  for (const variant of ['last-modified', 'long-url', 'no-validators', 'unsupported-head', 'changed-redirect']) {
+    mode = variant === 'changed-redirect' ? 'normal' : variant;
+    const directory = join(root, `update-${variant}`);
+    await run(directory);
+    mode = variant;
+    start = exchanges.length;
+    await run(directory);
+    const contentGets = exchanges.slice(start).filter(request =>
+      /^\/(?:content|replacement)\/1$/.test(request.url) && request.method === 'GET');
+    assert.equal(contentGets.length, ['last-modified', 'long-url'].includes(variant) ? 0 : 1,
+      `${variant}: HEAD confirmation or a safe GET fallback is required`);
+    if (variant === 'last-modified') {
+      assert.ok(exchanges.slice(start).some(request => request.url === '/content/1' &&
+        request.method === 'HEAD' && request.modified), 'Last-Modified is sent on the HEAD probe');
+      mode = 'last-modified-changed';
+      await run(directory);
+    }
+    if (variant === 'changed-redirect') {
+      assert.equal(contentGets[0].etag, undefined, 'validators are scoped to the previous final URL');
+    }
+    if (variant === 'last-modified' || variant === 'changed-redirect') {
+      const name = (await readdir(join(directory, 'documents'))).find(name => name.startsWith(hash(file(1).id)));
+      assert.deepEqual(await readFile(join(directory, 'documents', name)),
+        Buffer.from(pdf.toString().replace('fixture', 'updated')));
+    }
+  }
+
+  mode = 'normal';
+  const legacy = join(root, 'update-legacy');
+  await run(legacy);
+  await rm(join(legacy, 'cache'), { recursive: true });
+  start = exchanges.length;
+  await run(legacy);
+  assert.equal(exchanges.slice(start).filter(request =>
+    request.url.startsWith('/content/') && request.method === 'GET').length, 2,
+  'legacy archives acquire a verified baseline without requiring refresh');
+  const legacyName = (await readdir(join(legacy, 'documents'))).find(name => name.startsWith(hash(file(1).id)));
+  await writeFile(join(legacy, 'documents', legacyName), pdf.toString().replace('fixture', 'damaged'));
+  start = exchanges.length;
+  assert.match(await run(legacy), /cache content changed/);
+  assert.deepEqual(await readFile(join(legacy, 'documents', legacyName)), pdf,
+    'same-size local corruption is repaired before using remote validators');
+  assert.equal(exchanges.slice(start).filter(request =>
+    request.url.startsWith('/content/') && request.method === 'GET').length, 1);
+  const legacyMetadata = join(legacy, 'metadata', `${hash(`${origin}/oparl/system`)}.json`);
+  await writeFile(legacyMetadata, '{"corrupted":true}');
+  assert.match(await run(legacy), /cache content changed/);
+  assert.equal(JSON.parse(await readFile(legacyMetadata)).type, `${schema}System`);
+  const validatorPath = join(legacy, 'cache', `document-${hash(file(1).id)}.json`);
+  await writeFile(validatorPath, '{"broken":true}');
+  assert.match(await run(legacy), /invalid cache record/);
+  assert.equal(JSON.parse(await readFile(validatorPath)).requestUrl, file(1).accessUrl);
+  for (const failure of ['missing-collection', 'missing-document']) {
+    mode = failure;
+    await run(legacy, [], 3);
+    assert.equal(JSON.parse(await readFile(join(legacy, 'archive.json'))).missingResources, 1,
+      'a previously cached resource that is now missing must not hide the error');
+    mode = 'normal';
+    await run(legacy);
+  }
+  mode = 'unsolicited-304';
+  assert.match(await run(join(root, mode), [], 1), /unsolicited HTTP 304/);
+
   for (const variant of ['year-camel', 'year-wrong-id']) {
     mode = variant;
     await run(join(root, variant), ['--year', '2025'], variant === 'year-wrong-id' ? 1 : 0);
@@ -315,7 +449,8 @@ try {
     assert.equal(organization.Type, `${schema}Organization`, 'original uppercase Type is preserved');
     start = requests.length;
     await run(directory, ['--year', '2025']);
-    assert.equal(requests.length, start, 'legacy Organization metadata is reused from cache');
+    assert.ok(requests.slice(start).includes('/oparl/organizations/1'),
+      'legacy Organization metadata is revalidated');
   }
   for (const variant of ['year-org-invalid-type', 'year-org-missing-type']) {
     mode = variant;
@@ -368,8 +503,8 @@ try {
 
     start = requests.length;
     await run(directory, args, 3);
-    assert.deepEqual(requests.slice(start), [missingPath],
-      'resume retries the missing URL while reusing all completed work');
+    assert.equal(requests.slice(start).filter(path => path === missingPath).length, 1,
+      'reruns retry a missing URL once while revalidating the rest of the graph');
     assert.deepEqual((await readFile(missingReport, 'utf8')).trim().split('\n').map(line => JSON.parse(line)), records,
       'the report describes this run rather than accumulating duplicates across runs');
 
@@ -400,9 +535,10 @@ try {
   assert.equal(missingState.limited, true, 'missing resources take exit-code precedence over limits');
   assert.equal(missingState.missingResources, 1);
   mode = 'normal';
-  start = requests.length;
+  start = exchanges.length;
   await run(missingDocument);
-  assert.deepEqual(requests.slice(start), ['/download/1', '/content/1']);
+  assert.deepEqual(exchanges.slice(start).filter(request =>
+    request.url.startsWith('/content/') && request.method === 'GET').map(request => request.url), ['/content/1']);
   assert.equal(JSON.parse(await readFile(join(missingDocument, 'archive.json'))).complete, true);
   assert.equal(await readFile(join(missingDocument, 'missing-resources.jsonl'), 'utf8'), '');
 
@@ -503,13 +639,22 @@ try {
     if (variant === 'size-mismatch') {
       const cached = join(directory, 'documents', names.find(name => name.startsWith(hash(file(1).id))));
       await writeFile(cached, 'corrupted');
-      start = requests.length;
+      start = exchanges.length;
       await run(directory, ['--accept-size-mismatch']);
       assert.deepEqual(await readFile(cached), pdf, 'wrong-size caches must be revalidated by a fresh download');
-      assert.equal(requests.slice(start).filter(path => path === '/content/1').length, 1);
-      assert.ok(!requests.slice(start).some(path => path === '/content/2'), 'unaffected cached documents are reused');
+      assert.equal(exchanges.slice(start).filter(request =>
+        request.url === '/content/1' && request.method === 'GET').length, 1);
+      assert.ok(!exchanges.slice(start).some(request => request.url === '/content/2' && request.method === 'GET'),
+        'unaffected cached documents are reused');
       assert.equal((await readFile(mismatchReport, 'utf8')).trim().split('\n').length, 1);
     }
+    start = exchanges.length;
+    await run(directory, ['--accept-size-mismatch']);
+    assert.equal(exchanges.slice(start).filter(request =>
+      request.url.startsWith('/content/') && request.method === 'GET').length, 0,
+    'accepted size mismatches are reused after validating the actual stored content');
+    assert.equal(JSON.parse(await readFile(join(directory, 'archive.json'))).sizeMismatchedDocuments, 1);
+    assert.equal(JSON.parse((await readFile(mismatchReport, 'utf8')).trim()).actualSize, pdf.length);
   }
   for (const variant of ['size-unframed', 'truncated']) {
     mode = variant;
@@ -519,6 +664,13 @@ try {
     assert.equal((await readdir(join(directory, 'documents'))).length, 0,
       'accepting advisory metadata sizes never accepts truncated or unverified-length transfers');
   }
+  mode = 'unknown-unframed';
+  const unframedCache = join(root, 'unframed-cache');
+  await run(unframedCache);
+  mode = 'size-unframed';
+  assert.match(await run(unframedCache, ['--accept-size-mismatch'], 1),
+    /document size differs from OParl metadata/,
+    'a previously cached EOF-delimited response cannot validate a newly discovered size mismatch');
 
   mode = 'closed-status';
   start = requests.length;
@@ -543,8 +695,8 @@ try {
   await run(slow, ['--metadata-only', '--timeout-ms', '500']);
   assert.equal(requests.slice(start).filter(path => path === slowPage).length, 1,
     'a larger timeout allows the slow page to finish without retries');
-  assert.ok(!requests.slice(start).some(path => completedRequests.includes(path)),
-    'resuming with a larger timeout reuses metadata completed before the failure');
+  assert.ok(requests.slice(start).some(path => completedRequests.includes(path)),
+    'resuming with a larger timeout revalidates metadata completed before the failure');
   assert.equal(JSON.parse(await readFile(join(slow, 'archive.json'))).complete, true);
 
   mode = 'retry';

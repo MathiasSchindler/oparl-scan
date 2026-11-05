@@ -28,7 +28,7 @@ const file = id => ({
 });
 function handler(host, req, res) {
   const path = new URL(req.url, origins[host]).pathname;
-  const event = { host, path, start: performance.now(), end: null, status: null };
+  const event = { host, path, method: req.method, start: performance.now(), end: null, status: null };
   events.push(event);
   active[host]++;
   maximum[host] = Math.max(maximum[host], active[host]);
@@ -91,7 +91,12 @@ function handler(host, req, res) {
         res.write(pdf);
         res.socket.end();
       } else {
-        res.writeHead(200, { 'Content-Length': pdf.length });
+        if (req.headers['if-none-match'] === '"fixture"') {
+          res.writeHead(304, { ETag: '"fixture"' });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { 'Content-Length': pdf.length, ETag: '"fixture"' });
         res.end(pdf);
       }
     } else {
@@ -213,7 +218,8 @@ try {
       if (expected === 3) {
         mode = 'normal';
         const resumed = await run(directory, args);
-        assert.deepEqual(resumed.events.map(event => event.path), ['/content/1']);
+        assert.deepEqual(resumed.events.filter(event =>
+          event.path.startsWith('/content/') && event.method === 'GET').map(event => event.path), ['/content/1']);
         assert.equal(JSON.parse(await readFile(join(directory, 'archive.json'))).complete, true);
       }
       if (variant === 'size') assert.equal(state.sizeMismatchedDocuments, 1);
@@ -229,7 +235,11 @@ try {
     await run(queued);
     assert.equal(Object.keys(await documents(queued)).length, 39,
       'more than one bounded queue of documents is drained without dropping work');
-    assert.equal((await run(queued)).events.length, 0, 'queue draining preserves fully cached resume');
+    const queueUpdate = await run(queued);
+    assert.ok(queueUpdate.events.some(event => event.path === '/oparl/papers'),
+      'queue updates rescan the paper collection');
+    assert.ok(!queueUpdate.events.some(event => event.path.startsWith('/content/') && event.method === 'GET'),
+      'queue updates do not redownload unchanged documents');
     mode = 'fatal-metadata';
     const fatal = join(root, 'fatal');
     await run(fatal, [], 1);
@@ -238,7 +248,7 @@ try {
       'a completed concurrent document is published even when its metadata partner fails');
     mode = 'normal';
     const recovered = await run(fatal);
-    assert.ok(!recovered.events.some(event => event.path === '/content/1'));
+    assert.ok(!recovered.events.some(event => event.path === '/content/1' && event.method === 'GET'));
     mode = 'truncated';
     const broken = join(root, 'truncated');
     await run(broken, [], 1);

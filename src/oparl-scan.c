@@ -3,6 +3,7 @@
 #include "runtime.h"
 #include "tool_util.h"
 #include "crypto/sha256.h"
+#include "hash_util.h"
 
 #define META_LIMIT (32ULL * 1024ULL * 1024ULL)
 #define FILE_LIMIT (4ULL * 1024ULL * 1024ULL * 1024ULL)
@@ -31,12 +32,20 @@ typedef struct {
 } SeenSet;
 
 typedef struct {
+    HttpValidators validators;
+    char digest[65];
+    unsigned long long size;
+    int framed;
+} CacheEntry;
+
+typedef struct {
     HttpTransfer transfer;
     char id[RIS_URL_CAPACITY];
     char url[RIS_URL_CAPACITY];
     char filename[512];
     char path[PATH_CAPACITY];
     char part[PATH_CAPACITY];
+    CacheEntry cache;
 } DocumentDownload;
 
 typedef struct {
@@ -48,6 +57,7 @@ typedef struct {
     unsigned long long max_files;
     unsigned long long downloaded_files;
     unsigned long long downloaded_pages;
+    unsigned long long cached_pages;
     unsigned long long cached_files;
     unsigned long long unavailable_files;
     unsigned long long missing_resources;
@@ -75,8 +85,7 @@ typedef struct {
 } Archive;
 
 static int write_summary(Archive *archive, int success, int force);
-static int download_metadata(Archive *archive, const char *url, const char *path,
-                             unsigned long long *size);
+static int download_metadata(Archive *archive, HttpTransfer *metadata);
 static int flush_documents(Archive *archive);
 
 static void usage(void) {
@@ -98,6 +107,7 @@ static void usage(void) {
         "  --system URL       System URL; HTTP is allowed only on 127.0.0.1\n"
         "  --color MODE       Diagnostic colors: auto, always, never (default: auto)\n"
         "  --help             Show this help\n"
+        "Each run revalidates metadata and updates documents; no refresh flag is needed.\n"
         "HTTP 404: report missing URLs, continue, and mark the archive incomplete.\n"
         "Exit status: 0 complete, 1 error, 2 limits, 3 missing resources.\n");
 }
@@ -179,15 +189,9 @@ static int options(Archive *archive, int argc, char **argv) {
 }
 
 static void hash_text(const char *text, char out[65]) {
-    static const char hex[] = "0123456789abcdef";
     unsigned char digest[32];
-    size_t i;
     crypto_sha256_hash((const unsigned char *)text, rt_strlen(text), digest);
-    for (i = 0; i < sizeof(digest); i++) {
-        out[2 * i] = hex[digest[i] >> 4];
-        out[2 * i + 1] = hex[digest[i] & 15];
-    }
-    out[64] = '\0';
+    hash_to_hex(digest, sizeof(digest), out);
 }
 
 static size_t hash_slot(const char *hash, size_t capacity) {
@@ -252,6 +256,110 @@ static int temporary_path(const char *path, char out[PATH_CAPACITY]) {
     return 0;
 }
 
+static int content_hash(const char *path, char out[65]) {
+    unsigned char digest[32];
+    int fd = platform_open_read(path), result;
+    if (fd < 0) return ris_error("cannot read cached content", path);
+    result = hash_sha256_stream(fd, digest);
+    if (platform_close(fd) != 0) result = -1;
+    if (result != 0) return ris_error("cannot hash cached content", path);
+    hash_to_hex(digest, sizeof(digest), out);
+    return 0;
+}
+
+static int cache_path(const Archive *archive, const char *kind, const char *key, char *path) {
+    char hash[65], name[96];
+    size_t length = rt_strlen(kind);
+    hash_text(key, hash);
+    memcpy(name, kind, length);
+    name[length++] = '-';
+    memcpy(name + length, hash, 64);
+    memcpy(name + length + 64, ".json", 6);
+    return archive_path(archive, "cache", name, path);
+}
+
+static int load_cache(const Archive *archive, const char *kind, const char *key,
+                      const char *url, const char *content, unsigned long long limit,
+                      CacheEntry *entry) {
+    char path[PATH_CAPACITY], digest[65], request_url[RIS_URL_CAPACITY];
+    PlatformDirEntry info;
+    unsigned char *bytes = 0;
+    size_t length, i;
+    Json json;
+    const JsonToken *framed;
+    int valid;
+    if (cache_path(archive, kind, key, path) != 0) return -1;
+    if (archive->refresh || platform_get_path_info(path, &info) != 0) return 0;
+    if (info.is_dir || info.size > 16384)
+        return ris_error("invalid cache record path; use --refresh", path);
+    if (tool_read_all_input(path, &bytes, &length) != 0)
+        return ris_error("cannot read cache record", path);
+    valid = json_parse(&json, (const char *)bytes, length) == 0;
+    if (valid) {
+        framed = json_token(&json, json_get(&json, 0, "framed"));
+        valid = json_string(&json, json_get(&json, 0, "requestUrl"), request_url,
+                            sizeof(request_url)) == 0 &&
+                rt_strcmp(request_url, url) == 0 &&
+                json_string(&json, json_get(&json, 0, "url"), entry->validators.url,
+                            sizeof(entry->validators.url)) == 0 &&
+                json_string(&json, json_get(&json, 0, "etag"), entry->validators.etag,
+                            sizeof(entry->validators.etag)) == 0 &&
+                json_string(&json, json_get(&json, 0, "lastModified"), entry->validators.modified,
+                            sizeof(entry->validators.modified)) == 0 &&
+                json_string(&json, json_get(&json, 0, "sha256"), entry->digest,
+                            sizeof(entry->digest)) == 0 &&
+                rt_strlen(entry->digest) == 64 &&
+                json_uint(&json, json_get(&json, 0, "size"), &entry->size) == 0 &&
+                framed != 0 && framed->kind == JSON_BOOL &&
+                entry->size <= limit &&
+                http_valid_validators(&archive->http, &entry->validators);
+        if (valid)
+            for (i = 0; i < 64; i++)
+                if (tool_hex_value(entry->digest[i]) < 0) valid = 0;
+        entry->framed = json_true(&json, json_get(&json, 0, "framed"));
+        json_free(&json);
+    }
+    rt_free(bytes);
+    if (!valid) {
+        ris_warning("invalid cache record; fetching resource again", path);
+        return 0;
+    }
+    if (platform_get_path_info(content, &info) != 0) return 0;
+    if (info.is_dir) return ris_error("cached content is a directory", content);
+    if (info.size != entry->size) {
+        ris_warning("cache content changed; fetching resource again", content);
+        return 0;
+    }
+    if (content_hash(content, digest) != 0) return -1;
+    if (rt_strcmp(digest, entry->digest) != 0) {
+        ris_warning("cache content changed; fetching resource again", content);
+        return 0;
+    }
+    return 1;
+}
+
+static int save_cache(const Archive *archive, const char *kind, const char *key,
+                      const char *url, const CacheEntry *entry) {
+    char path[PATH_CAPACITY], part[PATH_CAPACITY];
+    int fd, result;
+    if (cache_path(archive, kind, key, path) != 0 || temporary_path(path, part) != 0) return -1;
+    fd = platform_open_write(part, 0644);
+    if (fd < 0) return ris_error("cannot write cache record", path);
+    result = rt_write_cstr(fd, "{\"requestUrl\":") ||
+             tool_json_write_string(fd, url) ||
+             tool_json_field_string(fd, "url", entry->validators.url) ||
+             tool_json_field_string(fd, "etag", entry->validators.etag) ||
+             tool_json_field_string(fd, "lastModified", entry->validators.modified) ||
+             tool_json_field_string(fd, "sha256", entry->digest) ||
+             tool_json_field_uint(fd, "size", entry->size) ||
+             tool_json_field_bool(fd, "framed", entry->framed) ||
+             rt_write_cstr(fd, "}\n");
+    if (platform_close(fd) != 0) result = -1;
+    if (result != 0 || platform_rename_path(part, path) != 0)
+        return ris_error("cannot publish cache record", path);
+    return 0;
+}
+
 static size_t resource_type(const Json *json) {
     size_t type = json_get(json, 0, "type");
     if (json_equals(json, type, "at") || json_equals(json, type, "gr")) {
@@ -309,29 +417,36 @@ static int record_missing(Archive *archive, const char *url, const char *kind) {
 static int read_metadata(Archive *archive, const char *url, MetaKind kind,
                          Json *json, unsigned char **bytes) {
     char hash[65], name[80], path[PATH_CAPACITY], part[PATH_CAPACITY];
-    PlatformDirEntry info;
-    unsigned long long size;
+    CacheEntry cache;
+    HttpTransfer transfer;
     size_t length;
     int cached, result;
+    rt_memset(&transfer, 0, sizeof(transfer));
+    transfer.url = url;
+    transfer.path = part;
+    transfer.limit = META_LIMIT;
+    transfer.expected_size = RIS_UNKNOWN_SIZE;
+    transfer.result = -1;
     hash_text(url, hash);
     rt_copy_string(name, sizeof(name), hash);
     memcpy(name + 64, ".json", 6);
     if (archive_path(archive, kind == META_INDEX ? "index" : "metadata", name, path) != 0 ||
         temporary_path(path, part) != 0) return -1;
-    cached = !archive->refresh && platform_get_path_info(path, &info) == 0;
+    cached = load_cache(archive, "metadata", url, url, path, META_LIMIT, &cache);
+    if (cached < 0) return -1;
     if (cached) {
-        if (info.is_dir || info.size > META_LIMIT)
-            return ris_error("invalid metadata cache; use --refresh", path);
-    } else {
-        result = download_metadata(archive, url, part, &size);
-        if (result != 0) return result;
+        transfer.condition = &cache.validators;
+        transfer.cached_size = cache.size;
     }
+    result = download_metadata(archive, &transfer);
+    if (result != 0 && result != RIS_HTTP_NOT_MODIFIED) return result;
+    cached = result == RIS_HTTP_NOT_MODIFIED;
     if (tool_read_all_input(cached ? path : part, bytes, &length) != 0)
         return ris_error("cannot read metadata", cached ? path : part);
     if (json_parse(json, (const char *)*bytes, length) != 0) {
         rt_free(*bytes);
         *bytes = 0;
-        return ris_error("invalid JSON; cache can be replaced with --refresh", url);
+        return ris_error("invalid JSON", url);
     }
     if (page_shape(json, kind) != 0 ||
         (kind == META_OBJECT &&
@@ -351,6 +466,20 @@ static int read_metadata(Archive *archive, const char *url, MetaKind kind,
         archive->downloaded_pages++;
         rt_write_cstr(2, "metadata: ");
         rt_write_line(2, url);
+    } else archive->cached_pages++;
+    cache.validators = transfer.validators;
+    cache.size = length;
+    if (!cached) cache.framed = transfer.framed;
+    {
+        unsigned char digest[32];
+        crypto_sha256_hash(*bytes, length, digest);
+        hash_to_hex(digest, sizeof(digest), cache.digest);
+    }
+    if (save_cache(archive, "metadata", url, url, &cache) != 0) {
+        json_free(json);
+        rt_free(*bytes);
+        *bytes = 0;
+        return -1;
     }
     return 0;
 }
@@ -391,7 +520,7 @@ static int discover_collections(Archive *archive, const Json *json, size_t body)
     return 0;
 }
 
-static int complete_document(Archive *archive, const DocumentDownload *download) {
+static int complete_document(Archive *archive, DocumentDownload *download) {
     const char *id = download->id, *url = download->url, *filename = download->filename;
     unsigned long long expected = download->transfer.expected_size;
     unsigned long long received = download->transfer.received;
@@ -413,7 +542,7 @@ static int complete_document(Archive *archive, const DocumentDownload *download)
         ris_warning("unavailable document recorded", id);
         return 0;
     }
-    if (result != 0) return -1;
+    if (result != 0 && result != RIS_HTTP_NOT_MODIFIED) return -1;
     if (expected != RIS_UNKNOWN_SIZE && received != expected) {
         int fd = archive->mismatch_fd;
         if (rt_write_cstr(fd, "{\"id\":") != 0 ||
@@ -425,12 +554,22 @@ static int complete_document(Archive *archive, const DocumentDownload *download)
             rt_write_cstr(fd, "}\n") != 0)
             return ris_error("cannot write size mismatch report", id);
     }
-    if (platform_rename_path(download->part, download->path) != 0)
-        return ris_error("cannot publish document", download->path);
+    if (result == 0) {
+        if (platform_rename_path(download->part, download->path) != 0)
+            return ris_error("cannot publish document", download->path);
+        if (content_hash(download->path, download->cache.digest) != 0) return -1;
+        download->cache.framed = download->transfer.framed;
+    }
+    download->cache.size = received;
+    download->cache.validators = download->transfer.validators;
+    if (save_cache(archive, "document", id, url, &download->cache) != 0) return -1;
     if (expected != RIS_UNKNOWN_SIZE && received != expected) archive->mismatched_files++;
-    archive->downloaded_files++;
-    rt_write_cstr(2, "document: ");
-    rt_write_line(2, download->path);
+    if (result == RIS_HTTP_NOT_MODIFIED) archive->cached_files++;
+    else {
+        archive->downloaded_files++;
+        rt_write_cstr(2, "document: ");
+        rt_write_line(2, download->path);
+    }
     return 0;
 }
 
@@ -462,24 +601,21 @@ static int perform_downloads(Archive *archive, HttpTransfer *metadata,
     return result;
 }
 
-static int download_metadata(Archive *archive, const char *url, const char *path,
-                             unsigned long long *size) {
-    HttpTransfer metadata = {url, path, META_LIMIT, RIS_UNKNOWN_SIZE, 0, 0, -1};
+static int download_metadata(Archive *archive, HttpTransfer *metadata) {
     DocumentDownload *document = 0;
     size_t i;
     int result;
     for (i = 0; i < archive->pending_count; i++) {
-        if (!http_same_host(&archive->http, url, archive->pending[i]->url)) {
+        if (!http_same_host(&archive->http, metadata->url, archive->pending[i]->url)) {
             document = archive->pending[i];
             break;
         }
     }
-    result = perform_downloads(archive, &metadata, document, 0);
-    if (metadata.result == RIS_HTTP_NOT_FOUND &&
-        record_missing(archive, url, "metadata") != 0) return -1;
+    result = perform_downloads(archive, metadata, document, 0);
+    if (metadata->result == RIS_HTTP_NOT_FOUND &&
+        record_missing(archive, metadata->url, "metadata") != 0) return -1;
     if (result != 0) return -1;
-    *size = metadata.received;
-    return metadata.result;
+    return metadata->result;
 }
 
 static int flush_documents(Archive *archive) {
@@ -503,7 +639,8 @@ static int document(Archive *archive, const Json *json, size_t object) {
     unsigned long long expected = RIS_UNKNOWN_SIZE;
     size_t token, i, used;
     DocumentDownload *download, *other = 0;
-    PlatformDirEntry info;
+    CacheEntry cache;
+    int cached;
     if (archive->metadata_only || json_true(json, json_get(json, object, "deleted"))) return 0;
     if (json_string(json, json_get(json, object, "id"), id, sizeof(id)) != 0)
         return ris_error("File has no valid id", 0);
@@ -536,17 +673,10 @@ static int document(Archive *archive, const Json *json, size_t object) {
     name[used] = '\0';
     if (archive_path(archive, "documents", name, path) != 0 ||
         temporary_path(path, part) != 0) return -1;
-    if (!archive->refresh && platform_get_path_info(path, &info) == 0) {
-        if (info.is_dir)
-            return ris_error("document cache has wrong size; use --refresh", path);
-        if (expected == RIS_UNKNOWN_SIZE || expected == info.size) {
-            archive->cached_files++;
-            return hash_seen(&archive->seen_files, hash, 1) < 0 ? -1 : 0;
-        }
-        if (!archive->accept_size_mismatch)
-            return ris_error("document cache has wrong size; use --refresh", path);
-        ris_warning("rechecking cached document with a size mismatch", id);
-    }
+    cached = load_cache(archive, "document", id, url, path, FILE_LIMIT, &cache);
+    if (cached < 0) return -1;
+    if (cached && expected != RIS_UNKNOWN_SIZE && expected != cache.size &&
+        (!archive->accept_size_mismatch || !cache.framed)) cached = 0;
     if (archive->pending_count == PENDING_DOCUMENTS ||
         (archive->max_files != 0 &&
          archive->downloaded_files + archive->pending_count >= archive->max_files))
@@ -562,8 +692,21 @@ static int document(Archive *archive, const Json *json, size_t object) {
     rt_copy_string(download->filename, sizeof(download->filename), filename);
     rt_copy_string(download->path, sizeof(download->path), path);
     rt_copy_string(download->part, sizeof(download->part), part);
-    download->transfer = (HttpTransfer){download->url, download->part, FILE_LIMIT, expected,
-                                        archive->accept_size_mismatch, 0, -1};
+    rt_memset(&download->transfer, 0, sizeof(download->transfer));
+    download->transfer.url = download->url;
+    download->transfer.path = download->part;
+    download->transfer.limit = FILE_LIMIT;
+    download->transfer.expected_size = expected;
+    download->transfer.accept_size_mismatch = archive->accept_size_mismatch;
+    download->transfer.result = -1;
+    if (cached) {
+        download->cache = cache;
+        if (cache.validators.etag[0] != '\0' || cache.validators.modified[0] != '\0') {
+            download->transfer.condition = &download->cache.validators;
+            download->transfer.cached_size = cache.size;
+            download->transfer.probe = 1;
+        }
+    }
     if (hash_seen(&archive->seen_files, hash, 1) < 0) {
         rt_free(download);
         return -1;
@@ -830,6 +973,7 @@ static int run(Archive *archive) {
     size_t i;
     int result;
     if (prepare_directory(archive, "metadata") != 0 ||
+        prepare_directory(archive, "cache") != 0 ||
         (!archive->metadata_only && prepare_directory(archive, "documents") != 0)) return -1;
     if (archive->year != 0) {
         if (prepare_directory(archive, "index") != 0 ||
@@ -887,6 +1031,7 @@ static int write_summary(Archive *archive, int success, int force) {
              tool_json_field_uint(fd, "selectedPapers", archive->selected_papers) ||
              tool_json_field_uint(fd, "processedResources", archive->processed_resources) ||
              tool_json_field_uint(fd, "newMetadataPages", archive->downloaded_pages) ||
+             tool_json_field_uint(fd, "cachedMetadataPages", archive->cached_pages) ||
              tool_json_field_uint(fd, "newDocuments", archive->downloaded_files) ||
              tool_json_field_uint(fd, "cachedDocuments", archive->cached_files) ||
              tool_json_field_uint(fd, "unavailableDocuments", archive->unavailable_files) ||

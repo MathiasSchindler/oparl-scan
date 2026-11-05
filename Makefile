@@ -15,7 +15,7 @@ endif
 RUNTIME := $(filter-out src/platform/%,$(shell sed -n 's/^MACOS_FREESTANDING_RUNTIME_SOURCES := //p' $(NEWOS)/Makefile))
 CRYPTO := $(sort $(shell grep -oE '"src/shared/crypto/[^"]+\.c"' $(NEWOS)/src/compiler/source_manifest.h | tr -d '"'))
 TLS := $(sort $(shell grep -oE '"src/shared/tls/[^"]+\.c"' $(NEWOS)/src/compiler/source_manifest.h | tr -d '"'))
-COMMON := $(addprefix $(NEWOS)/,$(sort $(RUNTIME) $(CRYPTO) $(TLS)))
+COMMON := $(addprefix $(NEWOS)/,$(sort $(RUNTIME) $(CRYPTO) $(TLS) src/shared/hash_util.c))
 CPPFLAGS := -I$(NEWOS)/src/shared -Isrc -DNEWOS_HAVE_PTHREAD=0 \
 	-DNEWOS_RUNTIME_THREAD_SAFE_ALLOC=1 -DNEWOS_RUNTIME_ALLOC_LOCK=3
 CFLAGS := -std=c11 -Oz -Wall -Wextra -Wpedantic -ffreestanding -fno-builtin \

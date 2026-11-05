@@ -91,6 +91,7 @@ build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
   --skip-unavailable-files
 
 # Zusaetzlich vollstaendige Downloads mit falscher OParl-Groesse akzeptieren.
+# Denselben Aufruf fuer eine gezielte Aktualisierung erneut ausfuehren.
 build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
   --skip-unavailable-files --accept-size-mismatch
 
@@ -294,7 +295,7 @@ TCP-Verbindungsaufbau verwenden newos' blockierende Plattform-API und
 werden davon nicht begrenzt. HTTP ohne TLS ist nur fuer ein ausdruecklich
 gewaehltes Testsystem auf `127.0.0.1` erlaubt.
 
-### Archivstruktur und Wiederaufnahme
+### Archivstruktur, Aktualisierung und Wiederaufnahme
 
 ```text
 downloads/
@@ -304,6 +305,8 @@ downloads/
   index/<sha256-anfrage-url>.json          # ungefilterte Suchlaufseiten
   metadata/<sha256-anfrage-url>.json
   documents/<sha256-oparl-datei-id>-<bereinigter-originalname>
+  cache/metadata-<sha256-anfrage-url>.json  # HTTP-Pruefdaten und Inhaltshash
+  cache/document-<sha256-oparl-datei-id>.json
 ```
 
 Die Metadatenseiten behalten das originale UTF-8-JSON mit Beziehungen,
@@ -321,31 +324,69 @@ von OParl angegebene Dokumentgroessen werden geprueft. Dieselbe Datei-ID
 wird pro Lauf nur einmal heruntergeladen, auch wenn sie in mehreren
 Sammlungen eingebettet vorkommt.
 
-Zur Wiederaufnahme denselben Befehl erneut ausfuehren. Gueltige
-zwischengespeicherte Metadaten werden lokal gelesen. Vorhandene Dokumente
-werden anhand ihrer angegebenen Groesse geprueft und uebersprungen.
-Unvollstaendige `.part`-Dateien werden neu begonnen, nicht byteweise
-fortgesetzt. Der Cache dient der Wiederaufnahme, **nicht einer
-inkrementellen Synchronisierung**: Aenderungen am Server und lokale
-Beschaedigungen bei unveraenderter Dateigroesse werden nicht erkannt.
-`--refresh` ersetzt Metadaten und Dokumente; alternativ fuer eine neue
-Erfassung ein neues Verzeichnis verwenden. Alte Dateien werden nicht
-automatisch geloescht. Nie zwei Prozesse gleichzeitig dasselbe
-Ausgabeverzeichnis verwenden lassen.
+**Jeder normale Aufruf aktualisiert das Archiv**, ohne zusaetzliche Option.
+Der Drucksachen-Suchlauf liest die Sammlungen beider Koerperschaften erneut
+ein und folgt den aktuellen Seitenlinks. Auch bereits bekannte verknuepfte
+Objekte werden erneut geprueft. Neue Drucksachen, geaenderte Beziehungen
+und spaeter hinzugekommene Dokumente werden so ermittelt, auch bei
+abgeschlossenen Referenzjahrgaengen.
 
-Der lokale Cache-Abgleich bleibt einstrangig. Fortschrittsstaende werden
+Gespeicherte Metadaten werden mit `If-None-Match` beziehungsweise
+`If-Modified-Since` revalidiert, sofern die vorherige Antwort einen
+`ETag` beziehungsweise `Last-Modified` geliefert hat. Nur eine passende
+HTTP-304-Antwort erlaubt die lokale Wiederverwendung. Andernfalls wird
+die neue Antwort validiert und veroeffentlicht. Ein Netzwerkfehler wird
+nicht durch ungepruefte alte Metadaten ersetzt.
+
+Dokumente mit solchen Pruefdaten werden zuerst per HEAD geprueft. Eine
+304-Antwort oder dieselben Validatoren in einer HEAD-200-Antwort bestaetigen
+den vorhandenen Inhalt, ohne die PDF erneut zu uebertragen. Bei geaenderten
+Validatoren, anderer Ziel-URL, fehlender HEAD-Unterstuetzung oder fehlenden
+Validatoren ist ein GET noetig. ETag hat Vorrang vor Last-Modified;
+Pruefdaten gelten nur fuer die gespeicherte endgueltige URL, nicht fuer
+eine andere Weiterleitungsadresse. Alle Pruefanfragen beachten die
+normalen Hostpausen und Parallelitaetsgrenzen.
+
+Die kleinen Dateien in `cache/` verbinden diese HTTP-Pruefdaten mit
+Anfrage-URL, tatsaechlicher Groesse, HTTP-Rahmeninformation und SHA-256
+des archivierten Inhalts. Vor einer bedingten Anfrage wird der lokale
+Inhalt gehasht; auch Beschaedigungen bei unveraenderter Groesse fuehren
+damit zu einem erneuten Abruf. Die Hashes in den Dokumentdateinamen
+bleiben dagegen ID-Hashes. Ungueltige Pruefdatensaetze werden mit einer
+Warnung verworfen und durch einen vollstaendigen Abruf ersetzt.
+
+Bei bestehenden Archiven ohne diese Pruefdaten ist einmalig ein erneuter
+Abruf noetig, um den aktuellen Serverstand verlaesslich mit den lokalen
+Bytes zu verbinden. Danach koennen unveraenderte Dokumente ohne erneute
+Inhaltsuebertragung bestaetigt werden. Server ohne brauchbare Validatoren
+erfordern weiterhin vollstaendige Abrufe. Die Aktualitaetspruefung haengt
+von korrekten HTTP-Validatoren des Servers ab; sie ist kein unabhaengiger
+Nachweis, dass die API alle oeffentlichen RIS-Daten bereitstellt.
+
+Zur Wiederaufnahme denselben Befehl erneut ausfuehren. Unvollstaendige
+`.part`-Dateien werden neu begonnen, nicht byteweise fortgesetzt.
+`--refresh` erzwingt weiterhin vollstaendige Abrufe ohne Cachepruefung,
+ist aber fuer die normale Aktualisierung nicht erforderlich.
+Angetroffene Metadaten und geaenderte Dokumente werden ersetzt; eine
+Versionshistorie entsteht nicht. Alte, nicht mehr verknuepfte Dateien
+werden nicht automatisch geloescht. Fuer einen getrennten neuen
+Schnappschuss ein anderes Verzeichnis verwenden. Nie zwei Prozesse
+gleichzeitig dasselbe Ausgabeverzeichnis verwenden lassen.
+
+`newMetadataPages` zaehlt vollstaendig abgerufene Metadatenantworten,
+`cachedMetadataPages` per HTTP 304 bestaetigte lokale Antworten.
+`newDocuments` zaehlt vollstaendige Dokumentdownloads,
+`cachedDocuments` ohne erneute Inhaltsuebertragung bestaetigte Dokumente.
+Alle Zaehler gelten fuer den jeweiligen Aufruf, nicht fuer die gesamte
+Archivhistorie. Ein erneuter Aufruf ist kein rein lokaler Cache-Abgleich
+mehr: Metadatenabrufe und Dokumentpruefungen benoetigen Netzwerkanfragen.
+
+Der lokale Integritaetsabgleich bleibt einstrangig. Fortschrittsstaende werden
 hoechstens zweimal pro Sekunde geschrieben, nicht nach jeder gecachten
 Ressource. Der anfaengliche unvollstaendige Status und der Abschlussstatus
 werden immer sofort geschrieben. Laufende Zaehler koennen kurz nachlaufen;
 die Wiederaufnahme stuetzt sich auf die Dateien, nicht auf den letzten
 gespeicherten Zaehlerstand.
-
-Ein lokaler macOS/ARM64-Vergleich mit 31.183 gesichteten Drucksachen,
-1.833 Ausgangsdrucksachen und 1.832 gecachten Dokumenten verbesserte sich
-bei warmem Cache von etwa 3,10 auf 0,86 Sekunden. Gemessen wurde isoliert
-der anfaengliche Drucksachenabgleich, nicht der gesamte verknuepfte Graph
-oder Netzwerkdownloads. Dafuer waren weder zusaetzliche Threads noch
-parallele Netzwerkanfragen noetig.
 
 `--max-pages N` begrenzt Seiten **pro Sammlung**, einschliesslich der
 Koerperschaftsliste. `--max-files N` begrenzt **neu heruntergeladene
@@ -378,7 +419,9 @@ Koerperschaftsliste, koennen keine weiteren Sammlungen ermittelt werden;
 der Lauf endet ebenfalls mit protokollierter Fehlstelle, nicht erfolgreich.
 
 Beim naechsten Aufruf werden fehlende Ressourcen erneut versucht,
-waehrend gueltige Cachedateien wiederverwendet werden. Es ist kein
+waehrend gueltige Cachedateien revalidiert werden. Bereits archivierte
+Daten bleiben erhalten, werden bei einer aktuellen 404-Antwort aber
+nicht als erfolgreiche Antwort verwendet. Es ist kein
 `--refresh` noetig. Der Bericht wird pro Lauf neu erstellt; behobene
 Fehlstellen verschwinden daraus. Waehrend des Laufs entsteht
 `missing-resources.jsonl.part`, die erst nach einem Durchlauf ohne
@@ -442,14 +485,14 @@ Dateien und verhindern daher unter dieser ausdruecklich gewaehlten
 Pruefregel keinen vollstaendigen Abschluss. Zugriffsfehlstellen und
 konfigurierte Grenzen tun dies weiterhin.
 
-Eine Cachedatei mit abweichender Groesse wird in diesem Modus erneut
-heruntergeladen, auch wenn ein frueherer Lauf sie bereits akzeptiert
-hat. So wird eine moeglicherweise beschaedigte lokale Datei nicht
-allein wegen der gelockerten Groessenpruefung als gueltig behandelt.
-Andere gueltige Cachedateien werden wiederverwendet; ein globales
-`--refresh` ist nicht noetig. Der Abweichungsbericht wird bei jedem
-Lauf neu erstellt und folgt demselben `.part`-/Umbenennungsverfahren
-wie der Bericht ueber nicht verfuegbare Dateien.
+Auch akzeptierte Groessenabweichungen koennen bei spaeteren Aufrufen
+wiederverwendet werden: Inhaltshash, tatsaechliche Groesse, urspruengliche
+HTTP-Rahmeninformation und Servervalidatoren muessen die Datei bestaetigen.
+Eine beschaedigte oder geaenderte Datei wird erneut heruntergeladen.
+Ohne diese Pruefdaten ist ebenfalls ein erneuter Abruf noetig.
+Der Abweichungsbericht wird auch fuer bestaetigte Cachedateien pro Lauf
+neu erstellt und folgt demselben `.part`-/Umbenennungsverfahren wie der
+Bericht ueber nicht verfuegbare Dateien.
 
 ### Exitcodes und Grenzen
 
@@ -492,11 +535,18 @@ eingebettete doppelte Dokumente, HTTP-Chunk-Kodierung, Weiterleitungen,
 Wiederaufnahme, reinen Metadatenbetrieb, Aktualisierung, ausdrueckliche
 Grenzen, fehlerhafte und abgebrochene Antworten sowie Wiederholungen.
 Langsame Antworten und Verbindungen ohne HTTP-Status werden getrennt
-geprueft, einschliesslich Wiederaufnahme mit einem hoeheren Zeitlimit,
-ohne zuvor abgeschlossene Metadaten erneut herunterzuladen.
+geprueft, einschliesslich Wiederaufnahme mit einem hoeheren Zeitlimit
+und Revalidierung zuvor abgeschlossener Metadaten.
 Hinzu kommen Jahrgangsauswahl, spaetere verknuepfte Vorgaenge und
 Dokumente, Graph-Deduplizierung, abweichende Organisationsfelder,
 Cache-Wiederverwendung und Archividentitaet.
+
+Aktualisierungstests aendern zwischen normalen Aufrufen die
+Drucksachenlisten und deren Seitenzahl, verknuepfte Vorgaenge, Dokumente
+gleicher Groesse und Weiterleitungsziele. Sie pruefen bedingte Anfragen,
+HEAD-Bestaetigung bei ignoriertem If-Modified-Since, GET-Rueckfall,
+alte Archive ohne Pruefdaten, lokale Beschaedigungen gleicher Groesse,
+ungueltige Pruefdatensaetze und unerwartete HTTP-304-Antworten.
 
 Weitere Tests decken HTTP 404 fuer System, Koerperschaftsliste,
 Sammlungen, Folgeseiten, verknuepfte Ressourcen und Dokumentdownloads
