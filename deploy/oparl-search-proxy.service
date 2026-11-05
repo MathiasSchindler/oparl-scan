@@ -1,0 +1,42 @@
+[Unit]
+Description=Potsdam RIS public HTTP proxy
+Wants=oparl-search.service
+After=network-online.target oparl-search.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=oparl-search-proxy
+Group=oparl-search-proxy
+RuntimeDirectory=oparl-search-proxy
+RuntimeDirectoryMode=0750
+LogsDirectory=oparl-search-proxy
+LogsDirectoryMode=0750
+ExecStartPre=/usr/sbin/apache2 -t -f /etc/oparl-search/apache.conf
+ExecStart=/usr/sbin/apache2 -f /etc/oparl-search/apache.conf -DFOREGROUND
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_UNIX
+UMask=0077
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=256
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

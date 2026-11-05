@@ -1,0 +1,65 @@
+Define PublicAddress 192.0.2.1
+Define PublicPort 8080
+Define BackendPort 18080
+
+ServerRoot /etc/apache2
+DefaultRuntimeDir /run/oparl-search-proxy
+PidFile /run/oparl-search-proxy/httpd.pid
+Mutex file:/run/oparl-search-proxy default
+Listen ${PublicAddress}:${PublicPort}
+ServerName ${PublicAddress}:${PublicPort}
+ServerTokens Prod
+ServerSignature Off
+User oparl-search-proxy
+Group oparl-search-proxy
+ErrorLog /var/log/oparl-search-proxy/error.log
+LogLevel warn
+
+LoadModule mpm_event_module /usr/lib/apache2/modules/mod_mpm_event.so
+LoadModule authz_core_module /usr/lib/apache2/modules/mod_authz_core.so
+LoadModule proxy_module /usr/lib/apache2/modules/mod_proxy.so
+LoadModule proxy_http_module /usr/lib/apache2/modules/mod_proxy_http.so
+LoadModule headers_module /usr/lib/apache2/modules/mod_headers.so
+LoadModule rewrite_module /usr/lib/apache2/modules/mod_rewrite.so
+LoadModule reqtimeout_module /usr/lib/apache2/modules/mod_reqtimeout.so
+
+StartServers 1
+ServerLimit 1
+ThreadLimit 16
+ThreadsPerChild 16
+MaxRequestWorkers 16
+MinSpareThreads 2
+MaxSpareThreads 32
+MaxConnectionsPerChild 10000
+Timeout 15
+KeepAlive On
+KeepAliveTimeout 2
+MaxKeepAliveRequests 50
+RequestReadTimeout header=5-10,MinRate=500 body=5,MinRate=500
+LimitRequestLine 60000
+LimitRequestFieldSize 8190
+LimitRequestFields 32
+
+<Directory />
+    Require all denied
+</Directory>
+
+RewriteEngine On
+RewriteCond expr "req('Host') != '${PublicAddress}:${PublicPort}'"
+RewriteRule ^ - [F,END]
+RewriteCond expr "-n req('Origin') && req('Origin') != 'http://${PublicAddress}:${PublicPort}'"
+RewriteRule ^ - [F,END]
+RewriteCond %{REQUEST_METHOD} !^(GET|HEAD)$
+RewriteRule ^ - [R=405,END]
+RewriteCond expr "-n req('Content-Length') || -n req('Transfer-Encoding') || -n req('Expect')"
+RewriteRule ^ - [R=400,END]
+
+ProxyRequests Off
+ProxyPreserveHost Off
+ProxyAddHeaders Off
+RequestHeader set Origin "http://127.0.0.1:${BackendPort}" "expr=-n req('Origin')"
+<Proxy "http://127.0.0.1:${BackendPort}/">
+    Require all granted
+</Proxy>
+ProxyPass / http://127.0.0.1:${BackendPort}/ connectiontimeout=2 timeout=15 retry=0 max=8 acquire=2000 disablereuse=On
+ProxyPassReverse / http://127.0.0.1:${BackendPort}/

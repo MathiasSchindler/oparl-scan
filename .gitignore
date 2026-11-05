@@ -1,4 +1,5 @@
 /build/
 /downloads/
+/deploy/apache.conf
 *.part
 .DS_Store

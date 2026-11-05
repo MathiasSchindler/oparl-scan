@@ -371,8 +371,9 @@ durchsuchbar und wird weiterhin mit `incomplete: true` gekennzeichnet.
 ### Betriebsgrenzen
 
 - Feste Bindung an `127.0.0.1`, kein oeffentlicher oder LAN-Listener.
-- Keine Anmeldung, kein TLS und noch keine Freigabe fuer einen
-  oeffentlichen Produktionsbetrieb oder Reverse-Proxy-Betrieb.
+- Keine Anmeldung und kein TLS im Suchprogramm. Ein oeffentlicher
+  Listener gehoert in einen separat abgesicherten Reverse Proxy,
+  nicht in das Suchprogramm; ein konkretes Setup folgt unten.
 - Host-Header muessen `127.0.0.1` oder `localhost` mit dem passenden
   Port nennen. Die API weist fremde Origins und herkunftsfremde
   Browseranfragen zurueck; es gibt keine allgemeine CORS-Freigabe.
@@ -388,6 +389,100 @@ durchsuchbar und wird weiterhin mit `incomplete: true` gekennzeichnet.
 Auf Windows meldet `--serve` einen ausdruecklichen Fehler, weil das
 eingebundene newos noch keinen TCP-Listener fuer Windows implementiert.
 CLI, Batchbetrieb und Indexdateien bleiben davon unberuehrt.
+
+### Bereitstellung auf dem virtuellen Server
+
+Das Setup unter [deploy/](../deploy/) betreibt die Suche auf
+<http://178.254.23.157:8080/>. Der Suchprozess selbst bleibt auf
+`127.0.0.1:18080`. Eine **eigene Apache-Instanz** bindet ausschliesslich
+an die oeffentliche IP mit Port 8080. Die vorhandene Apache-Instanz
+auf Port 80 und deren Backend auf `127.0.0.1:8080` bleiben unveraendert.
+Die neue Instanz laedt keine Konfiguration der bestehenden Websites.
+
+Voraussetzungen sind Linux/x86_64, systemd und Apache 2.4 mit den
+in [apache.conf.example](../deploy/apache.conf.example) geladenen Modulen. Das Setup
+verwendet den bereits installierten Apache als Proxy; das Suchprogramm
+selbst bleibt freestanding und ohne externe Laufzeitbibliotheken.
+Bei einem anderen Server IP-Adresse, Ports und Modulpfade anpassen.
+
+Fuer eine neue Installation die Vorlage `deploy/apache.conf.example`
+nach `deploy/apache.conf` kopieren. Eine bereits vorhandene lokale
+Konfiguration dabei nicht ueberschreiben. In der neuen Datei
+`PublicAddress` von der Dokumentationsadresse `192.0.2.1` auf die echte
+Server-IP aendern und bei Bedarf Ports und Modulpfade anpassen.
+Nur die konkrete `deploy/apache.conf` wird von Git ignoriert;
+die Vorlage und beide systemd-Dienstdateien bleiben versionierbar.
+
+Auf dem Server werden folgende Dateien installiert:
+
+| Datei | Zweck |
+| --- | --- |
+| `/opt/oparl-search/oparl-search` | Linux-Binary aus `build/linux-x86_64/` |
+| `/opt/oparl-search/index.ops` | Suchindex aus `build/search/` |
+| `/opt/oparl-search/index.ops.coverage.jsonl` | Abdeckungsbericht zum Index |
+| `/etc/oparl-search/apache.conf` | Eigenstaendige Proxykonfiguration aus der lokalen `deploy/apache.conf` |
+| `/etc/systemd/system/oparl-search.service` | Suchprozess als Benutzer `oparl-search` |
+| `/etc/systemd/system/oparl-search-proxy.service` | Proxy als Benutzer `oparl-search-proxy` |
+
+Die beiden Systemkonten haben keine Anmeldung und kein Homeverzeichnis.
+Programme, Index und Konfiguration gehoeren root und sind fuer die
+Dienstkonten nicht beschreibbar. Die Units begrenzen Speicher, CPU,
+Dateideskriptoren und Prozesse; sie verwenden schreibgeschuetzte
+Systemverzeichnisse und keine zusaetzlichen Capabilities.
+
+Der Proxy prueft den oeffentlichen Host und vorhandene Origin-Header,
+bevor er Host und erlaubte Origins fuer das lokale Backend umsetzt.
+Er aktiviert kein CORS und keinen Forward Proxy. `Sec-Fetch-Site`
+wird nicht entfernt; die Herkunftspruefung der API bleibt aktiv.
+Header-Lesezeiten, Backendverbindungen und Worker sind begrenzt.
+Ein zusaetzliches Access-Log mit Suchanfragen wird nicht geschrieben.
+
+**Dies ist ein oeffentlich lesbarer HTTP-Dienst ohne Anmeldung oder TLS.**
+Nicht fuer vertrauliche Anfragen oder beliebige hohe Last einsetzen.
+Fuer HTTPS zuerst einen passenden Domainnamen und TLS am Proxy einrichten.
+Die PDF-Dateien werden weiterhin beim Originalanbieter geoeffnet.
+Fuer den Suchdienst genuegt der selbststaendige Index mit Metadaten und
+Volltexten; die Downloadarchive muessen nicht uebertragen werden.
+`source` bleibt dabei ein Herkunftspfad aus dem urspruenglichen Archiv.
+
+Nach Installation und Konfigurationspruefung auf dem Server:
+
+```sh
+systemd-analyze verify /etc/systemd/system/oparl-search{,-proxy}.service
+systemctl daemon-reload
+systemctl enable --now oparl-search.service oparl-search-proxy.service
+systemctl status oparl-search.service oparl-search-proxy.service --no-pager
+```
+
+Diese Befehle starten beziehungsweise pruefen **nur die neuen Units**;
+`apache2.service` muss nicht neu geladen oder neu gestartet werden.
+Backendmeldungen stehen in `journalctl -u oparl-search.service`;
+Proxyfehler in `/var/log/oparl-search-proxy/error.log`.
+Die Suche zeigt unter `/health` weiterhin die bekannten Indexluecken.
+
+Nach Paketupdates von Apache oder seinen Modulen auch die eigene
+Proxy-Instanz mit `systemctl restart oparl-search-proxy.service`
+neu starten. Ein Neustart der Standardinstanz `apache2.service` allein
+aktualisiert den separaten Proxyprozess nicht. Vorher beide
+Apache-Konfigurationen pruefen; dabei sind kurze Unterbrechungen moeglich.
+
+Die externe Pruefung vergleicht Suchantworten bytegleich mit der lokalen
+CLI und testet Vorgangsseiten, JSON, HEAD sowie die Host-/Origin-Grenzen:
+
+```sh
+node tests/search-deployment.mjs http://178.254.23.157:8080/ \
+  build/macos-aarch64/oparl-search build/search/index.ops
+```
+
+Diese optionale Pruefung verwendet den realen Potsdamer Index mit Daten
+fuer 2024 und 2026; sie laeuft nicht als Teil der kleinen Fixture-Tests.
+
+Fuer eine Aktualisierung den neuen Index zunaechst unter einem anderen
+Dateinamen uebertragen, SHA-256 mit dem lokalen Original vergleichen,
+dann auf demselben Dateisystem atomar nach `index.ops` umbenennen und
+`systemctl restart oparl-search.service` ausfuehren. Den Abdeckungsbericht
+ebenfalls aktualisieren. Den Suchindex weiterhin lokal mit `oparl-index`
+bauen; der Server laedt nicht automatisch neue RIS-Daten nach.
 
 ## Vollstaendigkeit und Exitcodes
 

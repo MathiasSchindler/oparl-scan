@@ -1,0 +1,36 @@
+[Unit]
+Description=Potsdam RIS search backend
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=oparl-search
+Group=oparl-search
+WorkingDirectory=/opt/oparl-search
+ExecStart=/opt/oparl-search/oparl-search --serve --index /opt/oparl-search/index.ops --port 18080
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_UNIX
+UMask=0077
+MemoryMax=1536M
+TasksMax=16
+LimitNOFILE=128
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target
