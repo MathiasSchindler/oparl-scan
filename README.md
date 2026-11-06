@@ -118,6 +118,12 @@ Indexierung. Die teure PDF-Aufbereitung wird bei unveraenderten Bytes und
 Regeln jedoch wiederverwendet. Ohne `--prepared` bleibt die direkte
 PDF-Extraktion im Indexer moeglich. Die Originalarchive bleiben unveraendert.
 
+Die Potsdamer PDF-Regeln erfassen auch aeltere Anfrageformulare mit
+getrennten Erstellungs-, Eingangs- und Fristdaten sowie geometrisch
+begrenzte mehrzeilige Einreicherangaben. Diese belegten Quellenfelder sind
+noch keine fertigen Bearbeitungszeitstatistiken; Details und Grenzen stehen
+bei [oparl-prepare](docs/oparl-prepare.md#templates-und-erste-m5-bausteine).
+
 `--year 2024` meint Drucksachenkennzeichen mit `24/`, nicht das Datum
 der Drucksache oder PDF. Verknuepfte spaetere Vorgaenge koennen ebenfalls
 enthalten sein. Jahrgaenge und Systeme brauchen getrennte

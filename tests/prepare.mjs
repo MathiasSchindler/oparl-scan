@@ -32,8 +32,11 @@ function textPdf(lines, secondPage = false) {
     `<< /Type /Pages /Kids [3 0 R${secondPage ? ' 6 0 R' : ''}] /Count ${secondPage ? 2 : 1} >>`,
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
-    stream(`BT /F1 12 Tf 16 TL 1 0 0 1 40 740 Tm ${lines.map((s, i) =>
-      `${i ? 'T* ' : ''}(${s.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')}) Tj`).join('\n')} ET`)];
+    stream(`BT /F1 12 Tf 16 TL 1 0 0 1 40 740 Tm ${lines.map((line, i) => {
+      const [position, s] = Array.isArray(line)
+        ? [`1 0 0 1 ${line[0]} ${line[1]} Tm `, line[2]] : [i ? 'T* ' : '', line];
+      return `${position}(${s.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')}) Tj`;
+    }).join('\n')} ET`)];
   if (secondPage) objects.push(
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>',
     stream('BT /F1 12 Tf 16 TL 1 0 0 1 40 740 Tm (Fernwaer-) Tj T* (me) Tj ET'));
@@ -133,6 +136,16 @@ try {
   for (const span of initial.data.pages[0].layout.spans) {
     assert.ok(span.start + span.length <= rawPage.length);
     assert.ok(span.x >= 40000 && span.y <= 740000);
+  }
+  const spacedLines = ['Erste Zeile ', 'Zweite Zeile ', 'Dritte Zeile'];
+  const spaced = textPdf(spacedLines), spacedPath = join(root, 'trailing-spaces.pdf');
+  await writeFile(spacedPath, spaced);
+  prepareRun(spacedPath);
+  const spacedLayout = (await artifact(spaced)).data.pages[0].layout;
+  assert.equal(spacedLayout.text, spacedLines.join('\n'), 'Trailing PDF spaces must not suppress line breaks');
+  for (const [i, span] of spacedLayout.spans.entries()) {
+    assert.equal(Buffer.from(spacedLayout.text).subarray(span.start, span.start + span.length).toString(),
+      spacedLines[i], 'Adding line breaks must preserve every original span offset');
   }
   const stamp = (await stat(initial.path, { bigint: true })).mtimeNs;
   run(prepare, ['--input', archive, '--output', join(archive, 'derived')], 1);
@@ -272,6 +285,107 @@ try {
     prepareRun(path);
     assert.equal((await artifact(below)).data.fields[0].status, expected, 'Below-label fields require bounded geometric proximity');
   }
+  const legacyQuestion = [
+    [40, 780, 'Kleine Anfrage Drucksache Nr. (ggf. Nachtragsvermerk)'],
+    [400, 750, '23/SVV/0576'],
+    [40, 720, 'Einreicher: Fraktion Beispiel'],
+    [400, 720, 'öffentlich'],
+    [40, 680, 'Betreff: Testfrage'],
+    [244, 638, 'Erstellungsdatum:'], [400, 636.6, '06.06.2023'],
+    [244, 620, 'Eingang Büro der SVV:'], [400, 618.6, '09.06.2023'],
+    [244, 602, 'weitergeleitet an das Büro OBM:'], [400, 600.6, '12.06.2023'],
+    [244, 584, 'Termin der Beantwortung:'], [400, 582.6, '30.06.2023'],
+    [244, 566, 'Terminverlängerung:'],
+    [244, 548, 'Eingang der Beantwortung:'], [400, 546.6, '05.07.2023'],
+    [40, 490, 'Anlass des Auskunftsersuchens:'],
+    [40, 474, 'Erstellungsdatum: 01.01.1900 ist hier nur ein Zitat.'],
+  ];
+  for (const [name, lines, expected] of [
+    ['legacy-question', legacyQuestion, {
+      'document.date': '2023-06-06', 'submission.receivedDate': '2023-06-09',
+      'submission.forwardedDate': '2023-06-12', 'answer.dueDate': '2023-06-30',
+      'answer.receivedDate': '2023-07-05', 'originator.label': 'Fraktion Beispiel',
+    }],
+    ['legacy-paper', [
+      [40, 780, 'Antrag Drucksache Nr. (ggf. Nachtragsvermerk)'], [400, 750, '23/SVV/0359'],
+      [395, 638, 'Erstellungsdatum'], [496, 636.6, '06.04.2023'],
+      [395, 620, 'Freigabedatum:'], [496, 618.6, '07.04.2023'],
+      [40, 636.6, 'Einreicher: Fraktion Beispiel'],
+      [40, 570, 'Beratungsfolge:'], [40, 550, 'Datum der Sitzung Gremium Zuständigkeit'],
+      [40, 530, '03.05.2023 Stadtverordnetenversammlung Entscheidung'],
+    ], { 'document.date': '2023-04-06', 'document.releaseDate': '2023-04-07',
+      'originator.label': 'Fraktion Beispiel' }],
+    ['legacy-short-question', [
+      [40, 780, 'Anfrage Drucksache Nr. (ggf. Nachtragsvermerk)'], [400, 750, '23/SVV/0436'],
+      [40, 710, 'Einreicher:'], [40, 696, 'Fraktion Beispiel'],
+      [40, 670, 'Betreff:'], [40, 654, 'Testfrage'],
+      [392, 614, 'Erstellungsdatum:'], [496, 612.6, '27.04.2023'],
+      [392, 595, 'Freigabedatum:'],
+      [40, 570, 'Datum der Sitzung:'], [40, 554, '03.05.2023'],
+      [40, 510, 'Anlass des Auskunftsersuchens:'], [40, 494, 'Inhalt der Frage.'],
+    ], { 'document.date': '2023-04-27', 'originator.label': 'Fraktion Beispiel' }],
+  ]) {
+    const bytes = textPdf(lines), path = join(root, `${name}.pdf`);
+    await writeFile(path, bytes);
+    prepareRun(path);
+    const found = (await artifact(bytes)).data;
+    assert.equal(found.matchedHeaders, 1, 'Legacy forms must not tie with generic date headings');
+    assert.ok(!found.fields.some(f => f.field === 'document.role'), 'Receipt and due dates do not prove an answer role');
+    for (const [field, value] of Object.entries(expected)) {
+      const extracted = found.fields.find(f => f.field === field);
+      assert.equal(extracted.status, 'rule-supported', `${name}: ${field}`);
+      assert.equal(extracted.value, value, `${name}: ${field}`);
+      const raw = Buffer.from(found.pages[0].layout.text);
+      assert.equal(raw.subarray(extracted.layoutTextStart, extracted.layoutTextStart + extracted.layoutTextLength).toString(),
+        extracted.sourceText, 'Date roles and actors retain byte-exact layout evidence');
+    }
+    if (name === 'legacy-short-question') {
+      assert.equal(found.fields.find(f => f.field === 'document.releaseDate').status, 'missing',
+        'An empty release cell cannot borrow a meeting heading or meeting date');
+    }
+    if (name === 'legacy-question') {
+      const empty = found.fields.find(f => f.field === 'answer.extendedDueDate');
+      assert.equal(empty.status, 'missing', 'A blank deadline extension cannot borrow the following answer receipt date');
+      assert.equal(empty.value, null);
+      assert.equal(empty.sourceText, '');
+      await writeFile(sourcePath, bytes);
+      prepareRun();
+      run(indexer, ['--input', archive, '--output', index, '--prepared', cache]);
+      assert.equal(show(file).model.dates['document.date'].value, '2023-06-06');
+      assert.deepEqual(show(file).preparation.fields, found.fields, 'New date roles survive standalone index import');
+      assert.ok(!show(file).model.dates.submittedAt, 'A receipt date must not become a submission creation date');
+      await preparedApi(file, found.fields);
+      await writeFile(sourcePath, source);
+    }
+  }
+  for (const [name, x, gap, count, status] of [
+    ['aligned', 40, 14, 2, 'rule-supported'],
+    ['minimum-gap', 40, 4, 2, 'rule-supported'],
+    ['maximum-gap', 40, 22, 2, 'rule-supported'],
+    ['alignment-edge', 44, 14, 2, 'rule-supported'],
+    ['four-lines', 40, 14, 4, 'rule-supported'],
+    ['wrong-column', 45, 14, 2, 'unsupported-placement'],
+    ['too-distant', 40, 23, 2, 'unsupported-placement'],
+    ['too-many-lines', 40, 14, 5, 'unsupported-placement'],
+  ]) {
+    const lines = [[40, 740, '26/SVV/0677'], [40, 700, 'Einreicher:'],
+      ...Array.from({ length: count }, (_, i) => [i ? x : 40, 686 - i * gap, `Fraktion ${i + 1} `]),
+      [440, 700, 'Datum'], [440, 686, '16.07.2026'], [40, 560, 'Anlass des Auskunftsersuchens:']];
+    const bytes = textPdf(lines), path = join(root, `multiline-${name}.pdf`);
+    await writeFile(path, bytes);
+    prepareRun(path);
+    const found = (await artifact(bytes)).data;
+    const actor = found.fields.find(f => f.field === 'originator.label');
+    assert.equal(actor.status, status, name);
+    if (status === 'rule-supported') {
+      assert.equal(actor.value, Array.from({ length: count }, (_, i) => `Fraktion ${i + 1}`).join(' '));
+      assert.match(actor.sourceText, /\n/, 'Normalized actors retain original multiline evidence');
+    } else assert.equal(actor.value, null, 'Reject the complete field rather than returning a truncated actor');
+  }
+  const invalidConfig = JSON.parse(await readFile('templates/potsdam.json', 'utf8'));
+  invalidConfig.templates[0].fields[1].maxLines = 5;
+  await writeFile(customPath, JSON.stringify(invalidConfig));
+  run(prepare, ['--input', sourcePath, '--output', cache, '--templates', customPath], 1);
   const image = pdf([null, '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /XObject << /I 4 0 R >> >> /Contents 5 0 R >>',

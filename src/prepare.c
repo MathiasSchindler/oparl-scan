@@ -7,9 +7,7 @@
 #error PREPARE_ENGINE_ID must fingerprint the extraction sources
 #endif
 #define LIMIT (64U * 1024U * 1024U)
-static int put(ToolByteBuffer *b, const char *s) {
-    return tool_byte_buffer_append_cstr(b, s);
-}
+static int put(ToolByteBuffer *b, const char *s) { return tool_byte_buffer_append_cstr(b, s); }
 static int number(ToolByteBuffer *b, unsigned long long n) {
     char text[32];
     rt_unsigned_to_string(n, text, sizeof(text));
@@ -63,16 +61,35 @@ static int keys(const Json *j, size_t object, const char *const *names, size_t c
             return -1;
         for (k = object + 1; k < i; k = json_token(j, k + 1)->next) {
             char a[128], b[128];
-            if (json_string(j, i, a, sizeof(a)) || json_string(j, k, b, sizeof(b)) || !rt_strcmp(a, b))
+            if (json_string(j, i, a, sizeof(a)) || json_string(j, k, b, sizeof(b)) ||
+                !rt_strcmp(a, b))
                 return -1;
         }
     }
     return 0;
 }
+static const char *field_type(const char *name) {
+    static const char *const dates[] = {"document.date",           "document.releaseDate",
+                                        "submission.receivedDate", "submission.forwardedDate",
+                                        "answer.dueDate",          "answer.extendedDueDate",
+                                        "answer.receivedDate"};
+    size_t i;
+    for (i = 0; i < sizeof(dates) / sizeof(dates[0]); i++)
+        if (!rt_strcmp(name, dates[i]))
+            return "date";
+    if (!rt_strcmp(name, "document.role"))
+        return "literal";
+    if (!rt_strcmp(name, "originator.label") || !rt_strcmp(name, "department.label") ||
+        !rt_strcmp(name, "document.reference"))
+        return "text";
+    return 0;
+}
 int prepare_config_open(PrepareConfig *c, const char *path, int layout) {
     static const char *const root_keys[] = {"format", "templates"};
-    static const char *const template_keys[] = {"id", "anchors", "stopAt", "fields", "excludeAnchors"};
-    static const char *const field_keys[] = {"name", "label", "type", "value", "placement"};
+    static const char *const template_keys[] = {"id", "anchors", "stopAt", "fields",
+                                                "excludeAnchors"};
+    static const char *const field_keys[] = {"name",      "label",    "type",  "value",
+                                             "placement", "maxLines", "stopAt"};
     size_t length, list, i, j, k;
     unsigned long long version;
     CryptoSha256Context sha;
@@ -86,16 +103,17 @@ int prepare_config_open(PrepareConfig *c, const char *path, int layout) {
     if (json_parse(&c->json, (const char *)c->bytes, length))
         return prepare_error("invalid template JSON: ", path);
     list = json_get(&c->json, 0, "templates");
-    if (keys(&c->json, 0, root_keys, 2) || json_uint(&c->json, json_get(&c->json, 0, "format"), &version) ||
-        version != 1 || !array(&c->json, list))
+    if (keys(&c->json, 0, root_keys, 2) ||
+        json_uint(&c->json, json_get(&c->json, 0, "format"), &version) || version != 1 ||
+        !array(&c->json, list))
         return prepare_error("invalid template schema: ", path);
     for (i = list + 1; i < json_token(&c->json, list)->next; i = json_token(&c->json, i)->next) {
         char id[128];
         size_t anchors = json_get(&c->json, i, "anchors"), fields = json_get(&c->json, i, "fields");
         size_t stop = json_get(&c->json, i, "stopAt"), count = 0;
         size_t exclude = json_get(&c->json, i, "excludeAnchors");
-        if (keys(&c->json, i, template_keys, 5) || string(&c->json, i, "id", id, sizeof(id)) || !id[0] ||
-            !array(&c->json, anchors) || !array(&c->json, fields) ||
+        if (keys(&c->json, i, template_keys, 5) || string(&c->json, i, "id", id, sizeof(id)) ||
+            !id[0] || !array(&c->json, anchors) || !array(&c->json, fields) ||
             (stop != JSON_NONE && !array(&c->json, stop)) ||
             (exclude != JSON_NONE && !array(&c->json, exclude)))
             goto invalid;
@@ -117,27 +135,31 @@ int prepare_config_open(PrepareConfig *c, const char *path, int layout) {
         if (!count || count > 16)
             goto invalid;
         count = 0;
-        for (j = fields + 1; j < json_token(&c->json, fields)->next; j = json_token(&c->json, j)->next) {
+        for (j = fields + 1; j < json_token(&c->json, fields)->next;
+             j = json_token(&c->json, j)->next) {
             char name[64], label[256], type[32], value[256], placement[32];
-            if (++count > 16 || keys(&c->json, j, field_keys, 5) ||
+            unsigned long long lines;
+            size_t field_stop = json_get(&c->json, j, "stopAt");
+            if (++count > 16 || keys(&c->json, j, field_keys, 7) ||
                 string(&c->json, j, "name", name, sizeof(name)) ||
                 string(&c->json, j, "label", label, sizeof(label)) || !label[0] ||
                 string(&c->json, j, "type", type, sizeof(type)))
                 goto invalid;
-            if (rt_strcmp(name, "document.date") && rt_strcmp(name, "document.role") &&
-                rt_strcmp(name, "originator.label") && rt_strcmp(name, "department.label") &&
-                rt_strcmp(name, "document.reference"))
+            if (!field_type(name) || rt_strcmp(type, field_type(name)))
                 goto invalid;
-            if (rt_strcmp(type, "text") && rt_strcmp(type, "date") && rt_strcmp(type, "literal"))
+            if (json_get(&c->json, j, "maxLines") != JSON_NONE &&
+                (rt_strcmp(type, "text") ||
+                 json_uint(&c->json, json_get(&c->json, j, "maxLines"), &lines) || !lines ||
+                 lines > 4))
                 goto invalid;
-            if (!rt_strcmp(name, "document.date") && rt_strcmp(type, "date"))
-                goto invalid;
-            if (!rt_strcmp(name, "document.role") && rt_strcmp(type, "literal"))
-                goto invalid;
-            if ((!rt_strcmp(name, "originator.label") || !rt_strcmp(name, "department.label") ||
-                 !rt_strcmp(name, "document.reference")) &&
-                rt_strcmp(type, "text"))
-                goto invalid;
+            if (field_stop != JSON_NONE) {
+                if (!array(&c->json, field_stop))
+                    goto invalid;
+                for (k = field_stop + 1; k < json_token(&c->json, field_stop)->next;
+                     k = json_token(&c->json, k)->next)
+                    if (json_string(&c->json, k, value, sizeof(value)) || !value[0])
+                        goto invalid;
+            }
             if (!rt_strcmp(type, "literal") &&
                 (string(&c->json, j, "value", value, sizeof(value)) || !value[0]))
                 goto invalid;
@@ -191,12 +213,12 @@ int prepare_manifest_write(const PrepareConfig *c, const char *root) {
     char path[4096];
     int status;
     tool_byte_buffer_init(&b);
-    status = put(&b, "{\"format\":1") || field(&b, "engine", PREPARE_ENGINE_ID) || field(&b, "key", c->key) ||
-             field(&b, "templatesSha256", c->template_hash) ||
+    status = put(&b, "{\"format\":1") || field(&b, "engine", PREPARE_ENGINE_ID) ||
+             field(&b, "key", c->key) || field(&b, "templatesSha256", c->template_hash) ||
              put(&b, c->layout ? ",\"allPageLayout\":true}" : ",\"allPageLayout\":false}");
     if (!status)
-        status =
-            rt_join_path(root, "manifest.json", path, sizeof(path)) || atomic_write(path, b.data, b.size);
+        status = rt_join_path(root, "manifest.json", path, sizeof(path)) ||
+                 atomic_write(path, b.data, b.size);
     tool_byte_buffer_free(&b);
     return status ? prepare_error("cannot publish preparation manifest: ", root) : 0;
 }
@@ -208,8 +230,9 @@ int prepare_manifest_read(const char *root, char key[65]) {
     unsigned long long format;
     int status;
     PlatformDirEntry info;
-    if (rt_join_path(root, "manifest.json", path, sizeof(path)) || platform_get_path_info(path, &info) ||
-        info.size > 65536 || tool_read_all_input(path, &bytes, &length))
+    if (rt_join_path(root, "manifest.json", path, sizeof(path)) ||
+        platform_get_path_info(path, &info) || info.size > 65536 ||
+        tool_read_all_input(path, &bytes, &length))
         return prepare_error("missing preparation manifest; run oparl-prepare: ", root);
     if (json_parse(&j, (const char *)bytes, length)) {
         rt_free(bytes);
@@ -217,7 +240,8 @@ int prepare_manifest_read(const char *root, char key[65]) {
     }
     status = json_uint(&j, json_get(&j, 0, "format"), &format) || format != 1 ||
              string(&j, 0, "key", key, 65) || !digest_valid(key) ||
-             string(&j, 0, "engine", engine, sizeof(engine)) || rt_strcmp(engine, PREPARE_ENGINE_ID);
+             string(&j, 0, "engine", engine, sizeof(engine)) ||
+             rt_strcmp(engine, PREPARE_ENGINE_ID);
     json_free(&j);
     rt_free(bytes);
     return status ? prepare_error("stale preparation engine; run oparl-prepare: ", root) : 0;
@@ -238,18 +262,20 @@ int prepared_open(PreparedDocument *d, const char *root, const char *key, const 
     unsigned long long n, format, page = 0, warning_pages = 0;
     const JsonToken *data;
     rt_memset(d, 0, sizeof(*d));
-    if (artifact_path(root, key, hash, path) || platform_get_path_info(path, &info) || info.size > LIMIT ||
-        tool_read_all_input(path, &d->bytes, &length))
+    if (artifact_path(root, key, hash, path) || platform_get_path_info(path, &info) ||
+        info.size > LIMIT || tool_read_all_input(path, &d->bytes, &length))
         return prepare_error("missing/oversized prepared document: ", hash);
     if (json_parse(&d->json, (const char *)d->bytes, length))
         goto invalid;
     d->data = json_get(&d->json, 0, "data");
     data = json_token(&d->json, d->data);
-    if (!data || data->kind != JSON_OBJECT || json_uint(&d->json, json_get(&d->json, 0, "format"), &format) ||
-        format != 1 || string(&d->json, 0, "sha256", expected, sizeof(expected)))
+    if (!data || data->kind != JSON_OBJECT ||
+        json_uint(&d->json, json_get(&d->json, 0, "format"), &format) || format != 1 ||
+        string(&d->json, 0, "sha256", expected, sizeof(expected)))
         goto invalid;
     prepare_hash(d->bytes + data->start, data->end - data->start, actual);
-    if (rt_strcmp(actual, expected) || string(&d->json, d->data, "sourceSha256", source, sizeof(source)) ||
+    if (rt_strcmp(actual, expected) ||
+        string(&d->json, d->data, "sourceSha256", source, sizeof(source)) ||
         rt_strcmp(source, hash) || string(&d->json, d->data, "key", pipeline, sizeof(pipeline)) ||
         rt_strcmp(pipeline, key) || string(&d->json, d->data, "engine", engine, sizeof(engine)) ||
         rt_strcmp(engine, PREPARE_ENGINE_ID) ||
@@ -261,7 +287,8 @@ int prepared_open(PreparedDocument *d, const char *root, const char *key, const 
     for (i = pages + 1; i < json_token(&d->json, pages)->next; i = json_token(&d->json, i)->next) {
         const JsonToken *text = json_token(&d->json, json_get(&d->json, i, "text"));
         if (json_uint(&d->json, json_get(&d->json, i, "page"), &n) || n != ++page || !text ||
-            text->kind != JSON_STRING || json_uint(&d->json, json_get(&d->json, i, "warnings"), &n) || n > 7)
+            text->kind != JSON_STRING ||
+            json_uint(&d->json, json_get(&d->json, i, "warnings"), &n) || n > 7)
             goto invalid;
         if (n)
             warning_pages++;
@@ -270,7 +297,8 @@ int prepared_open(PreparedDocument *d, const char *root, const char *key, const 
         json_uint(&d->json, json_get(&d->json, d->data, "warningPages"), &n) || n != warning_pages)
         goto invalid;
     {
-        static const char *const names[] = {"matchedHeaders", "unmatchedHeaders", "ambiguousHeaders"};
+        static const char *const names[] = {"matchedHeaders", "unmatchedHeaders",
+                                            "ambiguousHeaders"};
         unsigned long long total = 0;
         const JsonToken *error = json_token(&d->json, json_get(&d->json, d->data, "error"));
         for (i = 0; i < 3; i++) {
@@ -311,22 +339,30 @@ static const PdfTextSpan *span_at(const PdfTextLayout *l, size_t at) {
     return 0;
 }
 static int positioned(const PdfTextLayout *layout, size_t anchor, size_t start, size_t end,
-                      const char *placement) {
+                      const char *placement, unsigned long long max_lines) {
     const PdfTextSpan *a = span_at(layout, anchor), *v = span_at(layout, start);
     int right, below;
-    size_t i;
+    size_t i, lines = 1;
+    double y;
     if (!a || !v || a->end_y - a->y > 1 || a->y - a->end_y > 1)
         return 0;
     right = v->y - a->y <= 2 && a->y - v->y <= 2 && v->x >= a->x;
     below = a->y - v->y >= 4 && a->y - v->y <= 22 && v->x - a->x <= 4 && a->x - v->x <= 4;
     if (!((right && rt_strcmp(placement, "below")) || (below && rt_strcmp(placement, "right"))))
         return 0;
+    y = v->y;
     for (i = 0; i < layout->span_count; i++) {
         const PdfTextSpan *s = &layout->spans[i];
         if (s->start >= end || s->start + s->length <= start)
             continue;
-        if (s->y - v->y > 2 || v->y - s->y > 2 || s->end_y - s->y > 1 || s->y - s->end_y > 1)
+        if (s->end_y - s->y > 1 || s->y - s->end_y > 1)
             return 0;
+        if (s->y - y > 2 || y - s->y > 2) {
+            if (++lines > max_lines || y - s->y < 4 || y - s->y > 22 ||
+                !((s->x - v->x <= 4 && v->x - s->x <= 4) || (s->x - a->x <= 4 && a->x - s->x <= 4)))
+                return 0;
+            y = s->y;
+        }
     }
     return 1;
 }
@@ -360,7 +396,8 @@ typedef struct {
     size_t count, warnings, matched, unmatched, ambiguous;
     int resource;
 } Build;
-static int header_limit(const Json *json, size_t definition, const PdfTextLayout *layout, size_t *limit) {
+static int header_limit(const Json *json, size_t definition, const PdfTextLayout *layout,
+                        size_t *limit) {
     size_t stop = json_get(json, definition, "stopAt"), i;
     *limit = layout->length < 2048 ? layout->length : 2048;
     if (stop == JSON_NONE)
@@ -376,7 +413,8 @@ static int header_limit(const Json *json, size_t definition, const PdfTextLayout
     }
     return 0;
 }
-static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page, unsigned int warnings) {
+static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page,
+                    unsigned int warnings) {
     const Json *j = &b->config->json;
     size_t list = json_get(j, 0, "templates"), i, best = JSON_NONE, score = 0, ties = 0;
     size_t cap = layout->length < 2048 ? layout->length : 2048;
@@ -431,14 +469,18 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page, un
         return -1;
     list = json_get(j, best, "fields");
     for (i = list + 1; i < json_token(j, list)->next; i = json_token(j, i)->next) {
-        size_t start, end, at, k, n;
+        size_t start, end, at, k, n, boundary;
         const char *state = "rule-supported";
         char placement[32] = "right";
-        if (string(j, i, "name", name, sizeof(name)) || string(j, i, "label", label, sizeof(label)) ||
-            string(j, i, "type", type, sizeof(type)))
+        unsigned long long max_lines = 1;
+        if (string(j, i, "name", name, sizeof(name)) ||
+            string(j, i, "label", label, sizeof(label)) || string(j, i, "type", type, sizeof(type)))
             return -1;
         if (json_get(j, i, "placement") != JSON_NONE &&
             string(j, i, "placement", placement, sizeof(placement)))
+            return -1;
+        if (json_get(j, i, "maxLines") != JSON_NONE &&
+            json_uint(j, json_get(j, i, "maxLines"), &max_lines))
             return -1;
         at = find(layout->text, cap, label, 0);
         start = end = 0;
@@ -449,7 +491,34 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page, un
             state = "ambiguous";
         else {
             start = at + rt_strlen(label);
-            while (start < cap && (rt_is_space(layout->text[start]) || layout->text[start] == ':'))
+            boundary = cap;
+            for (k = list + 1; k < json_token(j, list)->next; k = json_token(j, k)->next) {
+                char next[256];
+                size_t p;
+                if (k == i)
+                    continue;
+                if (string(j, k, "label", next, sizeof(next)))
+                    return -1;
+                p = find(layout->text, cap, next, start);
+                if (p < boundary)
+                    boundary = p;
+            }
+            k = json_get(j, i, "stopAt");
+            if (k != JSON_NONE) {
+                size_t stop;
+                for (stop = k + 1; stop < json_token(j, k)->next;
+                     stop = json_token(j, stop)->next) {
+                    char next[256];
+                    size_t p;
+                    if (json_string(j, stop, next, sizeof(next)))
+                        return -1;
+                    p = find(layout->text, cap, next, start);
+                    if (p < boundary)
+                        boundary = p;
+                }
+            }
+            while (start < boundary &&
+                   (rt_is_space(layout->text[start]) || layout->text[start] == ':'))
                 start++;
             end = start;
             if (!rt_strcmp(type, "literal")) {
@@ -459,9 +528,11 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page, un
                     return -1;
             } else if (!rt_strcmp(type, "date")) {
                 char normalized[11];
-                while (end < cap && !rt_is_space(layout->text[end]))
+                while (end < boundary && !rt_is_space(layout->text[end]))
                     end++;
-                if (end - start != 10)
+                if (end == start)
+                    state = "missing";
+                else if (end - start != 10)
                     state = "invalid";
                 else {
                     memcpy(value, layout->text + start, 10);
@@ -474,19 +545,9 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page, un
                         memcpy(value, normalized, 11);
                 }
             } else {
-                while (end < cap && layout->text[end] != '\n' && layout->text[end] != '\r')
+                while (end < boundary &&
+                       (max_lines > 1 || (layout->text[end] != '\n' && layout->text[end] != '\r')))
                     end++;
-                for (k = list + 1; k < json_token(j, list)->next; k = json_token(j, k)->next) {
-                    char next[256];
-                    size_t p;
-                    if (k == i)
-                        continue;
-                    if (string(j, k, "label", next, sizeof(next)))
-                        return -1;
-                    p = find(layout->text, cap, next, start);
-                    if (p < end)
-                        end = p;
-                }
                 while (end > start && rt_is_space(layout->text[end - 1]))
                     end--;
                 if (end == start)
@@ -494,12 +555,17 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page, un
                 else if (end - start >= sizeof(value))
                     state = "too-long";
                 else {
-                    memcpy(value, layout->text + start, end - start);
-                    value[end - start] = 0;
+                    size_t used = 0;
+                    for (k = start; k < end; k++)
+                        if (!rt_is_space(layout->text[k]))
+                            value[used++] = layout->text[k];
+                        else if (used && value[used - 1] != ' ')
+                            value[used++] = ' ';
+                    value[used] = 0;
                 }
             }
             if (!rt_strcmp(state, "rule-supported") && rt_strcmp(type, "literal") &&
-                !positioned(layout, at, start, end, placement))
+                !positioned(layout, at, start, end, placement, max_lines))
                 state = "unsupported-placement";
         }
         if (end - start < sizeof(source)) {
@@ -507,15 +573,20 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page, un
             source[end - start] = 0;
         }
         n = b->fields.size;
-        if ((n && put(&b->fields, ",")) || put(&b->fields, "{\"field\":") || json_quote(&b->fields, name) ||
-            field(&b->fields, "status", state) || field(&b->fields, "templateId", id) ||
-            field(&b->fields, "rule", "header-anchor-position-v1") || integer(&b->fields, "page", page) ||
-            field(&b->fields, "placement", placement) || field(&b->fields, "sourceLabel", label) ||
+        if ((n && put(&b->fields, ",")) || put(&b->fields, "{\"field\":") ||
+            json_quote(&b->fields, name) || field(&b->fields, "status", state) ||
+            field(&b->fields, "templateId", id) ||
+            field(&b->fields, "rule", "header-anchor-position-v2") ||
+            integer(&b->fields, "page", page) || field(&b->fields, "placement", placement) ||
+            field(&b->fields, "sourceLabel", label) || integer(&b->fields, "maxLines", max_lines) ||
             integer(&b->fields, "layoutTextStart", start) ||
-            integer(&b->fields, "layoutTextLength", end - start) || put(&b->fields, ",\"sourceText\":") ||
-            (end - start < sizeof(source) ? json_quote(&b->fields, source) : put(&b->fields, "null")) ||
+            integer(&b->fields, "layoutTextLength", end - start) ||
+            put(&b->fields, ",\"sourceText\":") ||
+            (end - start < sizeof(source) ? json_quote(&b->fields, source)
+                                          : put(&b->fields, "null")) ||
             put(&b->fields, ",\"value\":") ||
-            (!rt_strcmp(state, "rule-supported") ? json_quote(&b->fields, value) : put(&b->fields, "null")) ||
+            (!rt_strcmp(state, "rule-supported") ? json_quote(&b->fields, value)
+                                                 : put(&b->fields, "null")) ||
             put(&b->fields, "}"))
             return -1;
     }
@@ -552,17 +623,18 @@ static int page_callback(unsigned int page, const char *text, size_t length, uns
         for (i = 0; i < layout->span_count; i++) {
             const PdfTextSpan *s = &layout->spans[i];
             if ((i && put(&out, ",")) || put(&out, "{\"start\":") || number(&out, s->start) ||
-                integer(&out, "length", s->length) || put(&out, ",\"x\":") || signed_number(&out, s->x) ||
-                put(&out, ",\"y\":") || signed_number(&out, s->y) || put(&out, ",\"endX\":") ||
-                signed_number(&out, s->end_x) || put(&out, ",\"endY\":") || signed_number(&out, s->end_y) ||
+                integer(&out, "length", s->length) || put(&out, ",\"x\":") ||
+                signed_number(&out, s->x) || put(&out, ",\"y\":") || signed_number(&out, s->y) ||
+                put(&out, ",\"endX\":") || signed_number(&out, s->end_x) ||
+                put(&out, ",\"endY\":") || signed_number(&out, s->end_y) ||
                 put(&out, ",\"fontSize\":") || signed_number(&out, s->size) || put(&out, "}"))
                 goto error;
         }
         if (put(&out, "]}"))
             goto error;
     }
-    if (put(&out, "}") || b->pages.size + out.size > LIMIT / 2 || (b->count && put(&b->pages, ",")) ||
-        tool_byte_buffer_append(&b->pages, out.data, out.size))
+    if (put(&out, "}") || b->pages.size + out.size > LIMIT / 2 ||
+        (b->count && put(&b->pages, ",")) || tool_byte_buffer_append(&b->pages, out.data, out.size))
         goto error;
     b->count++;
     if (warnings)
@@ -575,8 +647,8 @@ error:
     tool_byte_buffer_free(&out);
     return -1;
 }
-int prepare_document(const PrepareConfig *c, const char *root, const unsigned char *bytes, size_t length,
-                     int force, int *reused, int *incomplete) {
+int prepare_document(const PrepareConfig *c, const char *root, const unsigned char *bytes,
+                     size_t length, int force, int *reused, int *incomplete) {
     char hash[65], path[4096], checksum[65];
     PlatformDirEntry info;
     Build build;
@@ -592,7 +664,8 @@ int prepare_document(const PrepareConfig *c, const char *root, const unsigned ch
         result = prepared_open(&doc, root, c->key, hash, length);
         if (!result) {
             *reused = 1;
-            *incomplete = !json_equals(&doc.json, json_get(&doc.json, doc.data, "status"), "complete");
+            *incomplete =
+                !json_equals(&doc.json, json_get(&doc.json, doc.data, "status"), "complete");
         }
         prepared_close(&doc);
         return result;
@@ -612,20 +685,25 @@ int prepare_document(const PrepareConfig *c, const char *root, const unsigned ch
     *incomplete = extracted || build.warnings;
     if (put(&payload, "{\"sourceSha256\":") || json_quote(&payload, hash) ||
         integer(&payload, "sourceBytes", length) || field(&payload, "engine", PREPARE_ENGINE_ID) ||
-        field(&payload, "key", c->key) || field(&payload, "status", status) || put(&payload, ",\"error\":") ||
-        (extracted ? json_quote(&payload, error ? error : "PDF extraction failed") : put(&payload, "null")) ||
-        integer(&payload, "pageCount", build.count) || integer(&payload, "warningPages", build.warnings) ||
+        field(&payload, "key", c->key) || field(&payload, "status", status) ||
+        put(&payload, ",\"error\":") ||
+        (extracted ? json_quote(&payload, error ? error : "PDF extraction failed")
+                   : put(&payload, "null")) ||
+        integer(&payload, "pageCount", build.count) ||
+        integer(&payload, "warningPages", build.warnings) ||
         integer(&payload, "matchedHeaders", build.matched) ||
         integer(&payload, "unmatchedHeaders", build.unmatched) ||
         integer(&payload, "ambiguousHeaders", build.ambiguous) || put(&payload, ",\"fields\":[") ||
         tool_byte_buffer_append(&payload, build.fields.data, build.fields.size) ||
         put(&payload, "],\"pages\":[") ||
-        tool_byte_buffer_append(&payload, build.pages.data, build.pages.size) || put(&payload, "]}"))
+        tool_byte_buffer_append(&payload, build.pages.data, build.pages.size) ||
+        put(&payload, "]}"))
         goto done;
     prepare_hash(payload.data, payload.size, checksum);
     if (put(&envelope, "{\"format\":1,\"sha256\":") || json_quote(&envelope, checksum) ||
-        put(&envelope, ",\"data\":") || tool_byte_buffer_append(&envelope, payload.data, payload.size) ||
-        put(&envelope, "}\n") || envelope.size > LIMIT || atomic_write(path, envelope.data, envelope.size))
+        put(&envelope, ",\"data\":") ||
+        tool_byte_buffer_append(&envelope, payload.data, payload.size) || put(&envelope, "}\n") ||
+        envelope.size > LIMIT || atomic_write(path, envelope.data, envelope.size))
         goto done;
     result = 0;
 done:

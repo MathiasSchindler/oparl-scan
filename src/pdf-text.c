@@ -478,7 +478,10 @@ done:
 }
 
 static int separator(ToolByteBuffer *text, unsigned char ch) {
-    if (text->size == 0 || rt_is_space((char)text->data[text->size - 1])) return 0;
+    unsigned char last;
+    if (text->size == 0) return 0;
+    last = text->data[text->size - 1];
+    if (ch == '\n' ? last == '\n' || last == '\r' : rt_is_space((char)last)) return 0;
     return tool_byte_buffer_append(text, &ch, 1);
 }
 

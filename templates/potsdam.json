@@ -4,61 +4,89 @@
     {
       "id": "potsdam-paper-header-v1",
       "anchors": ["/SVV/", "Einreicher:", "Datum"],
+      "excludeAnchors": ["Erstellungsdatum"],
       "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Beschlussvorschlag", "Begr\u00fcndung:"],
       "fields": [
         {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
-        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below"}
+        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below", "maxLines": 4}
       ]
     },
     {
       "id": "potsdam-extension-header-v1",
       "anchors": ["/SVV/", "Einreicher:", "Datum", "Fristverl\u00e4ngerungsbitte"],
+      "excludeAnchors": ["Erstellungsdatum"],
       "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Begr\u00fcndung:"],
       "fields": [
         {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
-        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below"},
+        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below", "maxLines": 4},
         {"name": "document.role", "label": "Fristverl\u00e4ngerungsbitte", "type": "literal", "value": "deadline-extension"}
       ]
     },
     {
       "id": "potsdam-answer-header-v1",
       "anchors": ["/SVV/", "Einreicher:", "Datum", "Antwort auf die Kleine Anfrage"],
-      "excludeAnchors": ["Fristverl\u00e4ngerungsbitte"],
+      "excludeAnchors": ["Fristverl\u00e4ngerungsbitte", "Erstellungsdatum"],
       "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Begr\u00fcndung:"],
       "fields": [
         {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
-        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below"},
+        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below", "maxLines": 4},
         {"name": "document.role", "label": "Antwort auf die Kleine Anfrage", "type": "literal", "value": "answer"}
       ]
     },
     {
       "id": "potsdam-department-header-v1",
       "anchors": ["/SVV/", "Gesch\u00e4ftsbereich:", "Datum"],
+      "excludeAnchors": ["Erstellungsdatum"],
       "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Beschlussvorschlag", "Begr\u00fcndung:"],
       "fields": [
         {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
-        {"name": "department.label", "label": "Gesch\u00e4ftsbereich:", "type": "text", "placement": "right-or-below"}
+        {"name": "department.label", "label": "Gesch\u00e4ftsbereich:", "type": "text", "placement": "right-or-below", "maxLines": 4}
       ]
     },
     {
       "id": "potsdam-department-extension-v1",
       "anchors": ["/SVV/", "Gesch\u00e4ftsbereich:", "Datum", "Fristverl\u00e4ngerungsbitte"],
+      "excludeAnchors": ["Erstellungsdatum"],
       "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Begr\u00fcndung:"],
       "fields": [
         {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
-        {"name": "department.label", "label": "Gesch\u00e4ftsbereich:", "type": "text", "placement": "right-or-below"},
+        {"name": "department.label", "label": "Gesch\u00e4ftsbereich:", "type": "text", "placement": "right-or-below", "maxLines": 4},
         {"name": "document.role", "label": "Fristverl\u00e4ngerungsbitte", "type": "literal", "value": "deadline-extension"}
       ]
     },
     {
       "id": "potsdam-department-answer-v1",
       "anchors": ["/SVV/", "Gesch\u00e4ftsbereich:", "Datum", "Antwort auf Kleine Anfrage"],
-      "excludeAnchors": ["Fristverl\u00e4ngerungsbitte"],
+      "excludeAnchors": ["Fristverl\u00e4ngerungsbitte", "Erstellungsdatum"],
       "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Begr\u00fcndung:"],
       "fields": [
         {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
-        {"name": "department.label", "label": "Gesch\u00e4ftsbereich:", "type": "text", "placement": "right-or-below"},
+        {"name": "department.label", "label": "Gesch\u00e4ftsbereich:", "type": "text", "placement": "right-or-below", "maxLines": 4},
         {"name": "document.role", "label": "Antwort auf Kleine Anfrage", "type": "literal", "value": "answer"}
+      ]
+    },
+    {
+      "id": "potsdam-legacy-paper-v1",
+      "anchors": ["Drucksache Nr.", "Erstellungsdatum", "Einreicher:"],
+      "stopAt": ["Anlass des", "Beratungsfolge:", "Beschlussvorschlag", "Begr\u00fcndung:", "Inhalt der Mitteilung:"],
+      "fields": [
+        {"name": "document.date", "label": "Erstellungsdatum", "type": "date", "placement": "right-or-below"},
+        {"name": "document.releaseDate", "label": "Freigabedatum", "type": "date", "placement": "right-or-below", "stopAt": ["Datum der Sitzung:", "Eingang 502:"]},
+        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below", "maxLines": 4, "stopAt": ["\u00f6ffentlich", "Betreff:"]}
+      ]
+    },
+    {
+      "id": "potsdam-legacy-question-v1",
+      "anchors": ["Drucksache Nr.", "Erstellungsdatum", "Einreicher:", "Eingang B\u00fcro der SVV:"],
+      "stopAt": ["Anlass des", "Beratungsfolge:", "Beschlussvorschlag", "Begr\u00fcndung:"],
+      "fields": [
+        {"name": "document.date", "label": "Erstellungsdatum", "type": "date", "placement": "right-or-below"},
+        {"name": "submission.receivedDate", "label": "Eingang B\u00fcro der SVV:", "type": "date"},
+        {"name": "submission.forwardedDate", "label": "weitergeleitet an das B\u00fcro OBM:", "type": "date"},
+        {"name": "answer.dueDate", "label": "Termin der Beantwortung:", "type": "date"},
+        {"name": "answer.extendedDueDate", "label": "Terminverl\u00e4ngerung:", "type": "date"},
+        {"name": "answer.receivedDate", "label": "Eingang der Beantwortung:", "type": "date"},
+        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below", "maxLines": 4, "stopAt": ["\u00f6ffentlich", "Betreff:"]}
       ]
     }
   ]
