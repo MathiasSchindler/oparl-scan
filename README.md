@@ -6,12 +6,13 @@ Potsdam ist der erste unterstuetzte Endpunkt:
 
 <https://www.potsdam.sitzung-online.de/oparl/system>
 
-Das Projekt besteht aus drei freistehenden C-Programmen mit eigenen
+Das Projekt besteht aus vier freistehenden C-Programmen mit eigenen
 Dokumentationsseiten:
 
 | Programm | Aufgabe | Dokumentation |
 | --- | --- | --- |
 | **oparl-scan** | OParl-Metadaten und Dokumente herunterladen und aktualisieren | [Benutzung, Optionen, Archivformat und Fehlerbehandlung](docs/oparl-scan.md) |
+| **oparl-prepare** | PDF-Texte, Positionen und belegte Formularfelder wiederverwendbar aufbereiten | [Benutzung, Cachevertrag, Templates und Grenzen](docs/oparl-prepare.md) |
 | **oparl-index** | Gemeinsamen Metadaten- und PDF-Volltextindex aufbauen | [Benutzung, Importregeln, PDF-Grenzen und Abdeckungsbericht](docs/oparl-index.md) |
 | **oparl-search** | Metadaten und Volltexte durchsuchen und Inhalte mit Quellen abrufen | [CLI, Weboberflaeche, HTTP-MCP, JSON und Benchmarks](docs/oparl-search.md) |
 
@@ -28,13 +29,13 @@ aller OParl-Implementierungen.
 
 ## Abhaengigkeiten und Kompilieren
 
-Alle drei Programme verwenden **keine Standard-C-Bibliothek, CRT,
+Alle vier Programme verwenden **keine Standard-C-Bibliothek, CRT,
 libcurl, OpenSSL, externe JSON-Bibliothek, Unterprozesse oder Shellbefehle**.
 Sie nutzen die gemeinsame Laufzeit, Puffer, Unicode-Verarbeitung,
 SHA-256, JSON-Ausgabe, TLS- und X.509-Implementierung sowie die
 Betriebssystem-Backends von newos.
 [src/json.c](src/json.c) ergaenzt den lesenden JSON-Parser.
-Der Indexer verwendet ausserdem den PDF-Parser und die Flate-Dekompression
+Vorbereitung und direkter Indexaufbau verwenden ausserdem den PDF-Parser und die Flate-Dekompression
 von newos sowie eine eigene seitenbezogene Font-/ToUnicode-Auswertung.
 Externe PDF-Werkzeuge oder OCR-Unterprozesse werden nicht gestartet.
 
@@ -54,7 +55,7 @@ Bei einem vorhandenen Klon ohne initialisierte Submodule:
 git submodule update --init --recursive
 ```
 
-Zum Kompilieren werden Clang/LLVM, GNU make und eine POSIX-Shell mit grep,
+Zum Kompilieren werden Git (auch fuer den Extraktor-Fingerabdruck), Clang/LLVM, GNU make und eine POSIX-Shell mit grep,
 sed und mkdir benoetigt. Unter macOS kommen Apples Kommandozeilenwerkzeuge
 und SDK hinzu. Windows-Builds brauchen LLVMs lld und llvm-dlltool; Git Bash
 oder MSYS2 koennen die Build-Shell bereitstellen. Zur Ausfuehrung der
@@ -68,7 +69,7 @@ make -j4 TARGET=windows ARCH=x86_64
 make -j4 TARGET=windows ARCH=aarch64
 ```
 
-Die Ausgabe liegt unter `build/<target>-<arch>/`: `oparl-scan`,
+Die Ausgabe liegt unter `build/<target>-<arch>/`: `oparl-scan`, `oparl-prepare`,
 `oparl-index` und `oparl-search`, unter Windows jeweils mit `.exe`.
 Alle folgenden Beispiele verwenden macOS/ARM64; unter Linux und Windows
 den passenden Programmpfad einsetzen. Befehle werden im Wurzelverzeichnis
@@ -92,11 +93,14 @@ nicht die heruntergeladenen Ratsinformationen.
 # 1. Einen Referenzjahrgang archivieren; derselbe Aufruf aktualisiert ihn spaeter.
 build/macos-aarch64/oparl-scan --year 2024 --output downloads/2024
 
-# 2. Nach Ende der Downloads den gesamten lokalen Bestand indexieren.
-build/macos-aarch64/oparl-index --input downloads \
+# 2. Nach Ende der Downloads PDF-Inhalte wiederverwendbar vorbereiten.
+build/macos-aarch64/oparl-prepare --input downloads --output build/prepared
+
+# 3. Metadaten und vorbereitete Dokumente gemeinsam indexieren.
+build/macos-aarch64/oparl-index --input downloads --prepared build/prepared \
   --output build/search/index.ops
 
-# 3. Im gemeinsamen Index suchen.
+# 4. Im gemeinsamen Index suchen.
 build/macos-aarch64/oparl-search --year 2024 'Schule OR wohn*'
 
 # Alternativ: lokaler Webdienst mit dauerhaft geladenem Index.
@@ -109,8 +113,10 @@ Mit Ctrl+C den Dienst beenden. API und Betriebsgrenzen erklaert die
 
 Downloads und Indexaufbau nicht gleichzeitig auf denselben Archiven
 ausfuehren. Nach aktualisierten Downloads den Index neu aufbauen;
-derzeit ist das ein vollstaendiger Neuaufbau, keine inkrementelle
-Indexierung. Die Originalarchive bleiben unveraendert.
+derzeit ist das ein vollstaendiger Indexneuaufbau, keine inkrementelle
+Indexierung. Die teure PDF-Aufbereitung wird bei unveraenderten Bytes und
+Regeln jedoch wiederverwendet. Ohne `--prepared` bleibt die direkte
+PDF-Extraktion im Indexer moeglich. Die Originalarchive bleiben unveraendert.
 
 `--year 2024` meint Drucksachenkennzeichen mit `24/`, nicht das Datum
 der Drucksache oder PDF. Verknuepfte spaetere Vorgaenge koennen ebenfalls
@@ -142,12 +148,15 @@ newos-Programm. Produktivarchive werden nicht beschrieben; Kompilieren
 und Testlauf starten keinen vollstaendigen Massendownload.
 Produktbezogene Testdetails stehen bei
 [oparl-scan](docs/oparl-scan.md#tests-und-verifikation),
+[oparl-prepare](docs/oparl-prepare.md),
 [oparl-index](docs/oparl-index.md#implementierung-und-tests) und
 [oparl-search](docs/oparl-search.md#tests).
 
 Lokal unter macOS/ARM64 geprueft wurden native Ausfuehrung, lokale
 Testdaten, zertifikatsgepruefte Live-Downloads von API-Daten und PDFs
-sowie Cache-Wiederverwendung. Linux- und Windows-Builds fuer x86-64
+sowie Cache-Wiederverwendung. `oparl-prepare` wurde bisher nur nativ unter
+macOS/ARM64 gebaut und geprueft. Fuer die bisherigen drei Programme:
+Linux- und Windows-Builds fuer x86-64
 und ARM64 werden plattformuebergreifend kompiliert und auf ihre
 Laufzeitimporte geprueft; auf diesen Betriebssystemen wurden sie hier
 nicht ausgefuehrt.

@@ -245,6 +245,11 @@ static double natural_log(double x) {
 }
 
 static uint64_t aligned(uint64_t n) { return (n + 7ULL) & ~7ULL; }
+static int compare_fact(const void *a, const void *b) {
+    const SearchFact *x = (const SearchFact *)a, *y = (const SearchFact *)b;
+    if (x->record != y->record) return x->record < y->record ? -1 : 1;
+    return x->role < y->role ? -1 : x->role > y->role;
+}
 
 typedef struct { const char *word; uint32_t id; } TermOrder;
 static int compare_term(const void *a, const void *b) {
@@ -294,6 +299,7 @@ int search_write(SearchBuilder *builder, const char *path) {
     int fd, result = 0;
     if (builder->failed) return search_error("index allocation/token limit exceeded", 0);
     if (order_terms(builder) != 0) return search_error("cannot sort term dictionary", 0);
+    rt_sort(builder->facts.data, builder->facts.count, sizeof(SearchFact), compare_fact);
     rt_sort(occurrences, builder->occurrences.count, sizeof(*occurrences), compare_occurrence);
     for (i = 0; i < builder->occurrences.count; i++) {
         SearchTerm *term = &terms[occurrences[i].term];
@@ -317,6 +323,8 @@ int search_write(SearchBuilder *builder, const char *path) {
     rt_memset(&header, 0, sizeof(header));
     memcpy(header.magic, "OPARLIDX", 8);
     header.version = 3; header.endian = 0x01020304U; header.incomplete = builder->incomplete;
+    for (i = 0; i < builder->records.count; i++)
+        if (((const SearchRecord *)builder->records.data)[i].preparation) header.version = 4;
     offsets[0] = aligned(sizeof(header));
     for (i = 0; i < 10; i++) offsets[i + 1] = offsets[i] + aligned(sizes[i]);
     header.strings = offsets[0]; header.records = offsets[1]; header.terms = offsets[2];
@@ -391,7 +399,7 @@ int search_open(SearchIndex *index, const char *path) {
         if (got <= 0) goto invalid;
         p += (size_t)got;
     }
-    if (memcmp(header.magic, "OPARLIDX", 8) == 0 && header.version != 3) {
+    if (memcmp(header.magic, "OPARLIDX", 8) == 0 && header.version != 3 && header.version != 4) {
         platform_close(fd);
         return search_error("unsupported index format; rebuild with oparl-index --input ARCHIVE --output INDEX", path);
     }
@@ -401,7 +409,7 @@ int search_open(SearchIndex *index, const char *path) {
         if (got <= 0) goto invalid;
         p += (size_t)got;
     }
-    if (memcmp(header.magic, "OPARLIDX", 8) != 0 || header.version != 3 ||
+    if (memcmp(header.magic, "OPARLIDX", 8) != 0 || (header.version != 3 && header.version != 4) ||
         header.endian != 0x01020304U || header.size != info.size || header.reserved ||
         header.incomplete > 1 || !header.imported_at || header.imported_at > INT64_MAX ||
         header.strings != aligned(sizeof(header)) || header.string_bytes == 0) goto invalid;
@@ -472,19 +480,20 @@ int search_open(SearchIndex *index, const char *path) {
     index->file_bytes = (size_t)info.size;
     index->memory_bytes = (size_t)(info.size + lookup_bytes);
     index->incomplete = header.incomplete;
+    index->format_version = header.version;
     {
         double words = 0;
         for (i = 0; i < index->record_count; i++) {
             const SearchRecord *r = &index->records[i];
             const uint32_t offsets[] = {r->id,r->name,r->reference,r->date,r->paper_type,
                                         r->organization,r->kind,r->source,r->text,r->payload,
-                                        r->identity,r->system,r->body};
+                                        r->identity,r->system,r->body,r->preparation};
             size_t j;
             for (j = 0; j < sizeof(offsets)/sizeof(offsets[0]); j++)
                 if (!valid_string(index, offsets[j])) goto invalid;
             if (r->text_length >= index->string_bytes - r->text ||
                 index->strings[r->text + r->text_length] != '\0' || r->body_start > r->text_length ||
-                r->metadata_origin > 2 || r->reserved ||
+                r->metadata_origin > 2 || (header.version == 3 && r->preparation) ||
                 (r->parent != NONE && (r->parent >= index->record_count ||
                  index->records[r->parent].parent != NONE))) goto invalid;
             words += r->words;
@@ -1325,6 +1334,8 @@ static int print_record(SearchOutput *out, const SearchIndex *index, const Searc
         out_field_string(out, "text", body) != 0 ||
         out_text(out, ",\"metadata\":") != 0 ||
         out_text(out, r->payload ? index->strings + r->payload : "null") != 0 ||
+        (r->preparation && (out_key(out, "preparation") ||
+            out_text(out, index->strings + r->preparation))) ||
         out_key(out, "model") != 0 || out_write(out, (const char *)model.data, model.size) != 0 ||
         out_text(out, "}\n") != 0) status = -1;
     tool_byte_buffer_free(&model);
@@ -1350,9 +1361,7 @@ int search_results_json(ToolByteBuffer *buffer, const SearchIndex *index, const 
 }
 
 int search_json_quote(ToolByteBuffer *buffer, const char *text) {
-    SearchOutput out;
-    out.memory = buffer;
-    return out_string(&out, text);
+    return json_quote(buffer, text);
 }
 
 int search_record_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchRecord *record) {
@@ -1372,7 +1381,7 @@ int search_status_json(ToolByteBuffer *buffer, const SearchIndex *index) {
     }
     return out_text(&out, "{\"records\":") != 0 || out_uint(&out, index->record_count) != 0 ||
         out_field_uint(&out, "terms", index->term_count) != 0 ||
-        out_field_uint(&out, "formatVersion", 3) != 0 ||
+        out_field_uint(&out, "formatVersion", index->format_version) != 0 ||
         out_field_string(&out, "snapshotId", index->snapshot_id) != 0 ||
         out_field_uint(&out, "importedAtEpochSeconds", index->imported_at) != 0 ||
         out_field_uint(&out, "relations", index->relation_count) != 0 ||

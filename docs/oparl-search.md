@@ -57,6 +57,7 @@ build/macos-aarch64/oparl-search --kind Paper --organization Fraktion \
 | `--batch` | Eine Suchanfrage je stdin-Zeile bei einmal geladenem Index |
 | `--benchmark N` | 20 bis 100000 warme Wiederholungen einer Anfrage |
 | `--show ID` | Kompakte Metadaten anhand einer OParl-/Fassungs-/Seiten-/Abschnitts-ID abrufen |
+| `--view relations`, `--direction incoming\|outgoing\|both` | Mit `--show`: vollstaendige typisierte Beziehungen paginiert statt Metadaten abrufen |
 | `--paper ID`, `--meeting ID`, `--agenda ID` | Kompakter Vorgang, Sitzung oder separat paginierte Tagesordnung |
 | `--object ID` | Gebuendelte Metadaten; bis zu 20 wiederholte IDs |
 | `--options` | Typen, Datumsrollen, Projektionen und ID-Katalog; optional `--kind` |
@@ -252,6 +253,16 @@ Bei Datei-/Seitentreffern enthalten `evidence.documentDates.created` und
 Meeting-Quellenkanten nennen mit `sourceDate` den belegten Sitzungsbeginn.
 Diese Zusatzangaben ersetzen kein fehlendes Dokumentdatum und aendern
 weder Datumsfilter noch Sortierung.
+Suchbelege enthalten bei Dokumenten hoechstens vier eingehende Kanten;
+andere Treffer tragen ihren Eigenbeleg statt einer kompletten Nachbarschaft.
+`evidence.relationshipTotal` zaehlt die passenden Kanten,
+`relationshipsComplete` kennzeichnet Vollstaendigkeit.
+`relationsAvailable` beschreibt `get_object` mit `view: "relations"`,
+Richtung, ID und Snapshot fuer die vollstaendige Nachladung. Bei
+Paper-Gruppierung ist der Suchbeleg auf den passenden Besitzer begrenzt;
+die Nachladung zeigt alle eingehenden Beziehungen des Objekts.
+Fehlende oder gekuerzte Quellenkontexte begruenden keinen eindeutigen
+Dokumenttitel oder ein eindeutiges Sitzungsdatum.
 Lokale Importzeiten verweisen mit `sourceIndex`/`via: index` auf den Snapshot,
 nicht auf eine behauptete OParl-Eigenschaft des Trefferobjekts.
 `unit`, `identity` und `groupIdentity` unterscheiden Paper, eigenstaendiges
@@ -295,6 +306,10 @@ Rechercheabrufe liefern immer JSON, auch ohne `--json`. `--show` liefert
 standardmaessig kompakte skalare `metadata` samt `citation`, Quellenrolle,
 Warnungen und explizitem `omittedFields`/`rawAvailable`. Lange Werte und
 eingebettete Arrays/Objekte werden nicht still abgeschnitten.
+Vorbereitete Dokumente liefern zusaetzlich `preparation` mit getrennten
+PDF-Formularbefunden und ihrer Herkunft. Rohmetadaten bleiben unveraendert;
+ein `answer`-Befund beweist keine abschliessende Beantwortung. Siehe
+[Vorbereitung, Templates und Grenzen](oparl-prepare.md).
 Mit `--raw --show` bleiben die vollstaendigen Rohmetadaten und das
 kanonische `model` abrufbar. `--page` bzw. eine Seiten-/Abschnitts-ID liefert
 den vollstaendigen extrahierten Seitentext, nicht die visuelle PDF-Seite.
@@ -420,15 +435,28 @@ nach ID deduplizierte Liste `objects`. Das Limit ist eine Obergrenze:
 das kompakte Bytebudget kann eine Seite schon vorher beenden.
 Der Button "Weitere verknuepfte Objekte laden" erschliesst explizit alle
 Fortsetzungen. Jedes Objekt enthaelt `id`, `kind`, `scope`, `indexed`,
-`sourceRole`, `relationshipPath` und kompakte `metadata`; indexierte
-Objekte zusaetzlich `source`, `warnings`, `citation`, `omittedFields`
+`sourceRole` und kompakte `metadata`; indexierte
+Objekte zusaetzlich `warnings`, `citation`, `omittedFields`
 und `rawAvailable`.
+Listen verwenden `relationshipEncoding: "parent-reference-v1"`:
+`parentId`, `sourceRole` und `relationshipDirection` beschreiben die
+unmittelbare Beziehung zum Elternobjekt, ohne gemeinsame Pfadpraefixe zu
+wiederholen. Nach vollstaendiger Pagination lassen sich alle Pfade
+rekonstruieren; bei Tagesordnungen steht das Elternobjekt im Feld `meeting`.
+`incoming` bedeutet eine Quellkante vom Kind zum Elternobjekt, `outgoing`
+eine vom Elternobjekt zum Kind. In `citation` werden `objectId` und
+`snapshotId` vom Objekt bzw. Listenumschlag geerbt; eine fehlende `identity`
+ist gleich der Objekt-ID. Fassungs-ID, Hash und Seitenzahl bleiben erhalten.
+Leere `actors`/`actorTotal` und lokale Archivpfade werden in Listen nicht
+wiederholt; Einzel-/Rohabrufe liefern die zusaetzlichen Details.
+Die erste Vorgangsseite hat eine `overview` mit Anzahlen direkter Dokumente,
+Beratungen und verwandter Papers. Nach Hauptdokumenten folgen Beratungen
+nach belegtem Sitzungsbeginn absteigend; unbekannte Zeiten stehen zuletzt.
 `scope` unterscheidet Wurzel-Paper (`paper`), direkte Dokumente (`directSource`),
 andere Kontextdateien (`contextSource`), verwandte Papers (`relatedPaper`) und
 sonstigen Kontext (`context`). Sitzungskontext ist keine direkte Paper-Quelle.
 Die ausgewaehlten skalaren Werte bleiben unveraendert; Beziehungen werden
-als typisierte Pfade geliefert. Pfadkanten behalten Originalrichtung und
-markieren die Traversierung als `incoming` oder `outgoing`.
+als typisierte Elternverweise geliefert; die Originalrichtung bleibt erhalten.
 `indexed: true` bedeutet, dass ein eigener
 Datensatz im geladenen Index gefunden wurde, nicht dass die PDF
 vollstaendig archiviert oder fehlerfrei als Text erkannt wurde.
@@ -476,6 +504,11 @@ erst mit "Tagesordnung laden" separat angefordert und explizit fortgesetzt.
 Durchfuehrung laut Quelle. `cancelled: true` oder `abgesagt` bezeichnet
 Absage. Eine geplante Tagesordnung hat `agendaStatus: provisional`,
 andere bleiben ohne zusaetzlichen Beleg `unknown`.
+`statusConflict: true` kennzeichnet geplante/abgesagte Sitzungen mit
+mindestens einem dokumentierten TOP-Ergebnis. `agendaItemsWithResult`
+zaehlt diese TOP, nicht angenommene Beschluesse. Rohstatus und Lifecycle
+bleiben unveraendert; der Hinweis beweist fuer sich keine Durchfuehrung.
+Die Webansicht zeigt den Quellenwiderspruch an.
 Ausdruecklich nichtoeffentliche TOP werden nicht ausgegeben.
 `nonPublicReferences`, `unresolvedAgendaReferences` und
 `publicStatusUnspecified` trennen Nichtoeffentlichkeit, fehlende Aufloesung
@@ -526,6 +559,7 @@ Antworten sind UTF-8-JSON; `HEAD` liefert keinen Antwortkoerper.
 | `/api/status` | Keine | Zaehler und Abdeckung, `formatVersion`, `snapshotId`, `importedAtEpochSeconds`, `relations`, `documentVersions`, `textSections` des geladenen Indexes |
 | `/api/search` | `q` oder einschraenkende Auflistung; `year`, `paperType`, `organization`, `organizationId`, `actorId`, `kind`, `limit`, `offset`, `sort`, `group`, `dateRole`, `dateFrom`, `dateThrough`, `snapshotId` | CLI-Suchstruktur |
 | `/api/object` | `id`; optional `page`, `fields`, `raw`, `snapshotId` | Kompaktes Einzelobjekt oder explizite Rohdaten/Seitentext |
+| `/api/object?view=relations` | `id`; `direction`, `limit`, `offset`, `snapshotId` | Vollstaendige typisierte Beziehungen, paginiert; nicht mit `page`, `fields` oder `raw` kombinierbar |
 | `/api/paper` | Paper-`id`; `fields`, `limit`, `offset`, `snapshotId`, `raw` | Kompakter Vorgang mit Fortsetzung; Rohdaten explizit |
 | `/api/meeting` | Meeting-`id`; gleiche Rechercheparameter | Sitzung und Dokumente ohne komplette Tagesordnung |
 | `/api/agenda` | Meeting-`id`; gleiche Rechercheparameter | Separat paginierte TOP-Referenzen und Sitzungskontext |
@@ -589,14 +623,15 @@ durchsuchbar und wird weiterhin mit `incomplete: true` gekennzeichnet.
 
 Der bestehende Dienst stellt unter `/mcp` einen **Streamable-HTTP**-Transport
 bereit, lokal beispielsweise `http://127.0.0.1:8080/mcp`.
-Die neuen M4-Werkzeuge sind noch nicht auf den oeffentlichen Server ausgerollt.
+Die Praxisnachbesserungen von M1-M4 werden zunaechst lokal geprueft;
+eine Bereitstellung auf dem oeffentlichen Server ist ein eigener Schritt.
 Es gibt keinen zusaetzlichen Port oder Prozess und keine MCP-SDK-
 Laufzeitabhaengigkeit.
 
 | Werkzeug | Argumente | Ergebnis |
 | --- | --- | --- |
 | `search` | Optional `q` bei einschraenkender Auflistung; dieselben Filter wie `/api/search`, einschliesslich `group` und Datumsrollen/-grenzen | Suchantwort; Standard 20 Treffer und `group=paper` |
-| `get_object` | `id`; `page`, `fields`, `raw`, `snapshotId` | Kompakte Metadaten; Rohmodell/Seitentext explizit |
+| `get_object` | `id`; `page`, `fields`, `raw`, `snapshotId`; alternativ `view: "relations"` mit `direction`, `limit`, `offset` | Kompakte Metadaten; Rohmodell/Seitentext oder vollstaendige Beziehungen explizit |
 | `get_paper` | Paper-`id`; Rechercheparameter | Kompakter Vorgang wie `/api/paper` |
 | `get_meeting` | Meeting-`id`; Rechercheparameter | Sitzung und Dokumente |
 | `get_agenda` | Meeting-`id`; Rechercheparameter | Separate paginierte TOP |
@@ -606,7 +641,10 @@ Laufzeitabhaengigkeit.
 
 Alle Werkzeuge sind nur lesend und greifen ausschliesslich auf den geladenen
 Index zu, nicht auf beliebige Dateien oder URLs. Erfolgreiche Aufrufe liefern
-dieselben Daten in `structuredContent` und als JSON im Textinhalt.
+die Daten in `structuredContent`. Das Protokoll `2026-07-28` erhaelt
+nur einen kurzen Texthinweis statt einer zweiten JSON-Kopie. Aeltere
+Protokolle behalten zusaetzlich vollstaendiges JSON im Textinhalt,
+damit textbasierte Clients weiterhin funktionieren.
 Unbekannte Werkzeuge und fehlerhafte RPC-Nachrichten erzeugen JSON-RPC-Fehler;
 ungueltige Werkzeugargumente, Suchsyntax und fehlende Objekte liefern
 `isError: true` mit Beschreibung statt erfundener Ergebnisse.
@@ -620,6 +658,31 @@ kompakten Standard-Vorgangsantworten.
 Bei `next != null` die urspruenglichen Argumente beibehalten und
 Offset/Limit/Snapshot aus `next` uebernehmen. Insbesondere Bulk-IDs
 bleiben beim Client; `retainArguments: ["ids"]` macht das ausdruecklich.
+`operation` und `retainArguments` sind Fortsetzungsmetadaten, keine
+Werkzeugargumente. Beispielsweise in JavaScript:
+
+```js
+const { operation, retainArguments, ...cursor } = result.next;
+const argumentsForNextCall = { ...originalArguments, ...cursor };
+// Werkzeug operation mit argumentsForNextCall aufrufen.
+```
+
+`get_object` mit `view: "relations"` liefert `relationships`, `total`,
+`returned` und `next`; `direction` ist `incoming`, `outgoing` oder
+standardmaessig `both`. Selbstkanten erscheinen nur einmal. Ausdruecklich
+nichtoeffentliche TOP-Referenzen bleiben ausgeschlossen und werden
+separat gezaehlt. Kanten enthalten Original-IDs, Rolle, Autoritaet,
+Quellfeld, Ableitungsregel und Belegsicherheit. Lange Quellnamen werden
+mit `sourceNameOmitted` zur expliziten Einzelabfrage zurueckgestellt.
+
+Abdeckung bleibt beweisbezogen: `coverage.perType[].fileVersionReasons`
+trennt beim Indexaufbau nicht archivierte Dateien, unbekannte Ursachen
+und vorhandene Binaerdaten mit fehlgeschlagener Extraktion.
+`unresolvedReasons` trennt ausdruecklich nichtoeffentliche Referenzen
+von unbekannten Ursachen. `documentCoverage` beschreibt dies am File.
+Diese Angaben belegen keine bestimmte HTTP-Fehlerursache und keinen
+fehlgeschlagenen Download; fehlende Ursachen werden nicht erraten.
+
 Kein Client darf eine erste Teilseite als vollstaendiges Negativergebnis
 interpretieren. Zitieren ueber Fassungs-ID, SHA-256, Seite und Snapshot;
 Original-URLs koennen spaeter andere Bytes liefern.
@@ -775,7 +838,8 @@ aktualisiert den separaten Proxyprozess nicht. Vorher beide
 Apache-Konfigurationen pruefen; dabei sind kurze Unterbrechungen moeglich.
 
 Die externe Pruefung vergleicht Suchantworten bytegleich mit der lokalen
-CLI und testet Vorgangsseiten, JSON, HEAD sowie die Host-/Origin-Grenzen:
+CLI und testet Index-Snapshot, Vorgangsseiten, JSON, HEAD, die acht
+MCP-Werkzeuge, Snapshot-Pagination sowie die Host-/Origin-Grenzen:
 
 ```sh
 node tests/search-deployment.mjs http://178.254.23.157:8080/ \
@@ -791,6 +855,10 @@ dann auf demselben Dateisystem atomar nach `index.ops` umbenennen und
 `systemctl restart oparl-search.service` ausfuehren. Den Abdeckungsbericht
 ebenfalls aktualisieren. Den Suchindex weiterhin lokal mit `oparl-index`
 bauen; der Server laedt nicht automatisch neue RIS-Daten nach.
+Bei Programm- oder Indexformatwechseln Binary und Index gemeinsam
+aktualisieren und die passende bisherige Kombination fuer eine
+Ruecknahme sichern. Den bereitgestellten neuen Stand vor dem Umschalten
+mit `--status --json` pruefen.
 
 ## Vollstaendigkeit und Exitcodes
 
@@ -807,8 +875,10 @@ und die Qualitaet der Quellarchive bleiben relevant.
 
 ## Indexformat und Suchkern
 
-**Format 3 erfordert einen Neuaufbau alter Indizes.** Die Fehlermeldung
-nennt dafuer `oparl-index`; es gibt keinen Legacy-Leser.
+Die Suche liest **Format 3 und 4**; Format 4 ergaenzt die getrennten Befunde
+von `oparl-prepare`. Vorhandene Format-3-Indizes bleiben lesbar.
+Format 1 und 2 erfordern weiterhin einen Neuaufbau; die Fehlermeldung
+nennt dafuer `oparl-index`.
 Das [kanonische Datenmodell](oparl-index.md#kanonisches-datenmodell-format-3)
 beschreibt typisierte Kanten, Datumsrollen, Fassungsidentitaeten und Belege.
 Nur explizite Hauptdateien und Anlagen eines Papers gelten fuer Suchfilter
@@ -979,8 +1049,8 @@ Sie testen die echten Programme ueber lokale Prozesse und Loopback-HTTP:
 make test-mcp-acceptance
 ```
 
-Diese bewusst separate Abnahme ist noch **rot**: Sie beschreibt fachliche
-Anforderungen, deren Umsetzung erst folgt. Exitcode 1 bedeutet fehlgeschlagene
+Diese separate Abnahme steht nach M4 bei **15/15 gruen**.
+Exitcode 1 bedeutet fehlgeschlagene
 fachliche oder Leistungs-Abnahme; Exitcode 2 einen Infrastruktur-/Werkzeugfehler.
 Diese Codes gelten fuer den Node-Runner; GNU make meldet ein fehlgeschlagenes
 Target unabhaengig davon mit seinem eigenen Exitcode 2.
@@ -999,8 +1069,22 @@ Bearbeitungszeitstatistik. `tests/search-semantics.mjs` prueft zusaetzlich
 Nanosekunden, inklusive Quell-Lokaltage, Filter-only-Seitennavigation,
 ungueltige/unbekannte Zeiten, mehrdeutige Sitzungskontexte, Besitzer-Joins
 und Dokumentfassungsgruppen. Web-/MCP-Tests vergleichen die neuen
-Filterantworten mit der CLI. Die fachliche M3-Abnahme steht bei 13/15;
-Antwortbudget und fremde eingebettete TOP bleiben M4-Baustellen.
+Filterantworten mit der CLI. `tests/search-research.mjs` prueft zusaetzlich
+vollstaendige Beziehungsfortsetzungen, rekonstruierbare Elternverweise,
+Mehrdeutigkeit trotz gekuerzter Belege, Statuskonflikte und belegte
+Lueckenursachen einschliesslich langer nichtoeffentlicher IDs.
+
+Die separate Vollindex-Praxispruefung wiederholt V2-Recherchen und misst
+echte HTTP-Body-Bytes einschliesslich kompletter Pagination:
+
+```sh
+node tests/search-practice.mjs http://127.0.0.1:8080
+```
+
+Sie benoetigt den Potsdamer Vollindex: fuenf Sitzungstreffer, vollstaendige
+Beziehungsnachladung, Fernwaermevorgang `2008128`, Tagesordnung `2001592`
+und eine 20-ID-Projektion. Aelteres und modernes MCP werden getrennt
+gemessen; die oeffentliche Installation wird dadurch nicht veraendert.
 
 Stichtag, Zeitzone, Datumsrollen, Zaehleinheiten und unbekannte Werte stehen
 in der Fixture. Bei einem Formatumbau darf der Runner angepasst werden;

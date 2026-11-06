@@ -5,6 +5,8 @@
 #include "runtime.h"
 #include "platform.h"
 #include "archive-version.h"
+#include "archive-walk.h"
+#include "prepare.h"
 
 #define NONE UINT32_MAX
 #define PATH_SIZE 4096
@@ -29,6 +31,8 @@ typedef struct {
     uint32_t archive, current_file;
     unsigned long long mtime, observed;
     int report_fd;
+    const char *prepared;
+    char preparation_key[65];
     unsigned long long metadata, pdfs, pages, warning_pages, failed_pdfs, missing_pdfs;
 } Import;
 static const char *string(Import *import, uint32_t n);
@@ -78,93 +82,8 @@ static int attestation(Import *import, const char *kind, const char *hash, Attes
     return 0;
 }
 
-#if defined(_WIN32)
-__declspec(dllimport) void *__stdcall LoadLibraryA(const char *);
-__declspec(dllimport) void *__stdcall GetProcAddress(void *, const char *);
-__declspec(dllimport) int __stdcall FreeLibrary(void *);
-__declspec(dllimport) unsigned long __stdcall GetLastError(void);
-typedef struct {
-    uint32_t attributes, times[6], size_high, size_low, reserved[2];
-    char name[260], alternate[14];
-} FindData;
-typedef void *(__stdcall *FindFirst)(const char *, FindData *);
-typedef int (__stdcall *FindNext)(void *, FindData *);
-typedef int (__stdcall *FindClose)(void *);
-#endif
-
 static int walk_archive(const char *path, ToolWalkCallback callback, void *user, int depth) {
-    PlatformDirEntry current;
-    ToolWalkControl control;
-    char child[PATH_SIZE];
-    int status = 0;
-    if (depth > 64 || platform_get_path_info(path, &current) != 0)
-        return search_error("cannot inspect archive path or directory nesting exceeds 64", path);
-    control.prune = 0;
-    if (callback(path, &current, depth, &control, user) != 0) return -1;
-    if (!current.is_dir || control.prune) return 0;
-#if defined(_WIN32)
-    {
-        union { void *pointer; FindFirst function; } first;
-        union { void *pointer; FindNext function; } next;
-        union { void *pointer; FindClose function; } close;
-        FindData data;
-        void *module = LoadLibraryA("KERNEL32.dll"), *handle;
-        if (!module) return search_error("cannot load Windows directory functions", path);
-        first.pointer = GetProcAddress(module, "FindFirstFileA");
-        next.pointer = GetProcAddress(module, "FindNextFileA");
-        close.pointer = GetProcAddress(module, "FindClose");
-        if (!first.pointer || !next.pointer || !close.pointer ||
-            rt_join_path(path, "*", child, sizeof(child)) != 0) {
-            FreeLibrary(module); return search_error("cannot prepare Windows directory scan", path);
-        }
-        handle = first.function(child, &data);
-        if (handle == (void *)(intptr_t)-1) {
-            unsigned long error = GetLastError();
-            FreeLibrary(module);
-            return error == 2 ? 0 : search_error("cannot open archive directory", path);
-        }
-        for (;;) {
-            if (data.name[0] != '.') {
-                if ((data.attributes & 0x400U) ||
-                    rt_join_path(path, data.name, child, sizeof(child)) != 0 ||
-                    walk_archive(child, callback, user, depth + 1) != 0) {
-                    status = search_error("cannot traverse archive entry or junction", path); break;
-                }
-            }
-            if (!next.function(handle, &data)) {
-                if (GetLastError() != 18) status = search_error("cannot read archive directory", path);
-                break;
-            }
-        }
-        if (!close.function(handle)) status = search_error("cannot close archive directory", path);
-        FreeLibrary(module);
-    }
-#else
-    {
-        PlatformLightDirEntry *entries;
-        size_t capacity = 1024, count = 0, i;
-        int directory = 0;
-        for (;;) {
-            entries = (PlatformLightDirEntry *)rt_malloc_array(capacity, sizeof(*entries));
-            if (!entries) return search_error("cannot allocate archive directory entries", path);
-            rt_memset(entries, 0, capacity * sizeof(*entries));
-            if (platform_collect_light_entries(path, 0, entries, capacity, &count, &directory) == 0) break;
-            i = entries[capacity - 1].name[0] != '\0';
-            rt_free(entries);
-            if (!i || capacity > SIZE_MAX / 2 / sizeof(*entries))
-                return search_error("cannot read archive directory", path);
-            capacity *= 2;
-        }
-        if (!directory) status = search_error("archive directory changed during traversal", path);
-        for (i = 0; status == 0 && i < count; i++) {
-            if (entries[i].name[0] == '.') continue;
-            if (rt_join_path(path, entries[i].name, child, sizeof(child)) != 0 ||
-                walk_archive(child, callback, user, depth + 1) != 0) status = -1;
-        }
-        rt_free(entries);
-    }
-#endif
-    return status;
+    return archive_walk(path, callback, user, depth);
 }
 
 static Entity *entity(Import *import, uint32_t n) {
@@ -609,6 +528,23 @@ static int record_text(Import *import, SearchRecord *record, const char *body, s
         if (tool_byte_buffer_append_cstr(&buffer, string(import, fields[i])) != 0 ||
             tool_byte_buffer_append(&buffer, "\x1e", 1) != 0) goto fail;
     }
+    if (record->preparation) {
+        Json json;
+        const char *summary = string(import, record->preparation);
+        size_t list;
+        if (json_parse(&json, summary, rt_strlen(summary))) goto fail;
+        list = json_get(&json, 0, "fields");
+        for (i = list+1; i < json_token(&json, list)->next; i = json_token(&json, i)->next) {
+            char value[257];
+            if (!json_equals(&json, json_get(&json, i, "status"), "rule-supported")) continue;
+            if (json_string(&json, json_get(&json, i, "value"), value, sizeof(value)) ||
+                tool_byte_buffer_append_cstr(&buffer, value) ||
+                tool_byte_buffer_append(&buffer, "\x1e", 1)) {
+                json_free(&json); goto fail;
+            }
+        }
+        json_free(&json);
+    }
     record->body_start = (uint32_t)buffer.size;
     if (tool_byte_buffer_append(&buffer, body, length) != 0 || buffer.size > UINT32_MAX) goto fail;
     record->text_length = (uint32_t)buffer.size;
@@ -787,6 +723,80 @@ static int issue(Import *import, Entity *e, const char *reason) {
     return 0;
 }
 
+static int prepare_entity(Import *import, Entity *e) {
+    unsigned char *bytes = 0;
+    char hash[65];
+    size_t length;
+    PreparedDocument doc;
+    ToolByteBuffer summary;
+    int status;
+    if (!import->prepared || !e->pdf || rt_strcmp(string(import, e->record.kind), "File")) return 0;
+    if (tool_read_all_input(string(import, e->pdf), &bytes, &length))
+        return search_error("cannot read archived document", string(import, e->pdf));
+    prepare_hash(bytes, length, hash); rt_free(bytes);
+    if (e->pdf_digest && rt_strcmp(hash, string(import, e->pdf_digest)))
+        return search_error("document differs from archive attestation", string(import, e->pdf));
+    e->pdf_digest = text(import, hash);
+    status = prepared_open(&doc, import->prepared, import->preparation_key, hash, length);
+    tool_byte_buffer_init(&summary);
+    if (!status) status = prepared_summary(&summary, &doc);
+    if (!status) e->record.preparation = search_string(&import->builder, (const char *)summary.data, summary.size);
+    tool_byte_buffer_free(&summary); prepared_close(&doc);
+    return status || import->builder.failed ? -1 : 0;
+}
+
+static int prepared_pages(Import *import, Entity *e, PageContext *context, size_t length) {
+    PreparedDocument doc;
+    const Json *json = &doc.json;
+    size_t pages, i, fields;
+    int status = prepared_open(&doc, import->prepared, import->preparation_key,
+                               string(import, e->pdf_digest), length);
+    if (status) { prepared_close(&doc); return -1; }
+    fields = json_get(json, doc.data, "fields");
+    for (i = fields+1; i < json_token(json, fields)->next; i = json_token(json, i)->next) {
+        char value[32], rule[128];
+        unsigned long long page;
+        SearchFact *fact;
+        if (!json_equals(json, json_get(json, i, "field"), "document.date") ||
+            !json_equals(json, json_get(json, i, "status"), "rule-supported")) continue;
+        if (e->record.date || e->dates[SEARCH_DOCUMENT_DATE]) continue;
+        if (json_string(json, json_get(json, i, "value"), value, sizeof(value)) ||
+            json_string(json, json_get(json, i, "rule"), rule, sizeof(rule)) ||
+            json_uint(json, json_get(json, i, "page"), &page)) { status = -1; goto done; }
+        fact = (SearchFact *)tool_array_append(&import->builder.facts);
+        if (!fact) { status = search_error("cannot allocate prepared document date", 0); goto done; }
+        fact->record = e->search_record; fact->role = SEARCH_DOCUMENT_DATE;
+        fact->value = text(import, value); e->dates[SEARCH_DOCUMENT_DATE] = fact->value;
+        fact->evidence = evidence(import, e->record.id, e->version, (uint32_t)page, 0,
+                                  text(import, "preparation.fields.document.date"), rule, SEARCH_DERIVED);
+    }
+    pages = json_get(json, doc.data, "pages");
+    for (i = pages+1; i < json_token(json, pages)->next; i = json_token(json, i)->next) {
+        size_t token = json_get(json, i, "text");
+        const JsonToken *t = json_token(json, token);
+        char *body = (char *)rt_malloc(t->end-t->start+1);
+        unsigned long long number, warnings;
+        if (!body || json_string(json, token, body, t->end-t->start+1) ||
+            json_uint(json, json_get(json, i, "page"), &number) ||
+            json_uint(json, json_get(json, i, "warnings"), &warnings)) {
+            rt_free(body); status = search_error("invalid prepared page", string(import, e->pdf)); goto done;
+        }
+        status = extracted_page((unsigned int)number, body, rt_strlen(body), (unsigned int)warnings, context);
+        rt_free(body);
+        if (status) goto done;
+    }
+    if (json_equals(json, json_get(json, doc.data, "status"), "failed")) {
+        char error[256];
+        import->failed_pdfs++;
+        if (json_string(json, json_get(json, doc.data, "error"), error, sizeof(error))) {
+            status = search_error("invalid prepared extraction error", string(import, e->pdf)); goto done;
+        }
+        status = issue(import, e, error);
+    }
+done:prepared_close(&doc);
+    return status || import->builder.failed ? -1 : 0;
+}
+
 static int emit(Import *import) {
     size_t i, j;
     for (i = 0; i < import->entities.count; i++) {
@@ -806,6 +816,7 @@ static int emit(Import *import) {
         e->record.organization = search_string(&import->builder,
           organizations.data ? (const char *)organizations.data : "", organizations.size);
         tool_byte_buffer_free(&organizations);
+        if (prepare_entity(import, e)) return -1;
         {
             const char *detail = string(import, e->detail);
             if (record_text(import, &e->record, detail, rt_strlen(detail)) != 0) return -1;
@@ -843,7 +854,9 @@ static int emit(Import *import) {
             return search_error("cannot read archived document", string(import, e->pdf));
         if (document_version(import, e, bytes, length) != 0) { rt_free(bytes); return -1; }
         context.import = import; context.entity = (uint32_t)i;
-        if (length < 5 || memcmp(bytes, "%PDF-", 5) != 0 ||
+        if (import->prepared) {
+            if (prepared_pages(import, e, &context, length)) { rt_free(bytes); return -1; }
+        } else if (length < 5 || memcmp(bytes, "%PDF-", 5) != 0 ||
             pdf_text_extract(bytes, length, extracted_page, &context, &error) != 0) {
             import->failed_pdfs++;
             if (import->builder.failed || (error && rt_strcmp(error, "cannot store extracted page") == 0)) {
@@ -877,7 +890,7 @@ int main(int argc, char **argv) {
     tool_array_init(&import.archives, sizeof(ArchiveRoot));
     for (i = 1; i < (size_t)argc; i++) {
         if (rt_strcmp(argv[i], "--help") == 0) {
-            rt_write_cstr(1, "Usage: oparl-index [--input ARCHIVE_OR_PARENT] [--output INDEX]\n"
+            rt_write_cstr(1, "Usage: oparl-index [--input ARCHIVE_OR_PARENT] [--output INDEX] [--prepared DIRECTORY]\n"
                 "Build a binary metadata/full-text index; originals stay unchanged.\n"
                 "Exit: 0 complete, 1 error, 3 published index with documented coverage gaps.\n");
             result = 0; goto done;
@@ -885,8 +898,10 @@ int main(int argc, char **argv) {
         if (i + 1 == (size_t)argc) { search_error("missing option value", argv[i]); goto done; }
         if (rt_strcmp(argv[i], "--input") == 0) input = argv[++i];
         else if (rt_strcmp(argv[i], "--output") == 0) output = argv[++i];
+        else if (rt_strcmp(argv[i], "--prepared") == 0) import.prepared = argv[++i];
         else { search_error("unknown option", argv[i]); goto done; }
     }
+    if (import.prepared && prepare_manifest_read(import.prepared, import.preparation_key)) goto done;
     if (walk_archive(input, archive_root, &import, 0) != 0) {
         search_error("cannot discover archives", input); goto done;
     }

@@ -8,7 +8,7 @@
 typedef struct {
     uint32_t id, name, reference, date, paper_type, organization, kind, source;
     uint32_t text, text_length, body_start, words, year, page, warnings, payload;
-    uint32_t parent, identity, system, body, metadata_origin, reserved;
+    uint32_t parent, identity, system, body, metadata_origin, preparation;
 } SearchRecord;
 
 typedef enum {
@@ -42,7 +42,10 @@ typedef struct {
     int64_t seconds;
     uint32_t nanos, day, fact, precision;
 } SearchDate;
-typedef struct { uint32_t name, start, count, warnings, unresolved, unversioned; } SearchFacet;
+typedef struct {
+    uint32_t name, start, count, warnings, unresolved, unversioned;
+    uint32_t not_archived, missing_version_unknown, extraction_failed, nonpublic, unresolved_unknown;
+} SearchFacet;
 typedef struct { const char *id; uint32_t record; } SearchIdentity;
 typedef struct { uint32_t source, property; char *id; } SearchActor;
 
@@ -79,7 +82,7 @@ typedef struct {
     uint64_t imported_at;
     char snapshot_id[65];
     size_t string_bytes, record_count, term_count, occurrence_count, owner_count, file_bytes, memory_bytes;
-    unsigned int incomplete;
+    unsigned int incomplete, format_version;
     float average_length;
     SearchDate *dates;
     uint32_t *date_lookup, *meeting_context, *version_lookup, *kind_records;
@@ -92,8 +95,9 @@ typedef struct {
     ToolArray actors;
     uint32_t *actor_start, *relation_targets;
     uint32_t *incoming_start, *incoming_relations;
+    uint32_t *meeting_results;
     uint64_t *agenda_order;
-    unsigned char *agenda_access;
+    unsigned char *agenda_access, *agenda_results, *relation_hidden;
 } SearchIndex;
 
 /* Zero-initialize one workspace per concurrent caller; the index stays immutable. */
@@ -133,7 +137,7 @@ typedef struct {
 } SearchResult;
 
 typedef struct {
-    const char *id, *kind, *fields, *snapshot_id;
+    const char *id, *kind, *fields, *snapshot_id, *view, *direction;
     const char *ids[20];
     unsigned int id_count, limit, offset, page;
     int raw;

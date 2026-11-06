@@ -76,8 +76,9 @@ export async function testSearchMcp(base, raw, cli, fileId, port) {
       assert.equal(called.status, 200, called.text);
       assert.equal(called.json.result.isError, false);
       assert.deepEqual(called.json.result.structuredContent, expected);
-      assert.deepEqual(JSON.parse(called.json.result.content[0].text), expected,
-        'both structuredContent and text contain the actual result');
+      if (!current) assert.deepEqual(JSON.parse(called.json.result.content[0].text), expected);
+      else assert.ok(called.json.result.content[0].text.includes('structuredContent'),
+        'modern clients receive the full JSON once, not a second serialized copy');
     }
   }
   const id = 'Zitat " \\ 😀';

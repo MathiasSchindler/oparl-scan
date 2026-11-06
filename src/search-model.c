@@ -1,6 +1,7 @@
 #include "search.h"
 #include "runtime.h"
 #include "hash_util.h"
+#include "json.h"
 
 #define NONE UINT32_MAX
 
@@ -90,8 +91,29 @@ static const char *domain(uint32_t role) {
 
 int search_model_validate(const SearchIndex *index) {
     size_t i, j;
-    for (i = 0; i < index->record_count; i++)
+    for (i = 0; i < index->record_count; i++) {
+        const SearchRecord *r = &index->records[i];
         if (!index->records[i].identity || !index->strings[index->records[i].identity]) return -1;
+        if (r->parent != NONE) {
+            if (r->preparation != index->records[r->parent].preparation) return -1;
+        } else if (r->preparation) {
+            Json json;
+            const SearchVersion *version = version_for(index, (uint32_t)i);
+            const char *summary = index->strings + r->preparation;
+            const JsonToken *fields;
+            char hash[65];
+            unsigned long long format;
+            int invalid;
+            if (rt_strcmp(index->strings + r->kind, "File") || !version ||
+                json_parse(&json, summary, rt_strlen(summary))) return -1;
+            fields = json_token(&json, json_get(&json, 0, "fields"));
+            invalid = json_uint(&json, json_get(&json, 0, "format"), &format) || format != 1 ||
+                json_string(&json, json_get(&json, 0, "sourceSha256"), hash, sizeof(hash)) ||
+                rt_strcmp(hash, index->strings + version->hash) || !fields || fields->kind != JSON_ARRAY;
+            json_free(&json);
+            if (invalid) return -1;
+        }
+    }
     for (i = 0; i < index->evidence_count; i++) {
         const SearchEvidence *e = &index->evidence[i];
         uint32_t offsets[] = {e->object,e->version,e->section,e->property,e->rule};

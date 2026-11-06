@@ -308,9 +308,10 @@ static int decode(char *text) {
 
 static const char *const parameter_names[] = {"q", "year", "paperType", "organization", "kind", "limit",
     "offset", "sort", "id", "page", "group", "dateRole", "dateFrom", "dateThrough",
-    "organizationId", "actorId", "snapshotId", "fields", "raw", "ids"};
+    "organizationId", "actorId", "snapshotId", "fields", "raw", "ids", "view", "direction"};
+#define PARAMETER_COUNT (sizeof(parameter_names)/sizeof(parameter_names[0]))
 static int parameters(char *text, char **values, int object) {
-    rt_memset(values, 0, 20 * sizeof(*values));
+    rt_memset(values, 0, PARAMETER_COUNT * sizeof(*values));
     while (text && *text) {
         char *next = find_char(text, '&'), *value;
         size_t i;
@@ -319,8 +320,8 @@ static int parameters(char *text, char **values, int object) {
         if (!value) return -1;
         *value++ = '\0';
         if (decode(text) != 0 || decode(value) != 0) return -1;
-        for (i = 0; i < 20 && rt_strcmp(text, parameter_names[i]); i++) {}
-        if (i == 20 || values[i] ||
+        for (i = 0; i < PARAMETER_COUNT && rt_strcmp(text, parameter_names[i]); i++) {}
+        if (i == PARAMETER_COUNT || values[i] ||
             (object == 1 && i != 8 && i != 9) ||
             (object == 2 && i != 4 && i != 5 && i != 6 && i != 8 && i != 9 && i < 16) ||
             (!object && (i == 8 || i == 9 || i >= 17))) return -1;
@@ -337,7 +338,7 @@ static int number(const char *text, unsigned int min, unsigned int max, unsigned
 }
 
 static int research_response(int fd, const WebRequest *request, const SearchIndex *index, const char *operation) {
-    char *values[20], storage[16385];
+    char *values[PARAMETER_COUNT], storage[16385];
     ToolByteBuffer arguments, result;
     SearchRead read;
     Json json;
@@ -347,7 +348,7 @@ static int research_response(int fd, const WebRequest *request, const SearchInde
     if (parameters(request->parameters, values, 2)) return web_error(fd, 400, request->head, error);
     tool_byte_buffer_init(&arguments); tool_byte_buffer_init(&result);
     if (tool_byte_buffer_append_cstr(&arguments, "{")) { status = SEARCH_QUERY_RESOURCE; goto done; }
-    for (i = 0; i < 20; i++) if (values[i]) {
+    for (i = 0; i < PARAMETER_COUNT; i++) if (values[i]) {
         if ((comma && tool_byte_buffer_append_cstr(&arguments, ",")) ||
             search_json_quote(&arguments, parameter_names[i]) || tool_byte_buffer_append_cstr(&arguments, ":")) {
             status = SEARCH_QUERY_RESOURCE; goto done;
@@ -392,7 +393,7 @@ static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, Se
     SearchResult result;
     const char *error, *type = 0;
     const char *const *asset = 0;
-    char *values[20];
+    char *values[PARAMETER_COUNT];
     int status;
     if (!rt_strcmp(request.path, "/mcp")) {
         ToolByteBuffer reply;

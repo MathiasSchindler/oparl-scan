@@ -28,7 +28,8 @@ typedef struct {
 
 typedef struct {
     PdfDocument document;
-    ToolArray fonts, pages;
+    ToolArray fonts, pages, spans;
+    int layout;
     unsigned char *visited;
     unsigned int warnings, image;
 } Extractor;
@@ -548,6 +549,26 @@ static void text_advance(TextState *state, double advance) {
     state->end_y = m[1] * state->x + m[3] * state->y + m[5];
     state->positioned = 1;
 }
+static int positioned_show(Extractor *extractor, Font *font, const Token *token,
+                          ToolByteBuffer *text, TextState *state) {
+    size_t start = text->size;
+    double advance = 0, x = state->x, y = state->y;
+    const double *m = state->style.ctm;
+    if (show(extractor, font, token, text, state->style.size,
+        state->style.spacing, state->style.word_spacing, &advance)) return -1;
+    text_advance(state, advance);
+    if (extractor->layout && text->size > start) {
+        PdfTextSpan *span;
+        if (extractor->spans.count >= 262144 ||
+            !(span = (PdfTextSpan *)tool_array_append(&extractor->spans))) return -1;
+        span->start = start; span->length = text->size-start;
+        span->x = m[0]*x + m[2]*y + m[4];
+        span->y = m[1]*x + m[3]*y + m[5];
+        span->end_x = state->end_x; span->end_y = state->end_y;
+        span->size = state->style.size;
+    }
+    return 0;
+}
 
 static int content(Extractor *extractor, const unsigned char *bytes, size_t size,
                     Dictionary resources, ToolByteBuffer *text, unsigned int depth, TextState *state) {
@@ -595,7 +616,6 @@ static int content(Extractor *extractor, const unsigned char *bytes, size_t size
         } else if ((equals(&token, "Tj") || equals(&token, "'") || equals(&token, "\"")) && count) {
             Font *font = state->style.font < extractor->fonts.count ?
                          (Font *)tool_array_get(&extractor->fonts, state->style.font) : 0;
-            double advance = 0;
             if (!equals(&token, "Tj")) {
                 if (equals(&token, "\"") && count == 3) {
                     state->style.word_spacing = numeric(operands);
@@ -605,10 +625,9 @@ static int content(Extractor *extractor, const unsigned char *bytes, size_t size
                 if (separator(text, '\n') != 0) return -1;
             }
             if (text_start(state, text) != 0) return -1;
-            if (operands[count - 1].kind != 1 || show(extractor, font, &operands[count - 1], text,
-                state->style.size, state->style.spacing, state->style.word_spacing, &advance) != 0)
+            if (operands[count - 1].kind != 1 ||
+                positioned_show(extractor, font, &operands[count - 1], text, state))
                 return -1;
-            text_advance(state, advance);
         } else if (equals(&token, "TJ") && count && operands[count - 1].kind == 2) {
             Token item = operands[count - 1];
             size_t q = item.start + 1, end = item.end - 1;
@@ -617,10 +636,7 @@ static int content(Extractor *extractor, const unsigned char *bytes, size_t size
             if (text_start(state, text) != 0) return -1;
             while (q < end && token_next(&item, &q, 0) == 1 && item.start < end) {
                 if (item.kind == 1) {
-                    double advance = 0;
-                    if (show(extractor, font, &item, text, state->style.size,
-                        state->style.spacing, state->style.word_spacing, &advance) != 0) return -1;
-                    text_advance(state, advance);
+                    if (positioned_show(extractor, font, &item, text, state)) return -1;
                 } else {
                     double adjustment = numeric(&item);
                     if (adjustment < -120 && separator(text, ' ') != 0) return -1;
@@ -650,6 +666,18 @@ static int content(Extractor *extractor, const unsigned char *bytes, size_t size
                     Dictionary nested = resources;
                     TextState nested_state = *state;
                     PdfBuffer decoded;
+                    if (member(dict, "/Matrix", &value) && value.kind == 2) {
+                        Token item = value;
+                        double matrix[6];
+                        size_t p = value.start+1, k;
+                        for (k = 0; k < 6; k++) {
+                            if (token_next(&item, &p, 0) != 1 || item.kind) return -1;
+                            matrix[k] = numeric(&item);
+                        }
+                        p = pdf_skip_ws(value.data, value.size, p);
+                        if (p != value.end-1) return -1;
+                        transform(&nested_state.style, matrix);
+                    }
                     if (member(dict, "/Resources", &value)) (void)resolve(extractor, &value, &nested);
                     pdf_buffer_init(&decoded);
                     for (i = 0; i < extractor->document.objects_len; i++) {
@@ -845,8 +873,8 @@ static int join_line_hyphens(ToolByteBuffer *text) {
     return 0;
 }
 
-int pdf_text_extract(const unsigned char *bytes, size_t length, PdfTextPage callback,
-                     void *user, const char **error) {
+static int extract(const unsigned char *bytes, size_t length, PdfTextPage callback,
+                   PdfTextLayoutPage layout_callback, void *user, const char **error) {
     Extractor extractor;
     const PdfObjectSpan *catalog;
     Dictionary dict;
@@ -857,6 +885,8 @@ int pdf_text_extract(const unsigned char *bytes, size_t length, PdfTextPage call
     rt_memset(&extractor, 0, sizeof(extractor));
     tool_array_init(&extractor.fonts, sizeof(Font));
     tool_array_init(&extractor.pages, sizeof(PdfPageRef));
+    tool_array_init(&extractor.spans, sizeof(PdfTextSpan));
+    extractor.layout = layout_callback != 0;
     *error = "invalid or unsupported PDF";
     if (pdf_document_parse(bytes, length, &extractor.document) != 0) goto done;
     if (extractor.document.max_object_number > 1000000) goto done;
@@ -872,6 +902,8 @@ int pdf_text_extract(const unsigned char *bytes, size_t length, PdfTextPage call
         const PdfPageRef *page = (const PdfPageRef *)tool_array_get_const(&extractor.pages, i);
         const PdfObjectSpan *span = object(&extractor, page->object_number, page->generation);
         ToolByteBuffer text;
+        ToolByteBuffer raw;
+        PdfTextLayout layout;
         Dictionary resources;
         Token contents;
         TextState state;
@@ -879,24 +911,38 @@ int pdf_text_extract(const unsigned char *bytes, size_t length, PdfTextPage call
         state.style.font = (size_t)-1; state.style.size = 12;
         state.style.scale = state.a = state.d = state.style.ctm[0] = state.style.ctm[3] = 1;
         extractor.warnings = extractor.image = 0;
+        extractor.spans.count = 0;
         tool_byte_buffer_init(&text);
+        tool_byte_buffer_init(&raw);
         dict = dictionary(&extractor, span);
         resources = page_resources(&extractor, dict);
         if (member(dict, "/Contents", &contents) && page_contents(&extractor, &contents, resources, &text, 0, &state) != 0)
             extractor.warnings |= PDF_TEXT_UNSUPPORTED_STREAM;
         if (extractor.image && page_marks_only(text.data, text.size)) extractor.warnings |= PDF_TEXT_NEEDS_OCR;
+        if (layout_callback && (tool_byte_buffer_append(&raw, text.data, text.size) ||
+            tool_byte_buffer_terminate(&raw))) {
+            tool_byte_buffer_free(&raw); tool_byte_buffer_free(&text);
+            *error = "cannot preserve PDF layout text"; goto done;
+        }
         if (join_line_hyphens(&text) != 0) {
+            tool_byte_buffer_free(&raw);
             tool_byte_buffer_free(&text);
             *error = "invalid UTF-8 in extracted PDF text";
             goto done;
         }
+        layout.text = raw.data ? (const char *)raw.data : "";
+        layout.length = raw.size; layout.spans = (const PdfTextSpan *)extractor.spans.data;
+        layout.span_count = extractor.spans.count;
         if (tool_byte_buffer_terminate(&text) != 0 ||
-            callback((unsigned int)i + 1, text.data != 0 ? (const char *)text.data : "", text.size,
-                     extractor.warnings, user) != 0) {
+            (layout_callback ? layout_callback((unsigned int)i+1,
+                text.data ? (const char *)text.data : "", text.size, extractor.warnings, &layout, user) :
+             callback((unsigned int)i+1, text.data ? (const char *)text.data : "", text.size, extractor.warnings, user))) {
+            tool_byte_buffer_free(&raw);
             tool_byte_buffer_free(&text);
             *error = "cannot store extracted page";
             goto done;
         }
+        tool_byte_buffer_free(&raw);
         tool_byte_buffer_free(&text);
     }
     result = 0;
@@ -908,7 +954,16 @@ done:
     }
     tool_array_free(&extractor.fonts);
     tool_array_free(&extractor.pages);
+    tool_array_free(&extractor.spans);
     rt_free(extractor.visited);
     pdf_document_free(&extractor.document);
     return result;
+}
+int pdf_text_extract(const unsigned char *bytes, size_t length, PdfTextPage callback,
+                     void *user, const char **error) {
+    return extract(bytes, length, callback, 0, user, error);
+}
+int pdf_text_extract_layout(const unsigned char *bytes, size_t length, PdfTextLayoutPage callback,
+                            void *user, const char **error) {
+    return extract(bytes, length, 0, callback, user, error);
 }

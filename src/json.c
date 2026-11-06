@@ -220,6 +220,28 @@ int json_equals(const Json *json, size_t index, const char *text) {
            rt_strcmp(decoded, text) == 0;
 }
 
+int json_quote(ToolByteBuffer *buffer, const char *text) {
+    static const char hex[] = "0123456789abcdef";
+    const char *p = text;
+    if (tool_byte_buffer_append_cstr(buffer, "\"")) return -1;
+    while (*p) {
+        const char *start = p;
+        unsigned char ch;
+        char escape[6] = {'\\','u','0','0','0','0'};
+        size_t length = 6;
+        while (*p && (unsigned char)*p >= 32 && *p != '"' && *p != '\\') p++;
+        if (tool_byte_buffer_append(buffer, start, (size_t)(p-start))) return -1;
+        if (!*p) break;
+        ch = (unsigned char)*p++;
+        if (ch == '"' || ch == '\\' || ch == '\n' || ch == '\r' || ch == '\t') {
+            escape[1] = ch == '\n' ? 'n' : ch == '\r' ? 'r' : ch == '\t' ? 't' : (char)ch;
+            length = 2;
+        } else { escape[4] = hex[ch>>4]; escape[5] = hex[ch&15]; }
+        if (tool_byte_buffer_append(buffer, escape, length)) return -1;
+    }
+    return tool_byte_buffer_append_cstr(buffer, "\"");
+}
+
 size_t json_get(const Json *json, size_t object, const char *key) {
     const JsonToken *parent = json_token(json, object);
     size_t index;

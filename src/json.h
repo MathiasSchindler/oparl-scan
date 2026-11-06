@@ -30,5 +30,6 @@ int json_string(const Json *json, size_t index, char *out, size_t capacity);
 int json_equals(const Json *json, size_t index, const char *text);
 int json_uint(const Json *json, size_t index, unsigned long long *out);
 int json_true(const Json *json, size_t index);
+int json_quote(ToolByteBuffer *buffer, const char *text);
 
 #endif

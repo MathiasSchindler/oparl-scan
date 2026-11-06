@@ -142,6 +142,14 @@ export async function testSearchWeb(binary, index, fileId) {
     'ambiguous context must not pick an arbitrary agenda title');
     assert.equal(presentation.hitTitle({ name: 'Protokoll \u00f6ffentlich', fileName: 'Minutes.pdf' }), 'Minutes.pdf');
     assert.equal(presentation.hitTitle({ name: 'Sammeldokument \u00f6ffentlich', relatedName: 'Actual paper title' }), 'Actual paper title');
+    for (const evidence of [
+      { relationshipsComplete: false, relationshipTotal: 6,
+        relationshipPath: [{ source: 'a', sourceKind: 'Meeting', sourceName: 'Visible meeting' }] },
+      { relationshipsComplete: true, relationshipPath: [
+        { source: 'a', sourceKind: 'Meeting', sourceName: 'Visible meeting' },
+        { source: 'b', sourceKind: 'Meeting', sourceNameOmitted: true }] },
+    ]) assert.equal(presentation.hitTitle({ name: 'Protokoll oeffentlich', fileName: 'Minutes.pdf', evidence }), 'Minutes.pdf',
+      'partial relationship metadata must not falsely establish a unique title');
     const rendered = presentation.renderHit({ id: fileId, kind: 'Page', page: 2, name: 'Original PDF',
       snippet: 'The matching document text.', dateRole: 'auto', evidence: { citation: {
         documentVersion: { id: 'urn:test:version', sha256: 'fixture-hash' } },
@@ -178,6 +186,15 @@ export async function testSearchWeb(binary, index, fileId) {
       .flatMap(node => node.children.map(child => child.textContent));
     assert.deepEqual(Array.from(visibleDates), ['Dokumentdatum nicht angegeben', 'Sitzung: 24.06.2026',
       'Dateieintrag erstellt: 07.07.2026', 'Dateieintrag ge\u00e4ndert: 10.07.2026']);
+    const partialDates = render({ evidence: { relationshipsComplete: false, relationshipTotal: 6,
+      relationsAvailable: { id: fileId, view: 'relations', direction: 'incoming', snapshotId: 'snapshot' },
+      relationshipPath: [{ source: 'meeting/1', sourceKind: 'Meeting', sourceDate: {
+        value: '2026-06-24', precision: 'day' } }] } });
+    assert.ok(!partialDates.children.filter(node => node.className === 'meta muted')
+      .flatMap(node => Array.from(node.children)).some(node => /^Sitzung:/.test(node.textContent)),
+      'a truncated relationship set cannot establish a unique meeting date');
+    assert.ok(partialDates.children.find(node => node.tagName === 'DETAILS').children
+      .some(node => node.tagName === 'A' && node.href.includes('view=relations')));
     const ambiguous = render({ evidence: { relationshipPath: [
       { source: 'meeting/1', sourceKind: 'Meeting', sourceDate: { value: '2026-06-24', precision: 'day' } },
       { source: 'meeting/2', sourceKind: 'Meeting', sourceDate: { value: '2026-06-25', precision: 'day' } },

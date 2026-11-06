@@ -52,6 +52,8 @@ int main(int argc, char **argv) {
                 "  --options             Discover types, dates and stable IDs (with --kind)\n"
                 "  --status              Index time, snapshot and per-type coverage\n"
                 "  --fields FIELDS       Comma-separated metadata projection fields\n"
+                "  --view relations      Paginated relationships with --show\n"
+                "  --direction VALUE     incoming, outgoing or both (relations only)\n"
                 "  --raw                 Explicit full source metadata with --show/--paper\n"
                 "  --page N              With --show: retrieve a PDF text page\n"
                 "  --serve               Local read-only web UI and JSON API (127.0.0.1)\n"
@@ -89,6 +91,8 @@ int main(int argc, char **argv) {
         else if (!rt_strcmp(flag, "--actor-id")) filter.actor_id = value;
         else if (!rt_strcmp(flag, "--snapshot-id")) filter.snapshot_id = value;
         else if (!rt_strcmp(flag, "--fields")) read.fields = value;
+        else if (!rt_strcmp(flag, "--view")) read.view = value;
+        else if (!rt_strcmp(flag, "--direction")) read.direction = value;
         else if (!rt_strcmp(flag, "--date-from")) filter.date_from = value;
         else if (!rt_strcmp(flag, "--date-through")) filter.date_through = value;
         else if (!rt_strcmp(flag, "--date-role")) {
@@ -135,12 +139,12 @@ int main(int argc, char **argv) {
             else { search_error("unknown option or value outside bounds", flag); return 1; }
         }
     }
-    if ((serve && (query || batch || read_operation || repetitions || page || json || filter_set || read.raw || read.fields)) ||
+    if ((serve && (query || batch || read_operation || repetitions || page || json || filter_set || read.raw || read.fields || read.view || read.direction)) ||
         (port_set && !serve) || (!serve && !batch && !query && !read_operation && !filter_set) ||
         (batch && (query || repetitions || read_operation)) || (read_operation && (query || repetitions)) ||
         (page && (!read_operation || rt_strcmp(read_operation, "get_object"))) ||
-        (!read_operation && (read.raw || read.fields)) ||
-        (read_operation && !rt_strcmp(read_operation, "get_index_status") && (filter_set || read.raw || read.fields)) ||
+        (!read_operation && (read.raw || read.fields || read.view || read.direction)) ||
+        (read_operation && !rt_strcmp(read_operation, "get_index_status") && (filter_set || read.raw || read.fields || read.view || read.direction)) ||
         (read_operation && (filter.year || filter.paper_type || filter.organization || filter.organization_id ||
             filter.actor_id || filter.date_from || filter.date_through || filter.date_role || filter.sort || filter.group))) {
         search_error("choose a query, --batch, --show or --serve; --port requires --serve", 0); return 1;

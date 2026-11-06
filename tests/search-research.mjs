@@ -30,6 +30,8 @@ try {
   const late = fixture.objects.find(o => o.id === id('meetings/late'));
   await store({ ...late, agendaItem: [...late.agendaItem, id('agendaItems/missing'), {
     id: id('agendaItems/nonpublic'), type: schema + 'AgendaItem', public: false, name: 'Nonpublic TOP',
+  }, {
+    id: id('agendaItems/' + 'long-private-id-'.repeat(24)), type: schema + 'AgendaItem', public: false,
   }] });
   await store({ id: id('meetings/held'), type: schema + 'Meeting', meetingState: 'durchgefuehrt' });
   await store({ id: id('meetings/cancelled'), type: schema + 'Meeting', cancelled: true, meetingState: 'eingeladen' });
@@ -45,9 +47,28 @@ try {
     underDirectionOf: [id('organizations/alpha')], paperType: 'Antrag', reference: '26/SVV/9999' });
   await store({ id: id('consultations/incoming'), type: schema + 'Consultation',
     paper: id('papers/large'), authoritative: false });
+  const fanIn = Array.from({ length: 180 }, (_, n) => id('consultations/fan-in-' + n));
+  for (const consultation of fanIn)
+    await store({ id: consultation, type: schema + 'Consultation', meeting: late.id });
+  for (const name of ['early', 'unknown'])
+    await store({ id: id('consultations/school-' + name), type: schema + 'Consultation',
+      paper: id('papers/school'), meeting: id('meetings/' + name) });
+  await store({ id: id('papers/ambiguous-order'), type: schema + 'Paper', name: 'Ambiguous meeting dates' });
+  for (const [name, meeting] of [['ambiguous', [late.id, id('meetings/early')]], ['known', late.id]])
+    await store({ id: id('consultations/order-' + name), type: schema + 'Consultation',
+      paper: id('papers/ambiguous-order'), meeting });
+  const shared = id('files/shared-many');
+  await store({ id: shared, type: schema + 'File', name: 'Protokoll oeffentlich', fileName: 'shared.pdf' });
+  await writeFile(join(fixture.archive, 'documents', hash(shared) + '-fixture.pdf'), bytes);
+  for (let n = 0; n < 6; n++)
+    await store({ id: id('meetings/shared-' + n), type: schema + 'Meeting', name: 'Shared meeting ' + n,
+      resultsProtocol: shared, ...(n ? { start: fixture.starts.late } : {}) });
+  const unarchived = id('files/not-archived');
+  await store({ id: unarchived, type: schema + 'File', name: 'Metadata without archived bytes' });
   const built = spawnSync(indexer, ['--input', fixture.archive, '--output', index],
     { encoding: 'utf8', timeout: 60000 });
-  assert.equal(built.status, 0, built.stderr);
+  assert.equal(built.status, 3, built.stderr);
+  assert.ok(built.stderr.includes('document is not archived: ' + unarchived));
   const reservation = createServer();
   await new Promise((accept, reject) => { reservation.once('error', reject); reservation.listen(0, '127.0.0.1', accept); });
   const port = reservation.address().port;
@@ -87,12 +108,51 @@ try {
     const body = await response.text(), result = JSON.parse(body).result;
     assert.equal(response.status, 200, body);
     assert.equal(result.isError, expectError, body);
-    if (!expectError) assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
+    if (!expectError && !modern) assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
     return { data: result.structuredContent, bytes: Buffer.byteLength(body) };
   }
   const status = await api('/api/status'), snapshotId = status.snapshotId;
   assert.deepEqual(status, cli(['--status']));
   assert.ok(status.coverage.perType.find(t => t.kind === 'Paper').unresolvedRelationTargets > 0);
+  const fileCoverage = status.coverage.perType.find(t => t.kind === 'File');
+  assert.ok(fileCoverage.fileVersionReasons.notArchivedAtIndexBuild > 0);
+  assert.equal(fileCoverage.filesWithoutIndexedVersion,
+    fileCoverage.fileVersionReasons.notArchivedAtIndexBuild + fileCoverage.fileVersionReasons.unknown);
+  const meetingCoverage = status.coverage.perType.find(t => t.kind === 'Meeting');
+  assert.equal(meetingCoverage.unresolvedReasons.explicitlyNonpublic, 2);
+  assert.equal(meetingCoverage.unresolvedRelationTargets,
+    meetingCoverage.unresolvedReasons.explicitlyNonpublic + meetingCoverage.unresolvedReasons.unknown);
+  assert.equal((await api('/api/object', { id: unarchived })).documentCoverage, 'not-archived-at-index-build');
+  const bounded = await rpc('search', { kind: 'Meeting', q: 'Stadtverordnetenversammlung', limit: 5 });
+  assert.ok(bounded.bytes < 20000, 'meeting search must not embed hundreds of incoming edges');
+  assert.ok(bounded.data.hits.every(h => h.evidence.relationshipPath.length === 0));
+  const meetingHit = bounded.data.hits.find(h => h.id === late.id);
+  assert.ok(meetingHit.evidence.relationshipTotal >= fanIn.length);
+  assert.equal(meetingHit.evidence.relationshipsComplete, false);
+  const incomingRows = [];
+  let relationArgs = { id: late.id, view: 'relations', direction: 'incoming', limit: 100 }, relationPage;
+  do {
+    relationPage = (await rpc('get_object', relationArgs)).data;
+    incomingRows.push(...relationPage.relationships);
+    if (relationPage.next) {
+      const { operation, ...args } = relationPage.next;
+      assert.equal(operation, 'get_object');
+      relationArgs = args;
+    }
+  } while (relationPage.next);
+  assert.equal(incomingRows.length, relationPage.total);
+  assert.equal(new Set(incomingRows.map(r => [r.source, r.role, r.target].join('|'))).size, relationPage.total);
+  assert.ok(fanIn.every(source => incomingRows.some(r => r.source === source)));
+  assert.ok(incomingRows.every(r => r.sourceObject === r.source && r.certainty === 'asserted'));
+  assert.deepEqual(await api('/api/object', { id: late.id, view: 'relations', direction: 'incoming', limit: 2 }),
+    cli(['--show', late.id, '--view', 'relations', '--direction', 'incoming', '--limit', '2']));
+  await api('/api/object', { id: late.id, view: 'relations', offset: 1 }, 400);
+  await api('/api/object', { id: late.id, view: 'relations', offset: 1, snapshotId: 'changed' }, 409);
+  await api('/api/object', { id: late.id, view: 'relations', raw: true }, 400);
+  const sharedHit = (await api('/api/search', { kind: 'File', q: 'Protokoll' })).hits.find(h => h.id === shared);
+  assert.equal(sharedHit.evidence.relationshipPath.length, 4);
+  assert.equal(sharedHit.evidence.relationshipTotal, 6);
+  assert.equal(sharedHit.evidence.relationshipsComplete, false);
   const packetHit = cli(['--kind', 'Page', '--group', 'paper', 'Schulwegsicher*']).hits.find(h => h.id === id('files/packet'));
   assert.equal(packetHit.relatedPaper, undefined, 'a meeting package must not acquire a Paper owner for presentation');
   assert.equal(packetHit.name, 'Alle Anlagen oeffentlich');
@@ -119,8 +179,10 @@ try {
       if (paper.endsWith('/large')) {
         assert.ok(data.next);
         assert.ok(data.objects[0].omittedFields.includes('description'));
-        assert.ok(data.objects.find(o => o.id === id('consultations/incoming'))
-          .relationshipPath.some(p => p.direction === 'incoming' && p.role === 'consultation.paper'));
+        const consultation = data.objects.find(o => o.id === id('consultations/incoming'));
+        assert.equal(consultation.parentId, paper);
+        assert.equal(consultation.relationshipDirection, 'incoming');
+        assert.equal(consultation.sourceRole, 'consultation.paper');
       }
     }
   }
@@ -138,6 +200,19 @@ try {
     return all;
   }
   const objects = await collect('/api/paper', { id: id('papers/large') });
+  const byId = new Map(objects.map(o => [o.id, o]));
+  for (const object of objects) {
+    let node = object;
+    const visited = new Set([node.id]);
+    while (node.parentId) {
+      assert.ok(!visited.has(node.parentId), 'compact parent references must reconstruct an acyclic full path');
+      visited.add(node.parentId);
+      assert.ok(['incoming', 'outgoing'].includes(node.relationshipDirection));
+      node = byId.get(node.parentId);
+      assert.ok(node, 'pagination must preserve every parent needed for relationship reconstruction');
+    }
+    assert.equal(node.id, id('papers/large'));
+  }
   assert.equal(objects.length, files.length + 3, 'paper, incoming consultation, organization and every file');
   assert.ok(files.every(file => objects.some(o => o.id === file && o.citation.documentVersion?.sha256 === hash(bytes))));
   const request = await collect('/api/paper', { id: id('papers/request') });
@@ -165,7 +240,10 @@ try {
   await api('/api/object', { id: missing.id }, 404);
   await rpc('get_paper', { id: id('papers/large'), offset: 1, snapshotId: 'changed' }, true, true);
   const agenda = await api('/api/agenda', { id: late.id });
-  assert.equal(agenda.nonPublicReferences, 1);
+  assert.equal(agenda.meeting.lifecycle, 'planned', 'results must not silently overwrite the source state');
+  assert.equal(agenda.meeting.statusConflict, true);
+  assert.ok(agenda.meeting.agendaItemsWithResult > 0);
+  assert.equal(agenda.nonPublicReferences, 2);
   assert.equal(agenda.unresolvedAgendaReferences, 1);
   assert.equal(agenda.publicStatusUnspecified, 128);
   const tops = await collect('/api/agenda', { id: late.id });
@@ -175,9 +253,19 @@ try {
   for (const [name, lifecycle] of [['late', 'planned'], ['held', 'held'], ['cancelled', 'cancelled'], ['unknown', 'planned']]) {
     const data = await api('/api/meeting', { id: id('meetings/' + name) });
     assert.equal(data.objects[0].lifecycle, lifecycle);
+    assert.equal(data.objects[0].statusConflict, name === 'late');
     assert.deepEqual(data, cli(['--meeting', id('meetings/' + name)]));
     assert.deepEqual((await rpc('get_meeting', { id: data.id }, true)).data, data);
   }
+  const schoolFirst = await api('/api/paper', { id: id('papers/school') });
+  assert.equal(schoolFirst.overview.consultations, 3);
+  const schoolAll = await collect('/api/paper', { id: id('papers/school') });
+  assert.deepEqual(schoolAll.filter(o => o.kind === 'Consultation').map(o => o.id),
+    ['school', 'school-early', 'school-unknown'].map(n => id('consultations/' + n)));
+  const ambiguousOrder = await collect('/api/paper', { id: id('papers/ambiguous-order') });
+  assert.deepEqual(ambiguousOrder.filter(o => o.kind === 'Consultation').map(o => o.id),
+    ['known', 'ambiguous'].map(n => id('consultations/order-' + n)),
+    'multiple meeting dates remain unknown instead of choosing one or indexing an ambiguous sentinel');
   const options = await api('/api/options', { kind: 'Person', fields: 'name' });
   assert.ok(options.paperTypes.includes('Kleine Anfrage'));
   assert.ok(options.projectionFields.includes('downloadUrl'));

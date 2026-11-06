@@ -2,6 +2,7 @@
 
 [Projektuebersicht und Build](../README.md) |
 [oparl-scan](oparl-scan.md) |
+[oparl-prepare](oparl-prepare.md) |
 [oparl-search](oparl-search.md)
 
 `oparl-index` baut aus lokalen OParl-Archiven einen gemeinsamen binaeren
@@ -19,7 +20,8 @@ Eingabearchiv ergeben keinen konsistenten Schnappschuss.
 
 ```sh
 # Gesamten lokalen Bestand ueber alle Jahrgangsarchive indexieren.
-build/macos-aarch64/oparl-index --input downloads \
+build/macos-aarch64/oparl-prepare --input downloads --output build/prepared
+build/macos-aarch64/oparl-index --input downloads --prepared build/prepared \
   --output build/search/index.ops
 
 # Alternativ nur ein einzelnes Archiv indexieren.
@@ -34,6 +36,11 @@ build/macos-aarch64/oparl-search --index build/search/index.ops \
 Nach neuen oder aktualisierten Downloads denselben Indexer-Aufruf erneut
 ausfuehren. Die aktuelle Version baut den Index **vollstaendig neu**;
 eine inkrementelle Indexierung gibt es noch nicht.
+Mit `--prepared` werden die PDF-Texte und Formularbefunde dagegen aus dem
+[verifizierten Vorbereitungscache](oparl-prepare.md) importiert, nicht erneut
+aus PDFs extrahiert. Die Originalbytes werden weiterhin gegen ihre Fassung
+geprueft. Ohne diese Option bleibt der direkte Aufbau verfuegbar; mit ihr
+sind fehlende, veraltete oder defekte Artefakte ein fataler Fehler.
 
 ## Optionen
 
@@ -41,6 +48,7 @@ eine inkrementelle Indexierung gibt es noch nicht.
 | --- | --- |
 | `--input PFAD` | Einzelnes Archiv oder Elternverzeichnis; Standard `downloads` |
 | `--output DATEI` | Binaerer Index; Standard `build/search/index.ops` |
+| `--prepared VERZEICHNIS` | Verifizierte Ausgabe von `oparl-prepare`; kein stiller Extraktions-Fallback |
 | `--help` | Kurze Kommandozeilenhilfe |
 
 Archive werden anhand ihrer `archive.json` gefunden. Auch Verzeichnisse
@@ -88,10 +96,16 @@ Potsdamer Drucksachenbestand.
 
 ## Kanonisches Datenmodell (Format 3)
 
-**Bestehende Indexdateien neu bauen.** Format 1 und 2 werden mit einer ausdruecklichen
+Indizes mit Vorbereitungsbefunden verwenden **Format 4**. Die aktuelle Suche
+liest sowohl Format 3 als auch 4; der vorhandene Format-3-Bestand bleibt nutzbar.
+In Format 4 verweist das zuvor reservierte 32-Bit-Recordfeld auf getrennte
+`preparation`-Daten. Ohne Vorbereitungsbefunde schreibt der Indexer weiterhin
+Format 3. Alte Suchbinaries koennen Format 4 nicht lesen.
+
+**Indizes in Format 1 und 2 neu bauen.** Diese werden mit einer ausdruecklichen
 Neuaufbau-Meldung abgewiesen; es gibt keinen parallelen Legacy-Lesepfad.
-Die Originalarchive bleiben unveraendert. Indexer und Suchprogramm muessen
-denselben Formatstand verwenden.
+Die Originalarchive bleiben unveraendert. Das Suchprogramm muss den vom
+Indexer erzeugten Formatstand unterstuetzen.
 
 Der Index speichert neben den unveraenderten OParl-Metadaten ein kanonisches
 Modell. Es ist ueber `oparl-search --show ID --json`, `/api/object` und das
@@ -173,7 +187,12 @@ sind `Paper.date`, File-`created`, ein PDF-Dokumentdatum und der Einreichungs-
 oder Antwortzeitpunkt nicht gleichbedeutend. Sitzungszeiten behalten ihren
 Zeitzonenoffset. Referenzjahre werden ausdruecklich aus dem Kennzeichen abgeleitet.
 Noch nicht belegte Rollen sind `null`, nicht ein Ersatzdatum oder eine Nullzeit.
-PDF-Dokumentdaten und fachliche Dokumentrollen werden in M1 noch nicht erkannt.
+Mit `--prepared` kommen belegte PDF-Kopffelder als getrennte `preparation`
+hinzu. Ein erkanntes Dokumentdatum ohne vorhandene Quelldatumsangabe wird
+als `document.date` mit Fassung, Seite und Ableitungsregel erschlossen.
+Das macht daraus weder Einreichungs- noch Antwortdatum. Erkannte Rollen
+bleiben getrennte Befunde; Roh-Typ und das bisherige kanonische
+`documentRole` werden nicht still umgeschrieben.
 
 Werte und Kanten fuehren `evidence`: Quellobjekt, gegebenenfalls Dokumentfassung,
 Seite und Textabschnitt, Quellfeld, Ableitungsregel und `certainty`.
@@ -208,6 +227,8 @@ Zeichenketten, 88-Byte-Suchrecords, Begriffe, Positionen, direkte Suchbesitzer,
 typisierte Kanten, Datumsfakten, Herkunftsbelege, 40-Byte-Dokumentfassungen und
 Textabschnitte. Zeichenketten-/Textreferenzen bleiben 32-Bit-Offsets;
 die gesamte Datei bleibt kleiner als 4 GiB.
+Format 4 verwendet dieselben Abschnittsbreiten; hinzu kommt der
+Zeichenkettenverweis auf selbststaendig gespeicherte Vorbereitungsbefunde.
 
 Der SHA-256 ueber Header mit auf null gesetztem Pruefsummenfeld und alle
 Abschnitte ist zugleich `snapshotId`. Er bindet Metadaten, Texte, Beziehungen
@@ -220,7 +241,7 @@ dadurch nicht als direkte Paper-Quelle eingeschleust werden.
 
 ## PDF-Textextraktion und ihre Grenzen
 
-Der Indexer verwendet den PDF-Parser und die Flate-Dekompression von
+Der direkte Indexaufbau und `oparl-prepare` teilen den PDF-Parser und die Flate-Dekompression von
 newos sowie eine eigene seitenbezogene Font-/ToUnicode-Auswertung.
 Unterstuetzt werden unter anderem:
 
@@ -333,7 +354,8 @@ Abdeckungsbericht und den gewuenschten Umgang mit Luecken beachten.
 ## Implementierung und Tests
 
 Der Importer liegt in [src/oparl-index.c](../src/oparl-index.c),
-die PDF-Textextraktion in [src/pdf-text.c](../src/pdf-text.c),
+die geteilte PDF-Textextraktion in [src/pdf-text.c](../src/pdf-text.c),
+die Vorbereitung in [src/prepare.c](../src/prepare.c),
 das gemeinsame Indexformat in [src/search.c](../src/search.c), Modellvalidierung
 und kanonische Ausgabe in [src/search-model.c](../src/search-model.c).
 

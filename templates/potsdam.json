@@ -1,0 +1,65 @@
+{
+  "format": 1,
+  "templates": [
+    {
+      "id": "potsdam-paper-header-v1",
+      "anchors": ["/SVV/", "Einreicher:", "Datum"],
+      "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Beschlussvorschlag", "Begr\u00fcndung:"],
+      "fields": [
+        {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
+        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below"}
+      ]
+    },
+    {
+      "id": "potsdam-extension-header-v1",
+      "anchors": ["/SVV/", "Einreicher:", "Datum", "Fristverl\u00e4ngerungsbitte"],
+      "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Begr\u00fcndung:"],
+      "fields": [
+        {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
+        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below"},
+        {"name": "document.role", "label": "Fristverl\u00e4ngerungsbitte", "type": "literal", "value": "deadline-extension"}
+      ]
+    },
+    {
+      "id": "potsdam-answer-header-v1",
+      "anchors": ["/SVV/", "Einreicher:", "Datum", "Antwort auf die Kleine Anfrage"],
+      "excludeAnchors": ["Fristverl\u00e4ngerungsbitte"],
+      "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Begr\u00fcndung:"],
+      "fields": [
+        {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
+        {"name": "originator.label", "label": "Einreicher:", "type": "text", "placement": "right-or-below"},
+        {"name": "document.role", "label": "Antwort auf die Kleine Anfrage", "type": "literal", "value": "answer"}
+      ]
+    },
+    {
+      "id": "potsdam-department-header-v1",
+      "anchors": ["/SVV/", "Gesch\u00e4ftsbereich:", "Datum"],
+      "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Beschlussvorschlag", "Begr\u00fcndung:"],
+      "fields": [
+        {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
+        {"name": "department.label", "label": "Gesch\u00e4ftsbereich:", "type": "text", "placement": "right-or-below"}
+      ]
+    },
+    {
+      "id": "potsdam-department-extension-v1",
+      "anchors": ["/SVV/", "Gesch\u00e4ftsbereich:", "Datum", "Fristverl\u00e4ngerungsbitte"],
+      "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Begr\u00fcndung:"],
+      "fields": [
+        {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
+        {"name": "department.label", "label": "Gesch\u00e4ftsbereich:", "type": "text", "placement": "right-or-below"},
+        {"name": "document.role", "label": "Fristverl\u00e4ngerungsbitte", "type": "literal", "value": "deadline-extension"}
+      ]
+    },
+    {
+      "id": "potsdam-department-answer-v1",
+      "anchors": ["/SVV/", "Gesch\u00e4ftsbereich:", "Datum", "Antwort auf Kleine Anfrage"],
+      "excludeAnchors": ["Fristverl\u00e4ngerungsbitte"],
+      "stopAt": ["Anlass des", "Antwort der Verwaltung:", "Begr\u00fcndung:"],
+      "fields": [
+        {"name": "document.date", "label": "Datum", "type": "date", "placement": "right-or-below"},
+        {"name": "department.label", "label": "Gesch\u00e4ftsbereich:", "type": "text", "placement": "right-or-below"},
+        {"name": "document.role", "label": "Antwort auf Kleine Anfrage", "type": "literal", "value": "answer"}
+      ]
+    }
+  ]
+}
