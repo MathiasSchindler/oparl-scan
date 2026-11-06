@@ -117,6 +117,15 @@ derzeit ist das ein vollstaendiger Indexneuaufbau, keine inkrementelle
 Indexierung. Die teure PDF-Aufbereitung wird bei unveraenderten Bytes und
 Regeln jedoch wiederverwendet. Ohne `--prepared` bleibt die direkte
 PDF-Extraktion im Indexer moeglich. Die Originalarchive bleiben unveraendert.
+Bestehende Archive aktualisiert `oparl-scan` standardmaessig ueber die
+OParl-Aenderungsfilter, statt alle Drucksachenlisten erneut einzulesen.
+Geaenderte File-Objekte werden auch ohne Aenderung ihrer Drucksache erkannt.
+`--full` erzwingt einen vollstaendigen Metadatenabgleich; `--refresh`
+zusaetzlich neue Inhaltsabrufe. Neue Archive werden zuerst voll aufgebaut.
+Beim Aktualisieren alter Archive ohne HTTP-Cache prueft der Scanner vorhandene
+Dateien per HEAD gegen Groesse und lokalen Dateizeitstempel, statt sie pauschal
+erneut herunterzuladen. Voraussetzung sind seit dem Download unveraenderte
+Dateien und Zeitstempel; [Details und Grenzen](docs/oparl-scan.md#archivstruktur-aktualisierung-und-wiederaufnahme).
 
 Die Potsdamer PDF-Regeln erfassen auch aeltere Anfrageformulare mit
 getrennten Erstellungs-, Eingangs- und Fristdaten sowie geometrisch

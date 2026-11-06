@@ -38,6 +38,7 @@ typedef struct {
     int result;
     const HttpValidators *condition;
     unsigned long long cached_size;
+    unsigned long long local_modified;
     int probe;
     int framed;
     HttpValidators validators;

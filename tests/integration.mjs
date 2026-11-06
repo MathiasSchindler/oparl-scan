@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +16,8 @@ let requests = [];
 const exchanges = [];
 let failures = 0;
 const hash = text => createHash('sha256').update(text).digest('hex');
+const legacyBaseline = Math.floor(Date.now() / 1000) - 86400;
+const legacyModified = new Date((legacyBaseline - 60) * 1000).toUTCString();
 const file = id => ({
   id: `${origin}/oparl/files/${id}`, type: `${schema}File`,
   fileName: id === 1 ? '../../evil\\name.pdf' : 'Protokoll \u{1f333}.pdf',
@@ -187,7 +189,8 @@ const server = createServer((req, res) => {
       if (mode === 'cycle' && current === 1) response.links.next = `${origin}${req.url}`;
       if (mode === 'foreign-host' && current === 1) response.links.next = 'https://example.test/private';
     } else if (kind === 'file') {
-      response = page([file(body === 1 ? 1 : 2)]);
+      response = page(body === 3 && mode === 'legacy-add-file' ? [file(2), file(3)] :
+        [file(body === 1 ? 1 : 2)]);
     } else {
       response = page([], 1, 0);
     }
@@ -198,11 +201,14 @@ const server = createServer((req, res) => {
     return;
   } else if (url.pathname.startsWith('/content/') || url.pathname.startsWith('/replacement/')) {
     const first = url.pathname.endsWith('/1');
-    const changed = first && ['year-update', 'last-modified-changed', 'changed-redirect'].includes(mode);
+    const changed = first && ['year-update', 'last-modified-changed', 'changed-redirect', 'legacy-newer'].includes(mode);
     const content = changed ? Buffer.from(pdf.toString().replace('fixture', 'updated')) : pdf;
-    const modified = mode === 'last-modified-changed' ?
-      'Thu, 05 Nov 2026 16:00:00 GMT' : 'Wed, 04 Nov 2026 16:00:00 GMT';
-    const validators = first && mode.startsWith('last-modified') ? { 'Last-Modified': modified } :
+    const modified = mode.startsWith('legacy-') ?
+      first && mode === 'legacy-newer' ? new Date((legacyBaseline + 60) * 1000).toUTCString() :
+        first && mode === 'legacy-invalid-date' ? 'Mon, 31 Feb 2020 16:00:00 GMT' : legacyModified :
+      mode === 'last-modified-changed' ? 'Thu, 05 Nov 2026 16:00:00 GMT' : 'Wed, 04 Nov 2026 16:00:00 GMT';
+    const validators = mode.startsWith('legacy-') || first && mode.startsWith('last-modified') ?
+      { 'Last-Modified': modified } :
       first && mode === 'no-validators' ? {} :
         { ETag: `"${hash(mode === 'changed-redirect' ? pdf : content)}"` };
     if (url.pathname === '/content/1' &&
@@ -231,7 +237,8 @@ const server = createServer((req, res) => {
       res.writeHead(200, {
         'Content-Type': 'application/pdf',
         ...validators,
-        ...(mode === 'size-chunked' ? {} : { 'Content-Length': content.length }),
+        ...(mode === 'size-chunked' || first && mode === 'legacy-no-length' ?
+          {} : { 'Content-Length': content.length }),
       });
       res.write(content.subarray(0, 9));
       res.end(content.subarray(9));
@@ -269,7 +276,7 @@ origin = `http://127.0.0.1:${server.address().port}`;
 async function run(directory, args = [], expected = 0, env = {}) {
   const child = spawn(binary, [
     '--system', `${origin}/oparl/system`, '--output', directory,
-    '--delay-ms', '0', '--timeout-ms', '1000', ...args,
+    '--delay-ms', '0', '--timeout-ms', '1000', '--full', ...args,
   ], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
   let stderr = '';
   child.stdout.resume();
@@ -396,6 +403,59 @@ try {
       const name = (await readdir(join(directory, 'documents'))).find(name => name.startsWith(hash(file(1).id)));
       assert.deepEqual(await readFile(join(directory, 'documents', name)),
         Buffer.from(pdf.toString().replace('fixture', 'updated')));
+    }
+  }
+
+  for (const variant of ['unchanged', 'newer', 'invalid-date', 'no-length', 'short-local', 'future-local']) {
+    mode = 'legacy-unchanged';
+    const directory = join(root, `legacy-timestamp-${variant}`);
+    await run(directory);
+    await rm(join(directory, 'cache'), { recursive: true });
+    const names = await readdir(join(directory, 'documents'));
+    for (const name of names)
+      await utimes(join(directory, 'documents', name), legacyBaseline, legacyBaseline);
+    const firstName = names.find(name => name.startsWith(hash(file(1).id)));
+    if (variant === 'short-local') {
+      await writeFile(join(directory, 'documents', firstName), pdf.subarray(0, 5));
+      await utimes(join(directory, 'documents', firstName), legacyBaseline, legacyBaseline);
+    }
+    if (variant === 'future-local')
+      await utimes(join(directory, 'documents', firstName), legacyBaseline, Date.now() / 1000 + 86400);
+    mode = `legacy-${variant}`;
+    start = exchanges.length;
+    await run(directory);
+    const bodyGets = exchanges.slice(start).filter(request =>
+      request.url.startsWith('/content/') && request.method === 'GET');
+    assert.equal(bodyGets.length, variant === 'unchanged' ? 0 : 1,
+      `${variant}: reuse only legacy documents confirmed by size and modification time`);
+    assert.deepEqual(await readFile(join(directory, 'documents', firstName)),
+      variant === 'newer' ? Buffer.from(pdf.toString().replace('fixture', 'updated')) : pdf);
+    if (variant === 'unchanged') {
+      const cache = JSON.parse(await readFile(join(directory, 'cache', `document-${hash(file(1).id)}.json`)));
+      assert.equal(cache.localModifiedAtEpochSeconds, legacyBaseline);
+      assert.equal(cache.fetchedAtEpochSeconds, 0, 'Legacy timestamps are not invented fetch times');
+      assert.equal(cache.lastModified, legacyModified);
+      const summary = JSON.parse(await readFile(join(directory, 'archive.json')));
+      const observations = (await readFile(join(directory, 'observations', `${summary.runId}.jsonl`), 'utf8'))
+        .trim().split('\n').map(JSON.parse);
+      assert.equal(observations.find(o => o.kind === 'document').localModifiedAtEpochSeconds, legacyBaseline);
+      mode = 'legacy-add-file';
+      start = exchanges.length;
+      await run(directory);
+      assert.equal(exchanges.slice(start).filter(request =>
+        request.url.startsWith('/content/') && request.method === 'GET').length, 1,
+      'After adoption, only the newly added file is downloaded');
+      const next = JSON.parse(await readFile(join(directory, 'archive.json')));
+      assert.equal(next.newDocuments, 1);
+      assert.equal(next.cachedDocuments, 2);
+      start = exchanges.length;
+      await run(directory, ['--refresh']);
+      assert.equal(exchanges.slice(start).filter(request =>
+        request.url.startsWith('/content/') && request.method === 'GET').length, 3,
+      'Explicit refresh still replaces timestamp-adopted files');
+      const refreshed = JSON.parse(await readFile(join(directory, 'cache', `document-${hash(file(1).id)}.json`)));
+      assert.equal(refreshed.localModifiedAtEpochSeconds, undefined);
+      assert.ok(refreshed.fetchedAtEpochSeconds > 0);
     }
   }
 

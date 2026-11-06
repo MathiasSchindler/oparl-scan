@@ -69,7 +69,8 @@ build/macos-aarch64/oparl-scan --output build/live-smoke \
 | `--metadata-only` | Keine Dokumentdateien herunterladen |
 | `--skip-unavailable-files` | Verweigerte Dokumente protokollieren und fortfahren |
 | `--accept-size-mismatch` | Vollstaendige Uebertragungen trotz falscher OParl-Groesse akzeptieren |
-| `--refresh` | Vollstaendige Abrufe erzwingen; fuer normale Aktualisierung nicht noetig |
+| `--full` | Alle Metadaten und Dokumentverknuepfungen abgleichen, statt nur Aenderungen |
+| `--refresh` | Vollabgleich und Inhaltsabrufe ohne bedingte HTTP-Anfragen erzwingen |
 | `--page-size N` | Objekte je Seite, 1 bis 100; Standard 100 |
 | `--max-pages N` | Seiten je Sammlung begrenzen; Standard unbegrenzt |
 | `--max-files N` | Neue Dokumentdownloads je Aufruf begrenzen; Standard unbegrenzt |
@@ -216,12 +217,14 @@ nach Sitzungsterminen oder Dateizeitstempeln. Beispielsweise hat die echte
 Drucksache `25/SVV/1216` ein Datum im Maerz 2026 und wird trotzdem erfasst.
 Unterstuetzt werden die Jahrgaenge 2000 bis 2099.
 
-Zunaechst liest das Programm die vollstaendigen Drucksachenlisten beider
+Beim Erstaufbau und mit `--full` liest das Programm die vollstaendigen Drucksachenlisten beider
 Koerperschaften. Ein verlaesslicher serverseitiger Kennzeichenfilter ist
 nicht bekannt: Der getestete Parameter `paperNumber` wird von dieser API
 ignoriert. Dieser reine Metadaten-Suchlauf verhindert, dass spaet angelegte,
 umnummerierte oder ausserhalb der Reihenfolge stehende Vorgaenge fehlen.
 Die ungefilterten Originalantworten liegen getrennt unter `index/`.
+Spaetere normale Aufrufe verwenden stattdessen den unten beschriebenen
+Aenderungsabgleich; der Kennzeichenfilter wird auf dessen Ergebnisse angewendet.
 
 Passende Drucksachen werden einzeln abgerufen. Hauptdateien, Anlagen,
 uebergeordnete, untergeordnete und verwandte Drucksachen, Beratungen,
@@ -343,13 +346,56 @@ wird pro Lauf nur einmal heruntergeladen, auch wenn sie in mehreren
 Sammlungen eingebettet vorkommt.
 
 **Jeder normale Aufruf aktualisiert das Archiv**, ohne zusaetzliche Option.
-Der Drucksachen-Suchlauf liest die Sammlungen beider Koerperschaften erneut
-ein und folgt den aktuellen Seitenlinks. Auch bereits bekannte verknuepfte
-Objekte werden erneut geprueft. Neue Drucksachen, geaenderte Beziehungen
-und spaeter hinzugekommene Dokumente werden so ermittelt, auch bei
-abgeschlossenen Referenzjahrgaengen.
+Neue Archive werden vollstaendig aufgebaut. Bestehende Archive verwenden
+standardmaessig die [OParl-Aenderungsfilter](https://spec.oparl.org/)
+`modified_since` und `modified_until` fuer die Sammlungen beider Koerperschaften.
+Das Zeitfenster reicht vom gespeicherten Abgleichzeitpunkt minus fuenf Minuten
+Ueberlappung bis zum Beginn des aktuellen Laufs. Es werden nicht mehr bei
+jeder Aktualisierung alle historischen Drucksachenseiten gelesen.
 
-Gespeicherte Metadaten werden mit `If-None-Match` beziehungsweise
+Geaenderte File-Objekte werden unabhaengig von Paper-Aenderungen verarbeitet.
+Bei Jahrgangs- und Kalenderarchiven werden dabei nur bereits bekannte Dateien
+uebernommen; neue Verknuepfungen und Dateien kommen ueber passende neue oder
+geaenderte Drucksachen, Sitzungen und oeffentliche Tagesordnungspunkte hinzu.
+Bekannte Kontextdateien anderer Referenzjahre bleiben beruecksichtigt.
+Unveraenderte bekannte Ressourcen werden nicht erneut rekursiv abgerufen.
+Die bisherige Auswahl bleibt in `selection.jsonl` erhalten und wird um neue
+Ausgangsdrucksachen ergaenzt. Discovery-Antworten liegen unter `index/`, damit
+fremde Objekte nicht versehentlich Teil eines Jahrgangsarchivs werden.
+
+Die Potsdamer API verliert die Zeitfilter in `links.next`; der Scanner setzt
+sie deshalb auf **jeder** Folgeseite wieder ein. Alle Listeneintraege muessen
+gueltige RFC3339-Aenderungszeitpunkte innerhalb des angefragten Fensters
+haben. Ignorierte Filter oder unbrauchbare Zeitstempel fuehren zu einem
+sichtbaren Fehler mit Hinweis auf `--full`, nicht zu einem stillen Vollabruf.
+Tombstones werden als aktuelle Metadaten gespeichert; vorhandene historische
+Dokumentbytes bleiben erhalten.
+
+Alte Archive ohne Abgleichzustand beginnen konservativ beim **aeltesten
+lokalen Metadaten-mtime**, ebenfalls mit Ueberlappung. Das setzt voraus, dass
+die lokalen Metadaten und ihre Zeitstempel erhalten geblieben sind; eine
+spaeter angelegte Kopie kann diese Annahme verletzen. Bestehende Archivluecken
+werden dadurch nicht als behoben ausgegeben. Ein erfolgreicher Aenderungslauf
+darf seinen Zeitstand fortschreiben, waehrend `syncBaselineComplete: false`
+und `complete: false` die unvollstaendige historische Basis weiterhin zeigen.
+`--full` kann diese Basis erneut vollstaendig abgleichen.
+
+Nach Fehlern, Limits oder einem Abbruch wird der gespeicherte Abgleichzeitpunkt
+nicht vorgeschoben. Er ist der **Beginn**, nicht das Ende des letzten
+erfolgreichen Laufs. Ein abgebrochener Erstaufbau mit Checkpoint `0` bleibt
+beim Vollaufbau und wird nicht als Legacy-Archiv behandelt. Beim Wechsel von
+`--metadata-only` zu Dokumentdownloads erfolgt ebenfalls ein Vollabgleich,
+damit unveraenderte alte Dateien nicht fehlen.
+
+`--full` prueft alle Metadaten, Verknuepfungen und Dokumente einschliesslich
+lokaler Beschaedigungen oder fehlender Dateien. Normale Delta-Laeufe sind
+kein vollstaendiger lokaler Integritaetsaudit. Ein gelegentlicher Vollabgleich
+bleibt zudem sinnvoll, weil die API historische Platzhalterzeitstempel wie
+`2000-01-01` verwendet: Nicht korrekt datierte nachtraegliche Aenderungen sind
+mit Zeitfiltern allein nicht sicher erkennbar. Auch laufend veraenderte
+Sammlungen sind kein atomarer Schnappschuss.
+
+Abgerufene gespeicherte Metadaten werden mit `If-None-Match` beziehungsweise
 `If-Modified-Since` revalidiert, sofern die vorherige Antwort einen
 `ETag` beziehungsweise `Last-Modified` geliefert hat. Nur eine passende
 HTTP-304-Antwort erlaubt die lokale Wiederverwendung. Andernfalls wird
@@ -373,17 +419,37 @@ damit zu einem erneuten Abruf. Die Hashes in den Dokumentdateinamen
 bleiben dagegen ID-Hashes. Ungueltige Pruefdatensaetze werden mit einer
 Warnung verworfen und durch einen vollstaendigen Abruf ersetzt.
 
-Bei bestehenden Archiven ohne diese Pruefdaten ist einmalig ein erneuter
-Abruf noetig, um den aktuellen Serverstand verlaesslich mit den lokalen
-Bytes zu verbinden. Danach koennen unveraenderte Dokumente ohne erneute
-Inhaltsuebertragung bestaetigt werden. Server ohne brauchbare Validatoren
-erfordern weiterhin vollstaendige Abrufe. Die Aktualitaetspruefung haengt
+Bei bestehenden Archiven ohne diese Pruefdaten ist kein pauschaler erneuter
+Vollabruf noetig: Der normale Aufruf hasht vorhandene
+Dokumente lokal und prueft sie zuerst per HEAD. Eine passende `Content-Length`
+und ein gueltiges `Last-Modified`, das nicht neuer als der lokale
+Dateizeitstempel ist, erlauben die Uebernahme ohne PDF-Inhaltsuebertragung.
+Das setzt voraus, dass die Dateien und ihre Aenderungszeitstempel seit dem
+urspruenglichen Download unveraendert sind. Kopierte oder nachtraeglich
+bearbeitete Dateien mit neu gesetzten Zeitstempeln koennen diese Annahme
+verletzen; fuer eine gesicherte neue Ausgangsfassung `--refresh` verwenden.
+
+Die Uebernahme erscheint als `document cache adopted from local timestamp:`.
+Cache und Fassungsbeobachtung dokumentieren die Ausgangsbasis als
+`localModifiedAtEpochSeconds`; die unbekannte urspruengliche Abrufzeit bleibt
+`fetchedAtEpochSeconds: 0`. Spaetere Laeufe verwenden die gespeicherten
+Server-Pruefdaten und den lokalen SHA-256. Ein vorhandener, aber beschaedigter
+Cache wird nicht durch diese Altbestandsuebernahme umgangen.
+Neuere Serverfassungen, abweichende Groessen, fehlende HEAD-Unterstuetzung
+oder fehlende/ungueltige Header fuehren weiterhin zu einem GET.
+Unterstuetzt wird das uebliche HTTP-Datumsformat mit englischem Wochentag,
+Monat und `GMT`; andere Formate erzwingen den vollstaendigen Abruf.
+`newDocuments` zaehlt Inhaltsdownloads, nicht ausschliesslich neue Datei-IDs;
+`cachedDocuments` zaehlt bestaetigte Wiederverwendungen einschliesslich
+dieser Altbestandsuebernahme.
+Die Aktualitaetspruefung haengt
 von korrekten HTTP-Validatoren des Servers ab; sie ist kein unabhaengiger
 Nachweis, dass die API alle oeffentlichen RIS-Daten bereitstellt.
 
 Zur Wiederaufnahme denselben Befehl erneut ausfuehren. Unvollstaendige
 `.part`-Dateien werden neu begonnen, nicht byteweise fortgesetzt.
-`--refresh` erzwingt weiterhin vollstaendige Abrufe ohne bedingte HTTP-Anfrage,
+`--full` erzwingt einen vollstaendigen Abgleich mit den normalen Cachepruefungen.
+`--refresh` erzwingt zusaetzlich Inhaltsabrufe ohne bedingte HTTP-Anfrage,
 ist aber fuer die normale Aktualisierung nicht erforderlich.
 Auch dabei werden vorhandene Bytes vor dem Ersatz lokal verifiziert und als
 unveraenderliche Inhaltsfassung gesichert. Neue Bytes werden vor der
@@ -410,6 +476,13 @@ jeden Lauf dauerhaft; `observations/` verbindet Inhaltsfassungen mit der
 tatsaechlichen Beobachtung. Tombstones aus Listen haben keinen erfundenen
 Einzelressourcen-Abrufzeitpunkt. Bei hartem Abbruch bleiben `running` und
 die offenen `.part`-Dateien sichtbar.
+
+`syncMode` unterscheidet `full` und `incremental`.
+`syncSinceEpochSeconds`/`syncUntilEpochSeconds` beschreiben das Zeitfenster;
+`syncCheckpointEpochSeconds` und `syncCheckpointSource` den persistenten
+Ausgangspunkt (`legacy-local-mtime` oder `successful-run-start`).
+`syncBaselineComplete` haelt historische Abdeckung getrennt vom aktuellen
+Aenderungslauf fest; `syncMetadataOnly` merkt den Modus des Checkpoints.
 
 `types` schluesselt System, Body, Paper, Meeting, AgendaItem, Consultation,
 File, Organization, Person, Membership, Location, LegislativeTerm und
@@ -473,7 +546,8 @@ Sammlungen und Ressourcen. Fehlt bereits das System oder die
 Koerperschaftsliste, koennen keine weiteren Sammlungen ermittelt werden;
 der Lauf endet ebenfalls mit protokollierter Fehlstelle, nicht erfolgreich.
 
-Beim naechsten Aufruf werden fehlende Ressourcen erneut versucht,
+Beim naechsten Aufruf wird das nicht erfolgreich abgeschlossene Zeitfenster
+erneut bearbeitet; mit `--full` werden auch historische Fehlstellen erneut versucht,
 waehrend gueltige Cachedateien revalidiert werden. Bereits archivierte
 Daten bleiben erhalten, werden bei einer aktuellen 404-Antwort aber
 nicht als erfolgreiche Antwort verwendet. Es ist kein
@@ -557,7 +631,9 @@ Bericht ueber nicht verfuegbare Dateien.
 - `2`: Wegen konfigurierter Grenzen absichtlich unvollstaendig.
 - `3`: Durchlauf beendet, aber wegen HTTP 404 fehlen Ressourcen oder
   wegen Zugriffsverweigerungen fehlen Dokumente beziehungsweise Kalenderdaten
-  bleiben wegen fehlender Startzeiten unbekannt. Dies hat Vorrang
+  bleiben wegen fehlender Startzeiten unbekannt. Auch ein erfolgreicher
+  Delta-Lauf auf einer historisch unvollstaendigen Basis liefert `3`.
+  Dies hat Vorrang
   vor Exitcode `2`; fatale Fehler liefern weiterhin `1`.
 
 Im Modus `--metadata-only` bedeutet Vollstaendigkeit nur vollstaendige
@@ -573,6 +649,11 @@ aktivierten Ausnahmen. HTTP-Fehler und ungueltige Eingaben werden niemals durch
 leere, scheinbar erfolgreiche Antworten ersetzt.
 
 ## Tests und Verifikation
+
+`tests/incremental.mjs` prueft Erstaufbau und Standard-Delta, verlorene
+Pagingfilter, File-Aenderungen ohne Paper-Aenderung, beide Koerperschaften,
+Jahrgangs-/Kalenderscope, neue TOPs, Tombstones, Altbestandsuebernahme,
+Checkpointstabilitaet bei Fehlern und Limits sowie die Binaer-Nachholung.
 
 Gemeinsame Test- und Buildhinweise stehen unter [Tests](../README.md#tests).
 Die Downloadtests koennen mit der gesamten Testsuite ausgefuehrt werden:

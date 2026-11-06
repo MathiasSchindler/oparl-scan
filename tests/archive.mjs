@@ -94,7 +94,7 @@ base = `http://127.0.0.1:${provider.address().port}/oparl`;
 
 async function scan(output = archive, extra = [], expected = 0) {
   const child = spawn(scanner, ['--system', id('system'), '--output', output, '--year', '2026',
-    '--delay-ms', '0', '--timeout-ms', '1000', ...extra], { stdio: ['ignore', 'pipe', 'pipe'] });
+    '--delay-ms', '0', '--timeout-ms', '1000', '--full', ...extra], { stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   child.stdout.resume(); child.stderr.on('data', data => { stderr += data; });
   const timer = setTimeout(() => child.kill('SIGKILL'), 15000);

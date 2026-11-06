@@ -5,6 +5,7 @@
 #include "crypto/sha256.h"
 #include "hash_util.h"
 #include "archive-version.h"
+#include "archive-walk.h"
 
 #define META_LIMIT (32ULL * 1024ULL * 1024ULL)
 #define FILE_LIMIT (4ULL * 1024ULL * 1024ULL * 1024ULL)
@@ -12,9 +13,10 @@
 #define PATH_CAPACITY 1024U
 #define DEFAULT_SYSTEM "https://www.potsdam.sitzung-online.de/oparl/system"
 #define PENDING_DOCUMENTS 32U
+#define SYNC_OVERLAP_SECONDS 300ULL
 
 typedef enum {
-    JOB_COLLECTION, JOB_BODIES, JOB_PAPERS, JOB_RESOURCE, JOB_CALENDAR
+    JOB_COLLECTION, JOB_BODIES, JOB_PAPERS, JOB_RESOURCE, JOB_CALENDAR, JOB_CHANGES
 } JobKind;
 enum { TYPE_SYSTEM, TYPE_BODY, TYPE_PAPER, TYPE_MEETING, TYPE_AGENDA, TYPE_CONSULTATION,
        TYPE_FILE, TYPE_ORGANIZATION, TYPE_PERSON, TYPE_MEMBERSHIP, TYPE_LOCATION,
@@ -48,6 +50,7 @@ typedef struct {
     unsigned long long size;
     int framed;
     unsigned long long observed, fetched;
+    unsigned long long local_modified;
     char current[256];
 } CacheEntry;
 
@@ -88,11 +91,15 @@ typedef struct {
     int skip_unavailable_files;
     int accept_size_mismatch;
     int refresh;
+    int full, incremental, sync_state_present, baseline_complete, sync_metadata_only;
+    unsigned long long sync_checkpoint, sync_since, oldest_metadata;
+    char sync_source[32], modified_since[32], modified_until[32];
     int limited;
     ToolArray jobs;
     SeenSet seen_files;
     SeenSet seen_jobs;
     SeenSet seen_missing;
+    SeenSet known_resources, known_files, known_calendar_meetings, paper_context, selected_roots;
     DocumentDownload *pending[PENDING_DOCUMENTS];
     size_t pending_count;
     char calendar_from[11], calendar_through[11], run_id[96];
@@ -118,6 +125,7 @@ static void usage(void) {
         "  --calendar-through DATE  End date; default with --year: Jan 1 through Dec 31\n"
         "  --calendar-only          No Paper discovery; requires --year or date range\n"
         "  --refresh          Replace cached metadata and documents\n"
+        "  --full             Reconcile all metadata instead of the default delta update\n"
         "  --page-size N      Objects per page, 1..100 (default: 100)\n"
         "  --max-pages N      Limit pages per collection (default: unlimited)\n"
         "  --max-files N      Limit new document downloads (default: unlimited)\n"
@@ -128,7 +136,7 @@ static void usage(void) {
         "  --system URL       System URL; HTTP is allowed only on 127.0.0.1\n"
         "  --color MODE       Diagnostic colors: auto, always, never (default: auto)\n"
         "  --help             Show this help\n"
-        "Each run revalidates metadata and updates documents; no refresh flag is needed.\n"
+        "Existing archives use modified_since/until; --full performs a complete reconciliation.\n"
         "HTTP 404: report missing URLs, continue, and mark the archive incomplete.\n"
         "Exit status: 0 complete, 1 error, 2 limits, 3 missing resources.\n");
 }
@@ -171,6 +179,7 @@ static int options(Archive *archive, int argc, char **argv) {
             archive->refresh = 1;
             continue;
         }
+        if (rt_strcmp(flag, "--full") == 0) { archive->full = 1; continue; }
         if (rt_strcmp(flag, "--calendar-only") == 0) { archive->calendar_only = 1; continue; }
         if (i + 1 == argc) return ris_error("missing option value", flag);
         value = argv[++i];
@@ -269,6 +278,22 @@ static int hash_seen(SeenSet *set, const char *hash, int insert) {
     return 0;
 }
 
+static int known_reference(SeenSet *set, const Json *json, size_t index) {
+    const JsonToken *token = json_token(json, index);
+    char id[RIS_URL_CAPACITY], hash[65];
+    size_t child;
+    if (!token || token->kind == JSON_NULL) return 0;
+    if (token->kind == JSON_ARRAY) {
+        for (child = index + 1; child < token->next; child = json_token(json, child)->next)
+            if (known_reference(set, json, child)) return 1;
+        return 0;
+    }
+    if (token->kind == JSON_OBJECT) index = json_get(json, index, "id");
+    if (json_string(json, index, id, sizeof(id)) != 0) return 0;
+    hash_text(id, hash);
+    return hash_seen(set, hash, 0);
+}
+
 static int archive_path(const Archive *archive, const char *directory,
                         const char *name, char *out) {
     char parent[PATH_CAPACITY];
@@ -323,6 +348,8 @@ static int observation(Archive *archive, const char *kind, const char *key,
         tool_json_field_uint(fd, "bytes", cache->size) ||
         tool_json_field_uint(fd, "observedAtEpochSeconds", cache->observed) ||
         tool_json_field_uint(fd, "fetchedAtEpochSeconds", cache->fetched) ||
+        (cache->local_modified != 0 &&
+         tool_json_field_uint(fd, "localModifiedAtEpochSeconds", cache->local_modified)) ||
         tool_json_field_bool(fd, "revalidated", reused) || rt_write_cstr(fd, "}\n") ?
         ris_error("cannot write revision observation", url) : 0;
 }
@@ -382,6 +409,8 @@ static int load_cache(const Archive *archive, const char *kind, const char *key,
             json_uint(&json, json_get(&json, 0, "observedAtEpochSeconds"), &entry->observed) != 0) valid = 0;
         if (json_get(&json, 0, "fetchedAtEpochSeconds") != JSON_NONE &&
             json_uint(&json, json_get(&json, 0, "fetchedAtEpochSeconds"), &entry->fetched) != 0) valid = 0;
+        if (json_get(&json, 0, "localModifiedAtEpochSeconds") != JSON_NONE &&
+            json_uint(&json, json_get(&json, 0, "localModifiedAtEpochSeconds"), &entry->local_modified) != 0) valid = 0;
         if (json_get(&json, 0, "currentPath") != JSON_NONE &&
             json_string(&json, json_get(&json, 0, "currentPath"), entry->current, sizeof(entry->current)) != 0) valid = 0;
         json_free(&json);
@@ -417,6 +446,27 @@ static int load_cache(const Archive *archive, const char *kind, const char *key,
     return 1;
 }
 
+static int load_legacy_document(const Archive *archive, const char *id,
+                                const char *content, CacheEntry *entry) {
+    char path[PATH_CAPACITY];
+    PlatformDirEntry info;
+    if (cache_path(archive, "document", id, path) != 0) return -1;
+    if (platform_get_path_info(path, &info) == 0) return 0;
+    if (platform_get_path_info(content, &info) != 0) return 0;
+    if (info.is_dir || info.size > FILE_LIMIT)
+        return ris_error("invalid legacy document path or size", content);
+    if (info.mtime <= 0 || (unsigned long long)info.mtime >
+                           (unsigned long long)platform_get_epoch_time()) {
+        ris_warning("legacy document has no usable local timestamp; downloading", content);
+        return 0;
+    }
+    rt_memset(entry, 0, sizeof(*entry));
+    entry->size = info.size;
+    entry->local_modified = (unsigned long long)info.mtime;
+    if (content_hash(content, entry->digest) != 0) return -1;
+    return 1;
+}
+
 static int save_cache(const Archive *archive, const char *kind, const char *key,
                       const char *url, const CacheEntry *entry) {
     char path[PATH_CAPACITY], part[PATH_CAPACITY];
@@ -435,6 +485,8 @@ static int save_cache(const Archive *archive, const char *kind, const char *key,
              tool_json_field_string(fd, "currentPath", entry->current) ||
              tool_json_field_uint(fd, "observedAtEpochSeconds", entry->observed) ||
              tool_json_field_uint(fd, "fetchedAtEpochSeconds", entry->fetched) ||
+             (entry->local_modified != 0 &&
+              tool_json_field_uint(fd, "localModifiedAtEpochSeconds", entry->local_modified)) ||
              rt_write_cstr(fd, "}\n");
     if (platform_close(fd) != 0) result = -1;
     if (result != 0 || platform_rename_path(part, path) != 0)
@@ -637,14 +689,14 @@ static int discover_collections(Archive *archive, const Json *json, size_t body)
     }
     for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         size_t member = json_get(json, body, keys[i]);
-        if ((archive->year || archive->calendar_only) && rt_strcmp(keys[i], "meeting")) continue;
+        if (!archive->incremental && (archive->year || archive->calendar_only) && rt_strcmp(keys[i], "meeting")) continue;
         if (archive->year && !archive->calendar_only && !rt_strcmp(keys[i], "paper")) continue;
         if (member == JSON_NONE) continue;
         if (json_string(json, member, url, sizeof(url)) != 0)
             return ris_error("invalid collection link in Body", keys[i]);
         if (!rt_strcmp(keys[i], "meeting")) {
             if (add_scoped_job(archive, url, JOB_CALENDAR, 1, TYPE_MEETING) != 0) return -1;
-        } else if (add_scoped_job(archive, url, JOB_COLLECTION, 0,
+        } else if (add_scoped_job(archive, url, archive->incremental ? JOB_CHANGES : JOB_COLLECTION, 0,
                    i == 0 ? TYPE_ORGANIZATION : i == 1 ? TYPE_PERSON : i == 3 ? TYPE_MEMBERSHIP :
                    i == 4 ? TYPE_LOCATION : i == 5 ? TYPE_TERM : i == 6 ? TYPE_AGENDA :
                    i == 7 ? TYPE_PAPER : i == 8 ? TYPE_CONSULTATION : TYPE_FILE) != 0) return -1;
@@ -692,6 +744,7 @@ static int complete_document_impl(Archive *archive, DocumentDownload *download) 
         if (platform_rename_path(download->part, download->path) != 0)
             return ris_error("cannot publish document", download->path);
         download->cache.framed = download->transfer.framed;
+        download->cache.local_modified = 0;
     }
     download->cache.size = received;
     download->cache.validators = download->transfer.validators;
@@ -700,7 +753,13 @@ static int complete_document_impl(Archive *archive, DocumentDownload *download) 
     if (save_cache(archive, "document", id, url, &download->cache) != 0 ||
         observation(archive, "document", id, url, &download->cache, result == RIS_HTTP_NOT_MODIFIED) != 0) return -1;
     if (expected != RIS_UNKNOWN_SIZE && received != expected) archive->mismatched_files++;
-    if (result == RIS_HTTP_NOT_MODIFIED) archive->cached_files++;
+    if (result == RIS_HTTP_NOT_MODIFIED) {
+        archive->cached_files++;
+        if (download->transfer.local_modified != 0) {
+            rt_write_cstr(2, "document cache adopted from local timestamp: ");
+            rt_write_line(2, download->path);
+        }
+    }
     else {
         archive->downloaded_files++;
         rt_write_cstr(2, "document: ");
@@ -788,7 +847,7 @@ static int document(Archive *archive, const Json *json, size_t object) {
     size_t token, i, used;
     DocumentDownload *download, *other = 0;
     CacheEntry cache;
-    int cached;
+    int cached, legacy = 0;
     if (archive->metadata_only || json_true(json, json_get(json, object, "deleted"))) return 0;
     if (json_string(json, json_get(json, object, "id"), id, sizeof(id)) != 0)
         return ris_error("File has no valid id", 0);
@@ -822,6 +881,11 @@ static int document(Archive *archive, const Json *json, size_t object) {
     if (archive_path(archive, "documents", name, path) != 0) return -1;
     cached = load_cache(archive, "document", id, url, path, FILE_LIMIT, &cache);
     if (cached < 0) return -1;
+    if (!cached && !archive->refresh) {
+        cached = load_legacy_document(archive, id, path, &cache);
+        if (cached < 0) return -1;
+        legacy = cached;
+    }
     if (temporary_path(path, part) != 0) return -1;
     if (cached && preserve(archive, "documents", id, path, &cache) != 0) return -1;
     if (cached && expected != RIS_UNKNOWN_SIZE && expected != cache.size &&
@@ -858,7 +922,11 @@ static int document(Archive *archive, const Json *json, size_t object) {
         }
     }
     if (cached && !archive->refresh) {
-        if (cache.validators.etag[0] != '\0' || cache.validators.modified[0] != '\0') {
+        if (legacy) {
+            download->transfer.local_modified = cache.local_modified;
+            download->transfer.cached_size = cache.size;
+            download->transfer.probe = 1;
+        } else if (cache.validators.etag[0] != '\0' || cache.validators.modified[0] != '\0') {
             download->transfer.condition = &download->cache.validators;
             download->transfer.cached_size = cache.size;
             download->transfer.probe = 1;
@@ -895,12 +963,13 @@ static int select_paper(Archive *archive, const Json *json, size_t object) {
     hash_text(id, hash);
     if (hash_seen(&archive->seen_jobs, hash, 0)) return 0;
     if (add_job(archive, id, JOB_RESOURCE) != 0) return -1;
+    archive->selected_papers++;
+    if (hash_seen(&archive->selected_roots, hash, 0)) return 0;
     if (rt_write_cstr(fd, "{\"id\":") != 0 || tool_json_write_string(fd, id) != 0 ||
         tool_json_field_string(fd, "reference", reference) != 0 ||
         rt_write_cstr(fd, "}\n") != 0)
         return ris_error("cannot write selected paper index", reference);
-    archive->selected_papers++;
-    return 0;
+    return hash_seen(&archive->selected_roots, hash, 1) < 0 ? -1 : 0;
 }
 
 static int private_item(const Json *json, size_t object) {
@@ -921,14 +990,14 @@ static int calendar_member(const Archive *archive, const Json *json, size_t obje
         (rt_strcmp(day, archive->calendar_from) >= 0 && rt_strcmp(day, archive->calendar_through) <= 0);
 }
 
-static int calendar_tombstone(Archive *archive, const Json *json, size_t object, const char *source) {
+static int store_collection_object(Archive *archive, const Json *json, size_t object, const char *source) {
     char id[RIS_URL_CAPACITY], hash[65], name[80], path[PATH_CAPACITY], part[PATH_CAPACITY];
     const JsonToken *token = json_token(json, object);
     CacheEntry cache;
     unsigned char digest[32];
     int cached, fd, result;
     if (json_string(json, json_get(json, object, "id"), id, sizeof(id)) != 0 ||
-        !http_valid_url(&archive->http, id)) return ris_error("invalid calendar tombstone ID", source);
+        !http_valid_url(&archive->http, id)) return ris_error("invalid collection object ID", source);
     hash_text(id, hash); memcpy(name, hash, 64); memcpy(name + 64, ".json", 6);
     if (archive_path(archive, "metadata", name, path) != 0 || temporary_path(path, part) != 0) return -1;
     cached = load_cache(archive, "metadata", id, id, path, META_LIMIT, &cache);
@@ -939,13 +1008,14 @@ static int calendar_tombstone(Archive *archive, const Json *json, size_t object,
     crypto_sha256_hash((const unsigned char *)json->text + token->start, (size_t)cache.size, digest);
     hash_to_hex(digest, 32, cache.digest); cache.framed = 1;
     fd = platform_open_write(part, 0644);
-    if (fd < 0) return ris_error("cannot store calendar tombstone", id);
+    if (fd < 0) return ris_error("cannot store collection object", id);
     result = rt_write_all(fd, json->text + token->start, (size_t)cache.size);
     if (platform_close(fd) != 0) result = -1;
     if (result != 0 || preserve(archive, "metadata", id, part, &cache) != 0 ||
         platform_rename_path(part, path) != 0 || save_cache(archive, "metadata", id, id, &cache) != 0 ||
-        observation(archive, "collection-tombstone", id, source, &cache, 0) != 0)
-        return ris_error("cannot publish calendar tombstone", id);
+        observation(archive, json_true(json, json_get(json, object, "deleted")) ?
+                    "collection-tombstone" : "collection-object", id, source, &cache, 0) != 0)
+        return ris_error("cannot publish collection object", id);
     return 0;
 }
 
@@ -954,13 +1024,17 @@ static int select_meeting(Archive *archive, const Json *json, size_t object, con
     int member;
     if (!json_equals(json, json_get(json, object, "type"), "https://schema.oparl.org/1.1/Meeting"))
         return ris_error("non-Meeting object in calendar", source);
-    if (json_true(json, json_get(json, object, "deleted"))) return calendar_tombstone(archive, json, object, source);
+    if (json_true(json, json_get(json, object, "deleted")))
+        return store_collection_object(archive, json, object, source);
     member = calendar_member(archive, json, object);
     if (member < 0) return -1;
-    if (!member) return 0;
+    if (!member && !(archive->incremental &&
+                    known_reference(&archive->known_resources, json, object))) return 0;
     if (json_string(json, json_get(json, object, "id"), id, sizeof(id)) != 0)
         return ris_error("Meeting has no ID", source);
-    return add_scoped_job(archive, id, JOB_RESOURCE, 1, TYPE_MEETING);
+    return add_scoped_job(archive, id, JOB_RESOURCE,
+        !member && archive->incremental && !archive->calendar_only &&
+        !known_reference(&archive->known_calendar_meetings, json, object) ? 0 : 1, TYPE_MEETING);
 }
 
 static int follow_link(Archive *archive, const Json *json, size_t index, unsigned int calendar) {
@@ -984,6 +1058,11 @@ static int follow_link(Archive *archive, const Json *json, size_t index, unsigne
     }
     if (json_string(json, index, url, sizeof(url)) != 0)
         return ris_error("invalid linked OParl resource", 0);
+    if (archive->incremental) {
+        char hash[65];
+        hash_text(url, hash);
+        if (hash_seen(&archive->known_resources, hash, 0)) return 0;
+    }
     return add_scoped_job(archive, url, JOB_RESOURCE, calendar, url_type(url));
 }
 
@@ -1069,9 +1148,64 @@ done:
     return result;
 }
 
-static int process_objects(Archive *archive, const Json *json, JobKind kind, const char *source) {
+static int process_changes(Archive *archive, const Json *json, size_t object,
+                           unsigned int type, const char *source) {
+    char id[RIS_URL_CAPACITY], expected_type[128];
+    const char *prefix = "https://schema.oparl.org/1.1/";
+    size_t declared = json_get(json, object, "type");
+    int scoped = archive->year || archive->calendar_only;
+    int known = known_reference(&archive->known_resources, json, object);
+    int deleted = json_true(json, json_get(json, object, "deleted"));
+    if (type == TYPE_ORGANIZATION && (json_equals(json, declared, "at") || json_equals(json, declared, "gr")))
+        declared = json_get(json, object, "Type");
+    rt_copy_string(expected_type, sizeof(expected_type), prefix);
+    rt_copy_string(expected_type + rt_strlen(prefix), sizeof(expected_type) - rt_strlen(prefix), type_names[type]);
+    if (!json_equals(json, declared, expected_type))
+        return ris_error("unexpected object type in modification list", source);
+    if (json_string(json, json_get(json, object, "id"), id, sizeof(id)) != 0 ||
+        !http_valid_url(&archive->http, id))
+        return ris_error("changed object has no valid ID", source);
+    if (type == TYPE_FILE) {
+        if (scoped && !known_reference(&archive->known_files, json, object)) return 0;
+        if (store_collection_object(archive, json, object, source) != 0) return -1;
+        return deleted ? 0 : document(archive, json, object);
+    }
+    if (deleted) {
+        return !scoped || known ? store_collection_object(archive, json, object, source) : 0;
+    }
+    if (type == TYPE_PAPER && archive->year && !archive->calendar_only) {
+        if (known) {
+            archive->scanned_papers++;
+            if (known_reference(&archive->selected_roots, json, object)) archive->selected_papers++;
+            return add_scoped_job(archive, id, JOB_RESOURCE, 0, TYPE_PAPER);
+        }
+        return select_paper(archive, json, object);
+    }
+    if (type == TYPE_MEETING) return select_meeting(archive, json, object, source);
+    if (scoped && !known && type == TYPE_AGENDA && !private_item(json, object) &&
+        known_reference(&archive->known_calendar_meetings, json, json_get(json, object, "meeting")))
+        return add_scoped_job(archive, id, JOB_RESOURCE, 1, type);
+    if (scoped && !known && type == TYPE_AGENDA && !archive->calendar_only && !private_item(json, object) &&
+        known_reference(&archive->paper_context, json, json_get(json, object, "consultation")))
+        return add_scoped_job(archive, id, JOB_RESOURCE, 0, type);
+    if (scoped && !known) return 0;
+    return add_scoped_job(archive, id, JOB_RESOURCE,
+        archive->calendar_only || (scoped && (type == TYPE_AGENDA || type == TYPE_CONSULTATION) &&
+        !known_reference(&archive->paper_context, json, object) &&
+        !known_reference(&archive->paper_context, json, json_get(json, object, "consultation"))), type);
+}
+
+static int process_objects(Archive *archive, const Json *json, const Job *job, const char *source) {
+    JobKind kind = job->kind;
     size_t data = json_get(json, 0, "data"), index;
     const JsonToken *array = json_token(json, data);
+    if (archive->incremental && kind != JOB_BODIES) {
+        for (index = data + 1; index < array->next; index = json_token(json, index)->next) {
+            archive->types[job->type].listed++;
+            if (process_changes(archive, json, index, job->type, source) != 0) return -1;
+        }
+        return 0;
+    }
     if (kind == JOB_CALENDAR) {
         for (index = data + 1; index < array->next; index = json_token(json, index)->next) {
             archive->types[TYPE_MEETING].listed++;
@@ -1083,7 +1217,7 @@ static int process_objects(Archive *archive, const Json *json, JobKind kind, con
         for (index = data + 1; index < array->next; index = json_token(json, index)->next) {
             archive->types[TYPE_PAPER].listed++;
             if (json_true(json, json_get(json, index, "deleted"))) {
-                if (calendar_tombstone(archive, json, index, source) != 0) return -1;
+                if (store_collection_object(archive, json, index, source) != 0) return -1;
             } else if (select_paper(archive, json, index) != 0) return -1;
         }
         return 0;
@@ -1107,32 +1241,76 @@ static int process_objects(Archive *archive, const Json *json, JobKind kind, con
     return 0;
 }
 
-static int first_url(const Archive *archive, const char *base, char *out) {
+static int collection_url(const Archive *archive, const char *base, char *out, int filtered) {
+    ToolByteBuffer buffer;
     char number[32];
-    size_t length = rt_strlen(base), digits, i;
-    int query = 0;
+    size_t path = 0, start, end, key;
+    int result = -1;
+    tool_byte_buffer_init(&buffer);
+    while (base[path] && base[path] != '?') path++;
+    if (tool_byte_buffer_append(&buffer, base, path) != 0) goto done;
+    for (start = base[path] ? path + 1 : path; base[start]; start = base[end] ? end + 1 : end) {
+        for (end = start; base[end] && base[end] != '&'; end++) {}
+        for (key = start; key < end && base[key] != '='; key++) {}
+        if ((key - start == 4 && !memcmp(base + start, "size", 4)) ||
+            (filtered && ((key - start == 14 && !memcmp(base + start, "modified_since", 14)) ||
+                          (key - start == 14 && !memcmp(base + start, "modified_until", 14))))) continue;
+        if (end > start &&
+            (tool_byte_buffer_append_char(&buffer, buffer.size == path ? '?' : '&') != 0 ||
+             tool_byte_buffer_append(&buffer, base + start, end - start) != 0)) goto done;
+    }
     rt_unsigned_to_string(archive->page_size, number, sizeof(number));
-    digits = rt_strlen(number);
-    if (length + digits + 7 >= RIS_URL_CAPACITY) return ris_error("collection URL is too long", base);
-    for (i = 0; i < length; i++) if (base[i] == '?') query = 1;
-    memcpy(out, base, length);
-    out[length++] = query ? '&' : '?';
-    memcpy(out + length, "size=", 5);
-    memcpy(out + length + 5, number, digits + 1);
+    if (tool_byte_buffer_append_char(&buffer, buffer.size == path ? '?' : '&') != 0 ||
+        tool_byte_buffer_append_cstr(&buffer, "size=") != 0 ||
+        tool_byte_buffer_append_cstr(&buffer, number) != 0) goto done;
+    if (filtered) {
+        size_t i;
+        const char *values[2] = {archive->modified_since, archive->modified_until};
+        const char *names[2] = {"&modified_since=", "&modified_until="};
+        for (i = 0; i < 2; i++) {
+            size_t j;
+            if (tool_byte_buffer_append_cstr(&buffer, names[i]) != 0) goto done;
+            for (j = 0; values[i][j]; j++) {
+                if (values[i][j] == ':') {
+                    if (tool_byte_buffer_append_cstr(&buffer, "%3A") != 0) goto done;
+                } else if (tool_byte_buffer_append_char(&buffer, values[i][j]) != 0) goto done;
+            }
+        }
+    }
+    if (buffer.size >= RIS_URL_CAPACITY) goto done;
+    memcpy(out, buffer.data, buffer.size); out[buffer.size] = 0;
+    result = 0;
+done:
+    tool_byte_buffer_free(&buffer);
+    return result == 0 ? 0 : ris_error("cannot construct collection URL", base);
+}
+
+static int validate_changes(const Archive *archive, const Json *json, const char *source) {
+    size_t data = json_get(json, 0, "data"), index;
+    const JsonToken *array = json_token(json, data);
+    for (index = data + 1; index < array->next; index = json_token(json, index)->next) {
+        char modified[128];
+        unsigned long long seconds;
+        if (json_string(json, json_get(json, index, "modified"), modified, sizeof(modified)) != 0 ||
+            archive_parse_timestamp(modified, &seconds) != 0 ||
+            seconds < archive->sync_since || seconds > archive->started)
+            return ris_error("OParl modification filter ignored or invalid timestamp; use --full", source);
+    }
     return 0;
 }
 
 static int collection_impl(Archive *archive, const Job *job) {
     char url[RIS_URL_CAPACITY], next[RIS_URL_CAPACITY];
     unsigned long long seen = 0, previous = 0;
-    if (first_url(archive, job->url, url) != 0) return -1;
+    int filtered = archive->incremental && job->kind != JOB_BODIES;
+    if (collection_url(archive, job->url, url, filtered) != 0) return -1;
     for (;;) {
         Json json;
         unsigned char *bytes = 0;
         unsigned long long current, pages;
         size_t pagination, link;
         int has_next, result;
-        result = read_metadata(archive, url, job->kind == JOB_PAPERS || job->kind == JOB_CALENDAR ? META_INDEX : META_LIST,
+        result = read_metadata(archive, url, filtered || job->kind == JOB_PAPERS || job->kind == JOB_CALENDAR ? META_INDEX : META_LIST,
                                &json, &bytes);
         /* A missing page has no next link; other collections can still be processed. */
         if (result == RIS_HTTP_NOT_FOUND) { archive->types[job->type].incomplete_collections++; return 0; }
@@ -1151,7 +1329,8 @@ static int collection_impl(Archive *archive, const Job *job) {
                     !http_valid_url(&archive->http, next) || rt_strcmp(next, url) == 0)) {
             result = ris_error("invalid next-page link", url);
         } else {
-            result = process_objects(archive, &json, job->kind, url);
+            if (filtered) result = validate_changes(archive, &json, url);
+            if (result == 0) result = process_objects(archive, &json, job, url);
         }
         json_free(&json);
         rt_free(bytes);
@@ -1164,7 +1343,7 @@ static int collection_impl(Archive *archive, const Job *job) {
             return 0;
         }
         previous = current;
-        rt_copy_string(url, sizeof(url), next);
+        if (collection_url(archive, next, url, filtered) != 0) return -1;
     }
 }
 
@@ -1206,6 +1385,24 @@ static int validate_archive(Archive *archive) {
     if (json_get(&json, 0, "lastSuccessfulRunEndEpochSeconds") != JSON_NONE &&
         json_uint(&json, json_get(&json, 0, "lastSuccessfulRunEndEpochSeconds"), &archive->last_success) != 0)
         valid = 0;
+    archive->baseline_complete = json_true(&json, json_get(&json, 0, "complete"));
+    archive->sync_metadata_only = json_true(&json, json_get(&json, 0, "metadataOnly"));
+    if (json_get(&json, 0, "syncCheckpointEpochSeconds") != JSON_NONE) {
+        archive->sync_state_present = 1;
+        if (json_uint(&json, json_get(&json, 0, "syncCheckpointEpochSeconds"),
+                      &archive->sync_checkpoint) != 0 ||
+            json_string(&json, json_get(&json, 0, "syncCheckpointSource"),
+                        archive->sync_source, sizeof(archive->sync_source)) != 0)
+            valid = 0;
+        {
+            const JsonToken *baseline = json_token(&json, json_get(&json, 0, "syncBaselineComplete"));
+            const JsonToken *metadata_only = json_token(&json, json_get(&json, 0, "syncMetadataOnly"));
+            if (!baseline || baseline->kind != JSON_BOOL ||
+                !metadata_only || metadata_only->kind != JSON_BOOL) valid = 0;
+            archive->baseline_complete = json_true(&json, json_get(&json, 0, "syncBaselineComplete"));
+            archive->sync_metadata_only = json_true(&json, json_get(&json, 0, "syncMetadataOnly"));
+        }
+    }
     {
         size_t types = json_get(&json, 0, "types"), i;
         for (i = 0; i < TYPE_COUNT; i++) {
@@ -1216,6 +1413,185 @@ static int validate_archive(Archive *archive) {
     json_free(&json);
     rt_free(bytes);
     return valid ? 0 : ris_error("archive has a different system/year; use a separate output directory", path);
+}
+
+static int remember_links(Archive *archive, SeenSet *set, const Json *json, size_t index, unsigned int type) {
+    const JsonToken *token = json_token(json, index);
+    char id[RIS_URL_CAPACITY], hash[65];
+    size_t child;
+    if (!token || token->kind == JSON_NULL) return 0;
+    if (token->kind == JSON_ARRAY) {
+        for (child = index + 1; child < token->next; child = json_token(json, child)->next)
+            if (remember_links(archive, set, json, child, type) != 0) return -1;
+        return 0;
+    }
+    if (token->kind == JSON_OBJECT) index = json_get(json, index, "id");
+    if (json_string(json, index, id, sizeof(id)) != 0 || !http_valid_url(&archive->http, id))
+        return ris_error("invalid archived resource reference; use --full", 0);
+    if (url_type(id) != type) return 0;
+    hash_text(id, hash);
+    return hash_seen(set, hash, 1) < 0 ? -1 : 0;
+}
+
+static int archived_paper(const Archive *archive, const Json *json, size_t index) {
+    const JsonToken *token = json_token(json, index);
+    char id[RIS_URL_CAPACITY], hash[65], name[80], path[PATH_CAPACITY];
+    PlatformDirEntry info;
+    size_t child;
+    if (!token || token->kind == JSON_NULL) return 0;
+    if (token->kind == JSON_ARRAY) {
+        for (child = index + 1; child < token->next; child = json_token(json, child)->next)
+            if (archived_paper(archive, json, child)) return 1;
+        return 0;
+    }
+    if (token->kind == JSON_OBJECT) index = json_get(json, index, "id");
+    if (json_string(json, index, id, sizeof(id)) != 0 || url_type(id) != TYPE_PAPER) return 0;
+    hash_text(id, hash);
+    memcpy(name, hash, 64); memcpy(name + 64, ".json", 6);
+    return archive_path(archive, "metadata", name, path) == 0 &&
+           platform_get_path_info(path, &info) == 0 && !info.is_dir;
+}
+
+static int snapshot_metadata(const char *path, const PlatformDirEntry *info, int depth,
+                              ToolWalkControl *control, void *user) {
+    Archive *archive = (Archive *)user;
+    unsigned char *bytes = 0;
+    size_t length, i, type;
+    char id[RIS_URL_CAPACITY], hash[65];
+    const char *name = path;
+    const char *keys[4] = {0,0,0,0};
+    Json json;
+    int result = 0;
+    if (info->is_dir) { if (depth) control->prune = 1; return 0; }
+    for (i = 0; path[i]; i++) if (path[i] == '/') name = path + i + 1;
+    if (rt_strlen(name) != 69 || rt_strcmp(name + 64, ".json")) return 0;
+    if (!archive->sync_state_present) {
+        if (info->mtime <= 0 || (unsigned long long)info->mtime > archive->started)
+            return ris_error("invalid local metadata timestamp; use --full", path);
+        if (!archive->oldest_metadata || (unsigned long long)info->mtime < archive->oldest_metadata)
+            archive->oldest_metadata = (unsigned long long)info->mtime;
+    }
+    if (info->size > META_LIMIT || tool_read_all_input(path, &bytes, &length) != 0)
+        return ris_error("cannot read existing metadata; use --full", path);
+    if (json_parse(&json, (const char *)bytes, length) != 0) {
+        rt_free(bytes);
+        return ris_error("invalid existing metadata; use --full", path);
+    }
+    if (json_string(&json, json_get(&json, 0, "id"), id, sizeof(id)) != 0) goto done;
+    hash_text(id, hash);
+    if (memcmp(hash, name, 64)) goto done;
+    if (!http_valid_url(&archive->http, id)) {
+        result = ris_error("invalid archived resource URL; use --full", path); goto done;
+    }
+    if (hash_seen(&archive->known_resources, hash, 1) < 0) { result = -1; goto done; }
+    type = resource_type(&json);
+    if (json_equals(&json, type, "https://schema.oparl.org/1.1/File")) {
+        result = hash_seen(&archive->known_files, hash, 1) < 0 ? -1 : 0;
+    } else if (json_equals(&json, type, "https://schema.oparl.org/1.1/Paper")) {
+        keys[0] = "mainFile"; keys[1] = "auxiliaryFile";
+        result = remember_links(archive, &archive->paper_context, &json,
+                                json_get(&json, 0, "consultation"), TYPE_CONSULTATION);
+    } else if (json_equals(&json, type, "https://schema.oparl.org/1.1/Consultation") &&
+               archived_paper(archive, &json, json_get(&json, 0, "paper"))) {
+        if (hash_seen(&archive->paper_context, hash, 1) < 0 ||
+            remember_links(archive, &archive->paper_context, &json,
+                           json_get(&json, 0, "agendaItem"), TYPE_AGENDA) != 0 ||
+            remember_links(archive, &archive->paper_context, &json,
+                           json_get(&json, 0, "agendaitem"), TYPE_AGENDA) != 0) result = -1;
+    } else if (json_equals(&json, type, "https://schema.oparl.org/1.1/Meeting") && !private_item(&json, 0)) {
+        int member = calendar_member(archive, &json, 0);
+        if (member < 0) { result = -1; goto done; }
+        if (member == 1 && hash_seen(&archive->known_calendar_meetings, hash, 1) < 0) {
+            result = -1; goto done;
+        }
+        keys[0] = "invitation"; keys[1] = "resultsProtocol";
+        keys[2] = "verbatimProtocol"; keys[3] = "auxiliaryFile";
+    } else if (json_equals(&json, type, "https://schema.oparl.org/1.1/AgendaItem") &&
+               !private_item(&json, 0)) {
+        keys[0] = "resolutionFile"; keys[1] = "auxiliaryFile";
+    }
+    for (i = 0; !result && i < 4 && keys[i]; i++)
+        result = remember_links(archive, &archive->known_files, &json, json_get(&json, 0, keys[i]), TYPE_FILE);
+done:
+    json_free(&json); rt_free(bytes);
+    return result;
+}
+
+static int snapshot_document(const char *path, const PlatformDirEntry *info, int depth,
+                              ToolWalkControl *control, void *user) {
+    Archive *archive = (Archive *)user;
+    const char *name = path;
+    char hash[65];
+    size_t i, length;
+    if (info->is_dir) { if (depth) control->prune = 1; return 0; }
+    for (i = 0; path[i]; i++) if (path[i] == '/') name = path + i + 1;
+    length = rt_strlen(name);
+    if (length < 66 || name[64] != '-' ||
+        (length >= 5 && !rt_strcmp(name + length - 5, ".part"))) return 0;
+    for (i = 0; i < 64; i++) if (tool_hex_value(name[i]) < 0) return 0;
+    memcpy(hash, name, 64); hash[64] = 0;
+    return hash_seen(&archive->known_files, hash, 1) < 0 ? -1 : 0;
+}
+
+static int prepare_sync(Archive *archive) {
+    char path[PATH_CAPACITY];
+    PlatformDirEntry info;
+    if (archive->full || archive->refresh || (archive->sync_metadata_only && !archive->metadata_only))
+        return 0;
+    if (archive->sync_checkpoint > archive->started)
+        return ris_error("sync checkpoint is in the future; check the clock or use --full", archive->output);
+    if (rt_join_path(archive->output, "metadata", path, sizeof(path)) != 0) return -1;
+    if (platform_get_path_info(path, &info) == 0 &&
+        archive_walk(path, snapshot_metadata, archive, 0) != 0) return -1;
+    if (!archive->sync_state_present && archive->oldest_metadata && archive->known_resources.count) {
+        archive->sync_checkpoint = archive->oldest_metadata;
+        rt_copy_string(archive->sync_source, sizeof(archive->sync_source), "legacy-local-mtime");
+        ris_warning("bootstrapping delta checkpoint from oldest local metadata timestamp; existing gaps remain", archive->output);
+    }
+    if (!archive->sync_checkpoint) return 0;
+    if (rt_join_path(archive->output, "documents", path, sizeof(path)) != 0) return -1;
+    if (platform_get_path_info(path, &info) == 0 &&
+        archive_walk(path, snapshot_document, archive, 0) != 0) return -1;
+    archive->incremental = 1;
+    archive->sync_since = archive->sync_checkpoint > SYNC_OVERLAP_SECONDS ?
+                          archive->sync_checkpoint - SYNC_OVERLAP_SECONDS : 1;
+    if (archive_timestamp(archive->sync_since, archive->modified_since, sizeof(archive->modified_since)) != 0 ||
+        archive_timestamp(archive->started, archive->modified_until, sizeof(archive->modified_until)) != 0)
+        return ris_error("cannot format delta window", archive->output);
+    rt_write_cstr(2, "Incremental update: ");
+    rt_write_cstr(2, archive->modified_since); rt_write_cstr(2, " through ");
+    rt_write_line(2, archive->modified_until);
+    return 0;
+}
+
+static int retain_selection(Archive *archive) {
+    char path[PATH_CAPACITY];
+    unsigned char *bytes = 0;
+    PlatformDirEntry info;
+    size_t length, start, end;
+    int result = 0;
+    if (!archive->incremental || archive->selection_fd < 0) return 0;
+    if (rt_join_path(archive->output, "selection.jsonl", path, sizeof(path)) != 0) return -1;
+    if (platform_get_path_info(path, &info) != 0) return 0;
+    if (info.size > META_LIMIT || tool_read_all_input(path, &bytes, &length) != 0)
+        return ris_error("cannot retain existing Paper selection", path);
+    for (start = 0; start < length; start = end + 1) {
+        char id[RIS_URL_CAPACITY], hash[65];
+        Json json;
+        for (end = start; end < length && bytes[end] != '\n'; end++) {}
+        if (end == start) continue;
+        if (json_parse(&json, (const char *)bytes + start, end - start) != 0) { result = -1; break; }
+        result = json_string(&json, json_get(&json, 0, "id"), id, sizeof(id));
+        json_free(&json);
+        if (result != 0) break;
+        hash_text(id, hash);
+        if (hash_seen(&archive->selected_roots, hash, 1) < 0) { result = -1; break; }
+    }
+    if (!result && rt_write_all(archive->selection_fd, bytes, length) != 0) result = -1;
+    if (!result && length && bytes[length - 1] != '\n' &&
+        rt_write_char(archive->selection_fd, '\n') != 0) result = -1;
+    rt_free(bytes);
+    return result == 0 ? 0 : ris_error("invalid or unwritable existing Paper selection", path);
 }
 
 static int open_manifest(const Archive *archive, const char *name, int *fd) {
@@ -1253,6 +1629,7 @@ static int run(Archive *archive) {
         used = rt_strlen(archive->run_id); archive->run_id[used++] = '-';
         rt_unsigned_to_string(platform_get_monotonic_time_ns(), archive->run_id + used, sizeof(archive->run_id) - used);
     }
+    if (prepare_sync(archive) != 0) return -1;
     if (prepare_directory(archive, "metadata") != 0 ||
         prepare_directory(archive, "cache") != 0 ||
         prepare_directory(archive, "index") != 0 ||
@@ -1270,6 +1647,7 @@ static int run(Archive *archive) {
         if (prepare_directory(archive, "index") != 0 ||
             open_manifest(archive, "selection.jsonl", &archive->selection_fd) != 0)
             return -1;
+        if (retain_selection(archive) != 0) return -1;
     }
     if (archive->skip_unavailable_files &&
         open_manifest(archive, "unavailable-files.jsonl", &archive->unavailable_fd) != 0)
@@ -1315,8 +1693,10 @@ static int write_summary(Archive *archive, int success, int force) {
     unsigned long long now = platform_get_monotonic_time_ns();
     unsigned char *bytes = 0;
     size_t i, length;
-    int fd, result, complete = success && !archive->limited && !archive->unavailable_files &&
+    int fd, result, update_complete = success && !archive->limited && !archive->unavailable_files &&
         !archive->missing_resources && !archive->unknown_meetings;
+    int baseline_complete = archive->incremental ? archive->baseline_complete : update_complete;
+    int complete = update_complete && baseline_complete;
     if (!force && archive->summary_written_ns != 0 && now >= archive->summary_written_ns &&
         now - archive->summary_written_ns < SUMMARY_INTERVAL_NS) return 0;
     if (rt_join_path(archive->output, "archive.json", path, sizeof(path)) != 0 ||
@@ -1334,6 +1714,16 @@ static int write_summary(Archive *archive, int success, int force) {
              tool_json_field_uint(fd, "runFinishedAtEpochSeconds", archive->finished) ||
              tool_json_field_uint(fd, "lastSuccessfulRunEndEpochSeconds",
                                   complete ? archive->finished : archive->last_success) ||
+             tool_json_field_string(fd, "syncMode", archive->incremental ? "incremental" : "full") ||
+             tool_json_field_uint(fd, "syncSinceEpochSeconds", archive->sync_since) ||
+             tool_json_field_uint(fd, "syncUntilEpochSeconds", archive->started) ||
+             tool_json_field_uint(fd, "syncCheckpointEpochSeconds",
+                                  update_complete ? archive->started : archive->sync_checkpoint) ||
+             tool_json_field_string(fd, "syncCheckpointSource",
+                                    update_complete ? "successful-run-start" : archive->sync_source) ||
+             tool_json_field_bool(fd, "syncBaselineComplete", baseline_complete) ||
+             tool_json_field_bool(fd, "syncMetadataOnly",
+                                  update_complete ? archive->metadata_only : archive->sync_metadata_only) ||
              tool_json_field_bool(fd, "calendarOnly", archive->calendar_only) ||
              tool_json_field_string(fd, "calendarFrom", archive->calendar_from) ||
              tool_json_field_string(fd, "calendarThrough", archive->calendar_through) ||
@@ -1426,12 +1816,15 @@ int main(int argc, char **argv) {
     if (write_summary(&archive, result == 0, 1) != 0) result = -1;
     if (result == 0) {
         tool_write_styled(2, tool_get_global_color_mode(),
-                          archive.missing_resources || archive.unavailable_files || archive.limited || archive.unknown_meetings ?
+                          archive.missing_resources || archive.unavailable_files || archive.limited || archive.unknown_meetings ||
+                          (archive.incremental && !archive.baseline_complete) ?
                           TOOL_STYLE_BOLD_YELLOW : TOOL_STYLE_PLAIN,
                           archive.missing_resources ? "INCOMPLETE (HTTP 404)" :
                           archive.unavailable_files ? "INCOMPLETE (unavailable documents)" :
                           archive.limited ? "INCOMPLETE (configured limits)" :
-                          archive.unknown_meetings ? "INCOMPLETE (unknown calendar dates)" : "Complete");
+                          archive.unknown_meetings ? "INCOMPLETE (unknown calendar dates)" :
+                          archive.incremental && !archive.baseline_complete ?
+                          "INCOMPLETE (existing archive gaps; recent update completed)" : "Complete");
         rt_write_cstr(2, ": new metadata pages=");
         rt_write_uint(2, archive.downloaded_pages);
         rt_write_cstr(2, ", new documents=");
@@ -1464,8 +1857,14 @@ int main(int argc, char **argv) {
     }
     rt_free(archive.seen_files.entries);
     rt_free(archive.seen_jobs.entries);
+    rt_free(archive.known_resources.entries);
+    rt_free(archive.known_files.entries);
+    rt_free(archive.known_calendar_meetings.entries);
+    rt_free(archive.paper_context.entries);
+    rt_free(archive.selected_roots.entries);
     rt_free(archive.seen_missing.entries);
     return result != 0 ? 1 :
-           archive.missing_resources != 0 || archive.unavailable_files != 0 || archive.unknown_meetings != 0 ? 3 :
+           archive.missing_resources != 0 || archive.unavailable_files != 0 || archive.unknown_meetings != 0 ||
+           (archive.incremental && !archive.baseline_complete) ? 3 :
            archive.limited ? 2 : 0;
 }

@@ -136,6 +136,34 @@ int http_valid_validators(const HttpClient *client, const HttpValidators *valida
            validator_text(validators->etag) && validator_text(validators->modified);
 }
 
+static int http_date_epoch(const char *text, unsigned long long *out) {
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    static const char weekdays[] = "SunMonTueWedThuFriSat";
+    static const unsigned int digits[] = {5, 6, 12, 13, 14, 15, 17, 18, 20, 21, 23, 24};
+    unsigned int month, day, year, hour, minute, second;
+    size_t i;
+    long long epoch;
+    if (rt_strlen(text) != 29 || text[3] != ',' || text[4] != ' ' ||
+        text[7] != ' ' || text[11] != ' ' || text[16] != ' ' ||
+        text[19] != ':' || text[22] != ':' || rt_strcmp(text + 25, " GMT"))
+        return -1;
+    for (i = 0; i < sizeof(digits) / sizeof(digits[0]); i++)
+        if (text[digits[i]] < '0' || text[digits[i]] > '9') return -1;
+    for (month = 1; month <= 12; month++)
+        if (!memcmp(text + 8, months + (month - 1) * 3, 3)) break;
+    day = (unsigned int)(text[5] - '0') * 10U + (unsigned int)(text[6] - '0');
+    year = (unsigned int)(text[12] - '0') * 1000U + (unsigned int)(text[13] - '0') * 100U +
+           (unsigned int)(text[14] - '0') * 10U + (unsigned int)(text[15] - '0');
+    hour = (unsigned int)(text[17] - '0') * 10U + (unsigned int)(text[18] - '0');
+    minute = (unsigned int)(text[20] - '0') * 10U + (unsigned int)(text[21] - '0');
+    second = (unsigned int)(text[23] - '0') * 10U + (unsigned int)(text[24] - '0');
+    if (year < 1970 || tool_build_epoch_timestamp((int)year, month, day, hour, minute,
+                                                 second, &epoch) != 0 || epoch <= 0 ||
+        memcmp(text, weekdays + ((epoch / 86400 + 4) % 7) * 3, 3)) return -1;
+    *out = (unsigned long long)epoch;
+    return 0;
+}
+
 static HttpHost *host_state(HttpClient *client, const Url *url) {
     HttpHost *host;
     platform_mutex_lock(&client->state_lock);
@@ -610,6 +638,14 @@ static int fetch_once(HttpClient *client, const char *source, HttpTransfer *tran
         int same = conditional && (condition->etag[0] != '\0' ?
                    rt_strcmp(condition->etag, validators->etag) == 0 :
                    rt_strcmp(condition->modified, validators->modified) == 0);
+        if (transfer->local_modified != 0) {
+            unsigned long long modified;
+            same = length == transfer->cached_size &&
+                   http_date_epoch(validators->modified, &modified) == 0 &&
+                   modified <= transfer->local_modified;
+            if (!same)
+                ris_warning("legacy document is newer or not verifiable from HEAD; downloading", source);
+        }
         if (same && (length == RIS_UNKNOWN_SIZE || length == transfer->cached_size)) {
             transfer->received = transfer->cached_size;
             result = RIS_HTTP_NOT_MODIFIED;

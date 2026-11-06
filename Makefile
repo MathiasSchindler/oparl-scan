@@ -25,7 +25,7 @@ CPPFLAGS := -I$(NEWOS)/src/shared -Isrc -DNEWOS_HAVE_PTHREAD=0 \
 CFLAGS := -std=c11 -Oz -Wall -Wextra -Wpedantic -ffreestanding -fno-builtin \
 	-fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections
-APP := src/oparl-scan.c src/json.c src/http.c src/archive-version.c
+APP := src/oparl-scan.c src/json.c src/http.c src/archive-version.c src/archive-walk.c
 
 ifeq ($(TARGET),macos)
 ifneq ($(ARCH),aarch64)
@@ -122,6 +122,7 @@ $(BUILD)/imports/lib%.a: $(NEWOS)/src/platform/windows/imports/%.def
 test: all $(BUILD)/test-json$(EXE) check-deps
 	$(BUILD)/test-json$(EXE)
 	node tests/integration.mjs "$(abspath $(PROGRAM))"
+	node tests/incremental.mjs "$(abspath $(PROGRAM))"
 	node tests/archive.mjs "$(abspath $(PROGRAM))" "$(abspath $(INDEX_PROGRAM))" "$(abspath $(SEARCH_PROGRAM))"
 	node tests/concurrency.mjs "$(abspath $(PROGRAM))"
 	node tests/search.mjs "$(abspath $(INDEX_PROGRAM))" "$(abspath $(SEARCH_PROGRAM))"

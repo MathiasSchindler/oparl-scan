@@ -61,6 +61,51 @@ int archive_timestamp(unsigned long long seconds, char *out, size_t capacity) {
     return platform_format_time((long long)seconds, 0, "%Y-%m-%dT%H:%M:%SZ", out, capacity);
 }
 
+int archive_parse_timestamp(const char *text, unsigned long long *seconds) {
+    char day[11];
+    unsigned int year = 0, month, date, hour, minute, second, i, offset = 0;
+    size_t position = 19, length = rt_strlen(text);
+    long long epoch;
+    int sign = 1;
+    if (length < 20 || text[10] != 'T' || text[13] != ':' || text[16] != ':')
+        return -1;
+    memcpy(day, text, 10); day[10] = 0;
+    if (!archive_valid_date(day)) return -1;
+    for (i = 11; i < 19; i++)
+        if (i != 13 && i != 16 && (text[i] < '0' || text[i] > '9')) return -1;
+    for (i = 0; i < 4; i++) year = year * 10U + (unsigned int)(text[i] - '0');
+    month = (unsigned int)((text[5] - '0') * 10 + text[6] - '0');
+    date = (unsigned int)((text[8] - '0') * 10 + text[9] - '0');
+    hour = (unsigned int)((text[11] - '0') * 10 + text[12] - '0');
+    minute = (unsigned int)((text[14] - '0') * 10 + text[15] - '0');
+    second = (unsigned int)((text[17] - '0') * 10 + text[18] - '0');
+    if (text[position] == '.') {
+        size_t first = ++position;
+        while (position < length && text[position] >= '0' && text[position] <= '9') position++;
+        if (position == first) return -1;
+    }
+    if (position + 1 == length && text[position] == 'Z') {
+        offset = 0;
+    } else {
+        unsigned int hours, minutes;
+        if (position + 6 != length || (text[position] != '+' && text[position] != '-') ||
+            text[position + 3] != ':') return -1;
+        for (i = 1; i < 6; i++)
+            if (i != 3 && (text[position + i] < '0' || text[position + i] > '9')) return -1;
+        hours = (unsigned int)((text[position + 1] - '0') * 10 + text[position + 2] - '0');
+        minutes = (unsigned int)((text[position + 4] - '0') * 10 + text[position + 5] - '0');
+        if (hours > 23 || minutes > 59) return -1;
+        offset = hours * 3600U + minutes * 60U;
+        sign = text[position] == '+' ? 1 : -1;
+    }
+    if (tool_build_epoch_timestamp((int)year, month, date, hour, minute, second, &epoch) != 0)
+        return -1;
+    epoch -= (long long)sign * offset;
+    if (epoch <= 0) return -1;
+    *seconds = (unsigned long long)epoch;
+    return 0;
+}
+
 int archive_valid_date(const char *date) {
     unsigned int year = 0, month, day, i, days;
     static const unsigned int lengths[] = {31,28,31,30,31,30,31,31,30,31,30,31};

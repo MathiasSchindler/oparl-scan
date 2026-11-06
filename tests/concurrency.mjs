@@ -128,7 +128,7 @@ async function run(directory, args = [], expected = 0, defaultDelay = false) {
   const start = performance.now();
   const child = spawn(binary, [
     '--system', system, '--year', '2023', '--output', directory,
-    '--timeout-ms', '1000', ...(defaultDelay ? [] : ['--delay-ms', '80']), '--color', 'never', ...args,
+    '--timeout-ms', '1000', '--full', ...(defaultDelay ? [] : ['--delay-ms', '80']), '--color', 'never', ...args,
     ...(tlsOptions ? ['--ca-file', process.env.OPARL_TEST_TLS_CERT] : []),
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
