@@ -9,7 +9,8 @@ assert.ok(base && binary && index,
 const origin = new URL(base).origin;
 assert.equal(new URL(base).protocol, 'http:', 'This check targets the HTTP proxy configuration.');
 const get = (path, headers = {}, method = 'GET', body) => new Promise((resolve, reject) => {
-  const req = request(new URL(path, base), { headers, method, timeout: 10000 }, response => {
+  // Synchronous CLI comparisons can outlast the proxy's idle keepalive timeout.
+  const req = request(new URL(path, base), { headers, method, timeout: 10000, agent: false }, response => {
     const chunks = [];
     let bytes = 0;
     response.on('data', chunk => {

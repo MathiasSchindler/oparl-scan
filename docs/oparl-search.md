@@ -964,6 +964,10 @@ Die vollstaendige Integritaetspruefung wird beschleunigt, nicht
 ausgelassen oder durch einen ungeprueften Cache ersetzt.
 Generische Linux-/Windows-ARM64-Builds behalten die portable Implementierung.
 
+Die [systemd-Vorlage](../deploy/oparl-search.service) erlaubt dem Suchbackend
+2 GiB Speicher. Das laesst bei einem vorbereiteten Index von rund 1,35 GB
+Platz fuer Validierung, Zuordnungstabellen und laufende Anfragen.
+
 Beim Laden entstehen kompakte Zuordnungstabellen fuer die einmal pro
 Datei gespeicherten Drucksachenbeziehungen. Metadatenfilter werden pro
 Anfrage nur fuer benoetigte Kandidaten und deren zugehoerige Drucksachen
