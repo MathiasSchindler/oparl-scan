@@ -8,7 +8,7 @@ assert.ok(base && binary && index,
   'Usage: node tests/search-deployment.mjs HTTP_URL LOCAL_SEARCH_BINARY LOCAL_INDEX');
 const origin = new URL(base).origin;
 assert.equal(new URL(base).protocol, 'http:', 'This check targets the HTTP proxy configuration.');
-const get = (path, headers = {}, method = 'GET') => new Promise((resolve, reject) => {
+const get = (path, headers = {}, method = 'GET', body) => new Promise((resolve, reject) => {
   const req = request(new URL(path, base), { headers, method, timeout: 10000 }, response => {
     const chunks = [];
     let bytes = 0;
@@ -25,7 +25,7 @@ const get = (path, headers = {}, method = 'GET') => new Promise((resolve, reject
   });
   req.on('timeout', () => req.destroy(new Error('Deployment request timed out')));
   req.on('error', reject);
-  req.end();
+  req.end(body);
 });
 const status = await get('/api/status');
 assert.equal(status.status, 200);
@@ -45,6 +45,7 @@ for (const parameters of [
   { q: 'Schule OR wohn*', year: '2024', limit: '50' },
   { q: 'Schule OR wohn*', year: '2024', limit: '20', offset: '50', sort: 'date-asc' },
   { q: 'Haushalt OR Verkehr', year: '2026', kind: 'Paper', limit: '20' },
+  { q: 'Noosha', group: 'paper', sort: 'date-desc', limit: '100' },
 ]) {
   const args = ['--index', index, '--json'];
   for (const [key, value] of Object.entries(parameters))
@@ -89,4 +90,56 @@ assert.equal((await get('/', { 'Sec-Fetch-Site': 'cross-site' })).status, 200);
 assert.equal((await get('/api/status', {}, 'POST')).status, 405);
 assert.equal((await get('/api/status', { 'Content-Length': '0' })).status, 400);
 assert.equal((await get('/api/paper?id=missing')).status, 404);
-console.log(`Deployment verified: ${info.records} records, ${info.indexBytes} bytes; search matches CLI; pages, JSON and proxy guards passed.`);
+const grouped = [];
+for (let offset = 0, total = 1; offset < total; offset += 100) {
+  const response = await get('/api/search?' + new URLSearchParams({
+    q: 'Noosha', group: 'paper', sort: 'date-desc', limit: '100', offset: String(offset),
+  }));
+  assert.equal(response.status, 200);
+  const result = JSON.parse(response.body);
+  total = result.total;
+  assert.ok(total < 10000);
+  grouped.push(...result.hits);
+}
+assert.equal(new Set(grouped.map(hit => hit.relatedPaper || hit.id)).size, grouped.length,
+  'chronological Noosha results must contain no repeated Papers across pages');
+const rpc = async (method, params = {}, modern = true) => {
+  const message = { jsonrpc: '2.0', id: 'public-test', method, params };
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream',
+    'MCP-Protocol-Version': modern ? '2026-07-28' : '2025-11-25' };
+  if (modern) {
+    params._meta = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientCapabilities': {} };
+    headers['Mcp-Method'] = method;
+    if (method === 'tools/call') headers['Mcp-Name'] = params.name;
+  }
+  const body = JSON.stringify(message);
+  headers['Content-Length'] = String(Buffer.byteLength(body));
+  const response = await get('/mcp', headers, 'POST', body);
+  assert.equal(response.status, 200, response.body);
+  const result = JSON.parse(response.body);
+  assert.ok(result.result, response.body);
+  return result.result;
+};
+assert.equal((await rpc('initialize', { protocolVersion: '2025-11-25',
+  capabilities: {}, clientInfo: { name: 'public-test', version: '1' } }, false)).protocolVersion, '2025-11-25');
+assert.ok((await rpc('server/discover')).supportedVersions.includes('2026-07-28'));
+assert.deepEqual((await rpc('tools/list')).tools.map(tool => tool.name),
+  ['search', 'get_object', 'get_paper', 'get_index_status']);
+for (const modern of [false, true]) {
+  const result = await rpc('tools/call', { name: 'search',
+    arguments: { q: 'Noosha', sort: 'date-desc', limit: 100 } }, modern);
+  assert.equal(result.isError, false);
+  assert.deepEqual(result.structuredContent.hits, grouped.slice(0, 100));
+  assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
+}
+const mcpStatus = await rpc('tools/call', { name: 'get_index_status' });
+assert.deepEqual(mcpStatus.structuredContent, info);
+const mcpGet = await get('/mcp');
+assert.equal(mcpGet.status, 405);
+assert.equal(mcpGet.headers.allow, 'POST');
+const badOriginBody = '{"jsonrpc":"2.0","id":1,"method":"ping"}';
+assert.equal((await get('/mcp', { Origin: 'https://untrusted.invalid', 'Content-Type': 'application/json',
+  Accept: 'application/json, text/event-stream', 'Content-Length': String(Buffer.byteLength(badOriginBody)) },
+'POST', badOriginBody)).status, 403);
+console.log(`Deployment verified: ${info.records} records, ${info.indexBytes} bytes; ${grouped.length} unique Noosha groups; CLI parity, modern/legacy MCP and proxy guards passed.`);

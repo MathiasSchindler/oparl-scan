@@ -39,16 +39,18 @@ function stream(text) {
 }
 const shared = pdf([null,
   '<< /Type /Catalog /Pages 2 0 R >>',
-  '<< /Type /Pages /Count 2 /Kids [6 0 R 3 0 R] /Resources << /Font << /F1 4 0 R /F2 11 0 R >> >> >>',
+  '<< /Type /Pages /Count 2 /Kids [6 0 R 3 0 R] /Resources << /Font << /F1 4 0 R /F2 11 0 R /F3 12 0 R >> >> >>',
   '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 8 0 R >>',
   '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
-  stream('BT /F1 12 Tf 10 700 Td (Ein sicherer Schulweg verbessert die Sicherheit.) Tj T* (Die Stra\\337e ist lang.) Tj ET\nBT /F1 12 Tf 1 0 0 1 10 600 Tm (Alpha) Tj 1 0 0 1 50 600 Tm (Beta) Tj ET\nBT /F1 12 Tf 1 0 0 1 10 500 Tm (K) Tj 1 0 0 1 16 500 Tm (ind) Tj ET\nBT /F1 12 Tf q /F2 12 Tf (A) Tj Q (A) Tj ET'),
+  stream('BT /F1 12 Tf 10 700 Td (Ein sicherer Schulweg verbessert die Sicherheit.) Tj T* (Die Stra\\337e ist lang.) Tj ET\nBT /F1 12 Tf 1 0 0 1 10 600 Tm (Alpha) Tj 1 0 0 1 50 600 Tm (Beta) Tj ET\nBT /F1 12 Tf 1 0 0 1 10 500 Tm (K) Tj 1 0 0 1 16 500 Tm (ind) Tj ET\nBT /F1 12 Tf q /F2 12 Tf (A) Tj Q (A) Tj ET\nBT /F3 10 Tf 1 0 0 1 10 400 Tm (Nove) Tj 1 0 0 1 50 400 Tm (mber ) Tj 1 0 0 1 100 400 Tm (202) Tj 1 0 0 1 130 400 Tm (5) Tj ET\nBT /F1 12 Tf 10 300 Td (Jahresab-) Tj 0 -12 Td (schluss 2024) Tj 0 -12 Td (Druck-) Tj 0 -12 Td (und Kopierkosten) Tj ET\nBT /F3 10 Tf 10 200 Td (A) Tj 10 0 Td (mt) Tj ET\nBT /F3 10 Tf 10 150 Td (Ver) Tj ET BT /F3 10 Tf 40 150 Td (waltung) Tj ET\nq 1 0 0 1 0 100 cm BT /F3 10 Tf 10 10 Td (Nord) Tj ET Q q 1 0 0 1 0 90 cm BT /F3 10 Tf 10 10 Td (Sued) Tj ET Q'),
   '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 7 0 R >>',
   stream('BT /F1 12 Tf 10 700 Td [(Die erste) -250 (Seite beschreibt Radverkehr.)] TJ ET'),
   '[9 0 R 5 0 R 10 0 R]',
   stream('q'),
   stream('Q'),
   '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [65 /B] >> >>',
+  '<< /Type /Font /Subtype /TrueType /BaseFont /Test /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 122 /Widths 13 0 R >>',
+  '[' + Array(91).fill('1000').join(' ') + ']',
 ]);
 const unicode = pdf([null,
   '<< /Type /Catalog /Pages 2 0 R >>',
@@ -138,7 +140,7 @@ try {
         'date sorting includes all matches, puts missing dates last, and keeps stable relevance ties across pages');
     }
   }
-  for (const args of [['--offset', '-1'], ['--offset', '4294967296'], ['--sort', 'newest']])
+  for (const args of [['--offset', '-1'], ['--offset', '4294967296'], ['--sort', 'newest'], ['--group', 'page']])
     run(searcher, ['--index', index, ...args, 'Schulweg'], 1);
   assert.equal(query('Deleted').total, 0);
   assert.equal(query('Veraltet').total, 0, 'newer modified metadata wins across annual archives');
@@ -169,6 +171,32 @@ try {
   assert.equal(query('"alpha beta"', ['--kind', 'Page']).total, 1, 'absolute text positioning separates distinct words');
   assert.equal(query('Kind', ['--kind', 'Page']).total, 1, 'adjacent text runs remain one word');
   assert.equal(query('BA', ['--kind', 'Page']).total, 1, 'q/Q restores the active PDF font');
+  assert.equal(query('"November 2025"', ['--kind', 'Page']).total, 1,
+    'indirect font widths keep adjacent text runs and digits together');
+  assert.equal(query('Jahresabschluss', ['--kind', 'Page']).total, 1, 'line-end hyphenation is joined before indexing');
+  assert.match(page.text, /Jahresabschluss 2024/);
+  assert.match(page.text, /Druck-\nund Kopierkosten/, 'suspended compound hyphens are not removed');
+  assert.equal(query('Amt', ['--kind', 'Page']).total, 1, 'Td moves from the text-line origin, not the previous glyph end');
+  assert.equal(query('Verwaltung', ['--kind', 'Page']).total, 1, 'BT/ET boundaries do not split adjacent text runs');
+  assert.match(page.text, /Nord\nSued/, 'graphics-state transforms distinguish lines with identical local coordinates');
+  const grouped = query('Schulweg', ['--group', 'paper', '--sort', 'date-desc']);
+  assert.equal(grouped.group, 'paper');
+  assert.equal(grouped.total, 2, 'shared files produce one group for each related Paper');
+  assert.deepEqual(grouped.hits.map(hit => [hit.relatedPaper, hit.matchCount]),
+    [[id('papers/2'), 1], [id('papers/1'), 2]], 'matching metadata/pages are counted once per Paper');
+  for (const order of ['relevance', 'date-desc', 'date-asc']) {
+    const all = query('Schulweg', ['--group', 'paper', '--sort', order]).hits;
+    for (const offset of [0, 1, 2]) {
+      const part = query('Schulweg', ['--group', 'paper', '--sort', order, '--limit', '1', '--offset', String(offset)]);
+      assert.equal(part.total, 2);
+      assert.deepEqual(part.hits, all.slice(offset, offset + 1), 'grouping precedes ranking and pagination');
+    }
+  }
+  assert.equal(query('Schulweg', ['--group', 'paper', '--year', '2023', '--paper-type', 'Antwort']).total, 0,
+    'group expansion preserves the same-Paper filter invariant');
+  assert.equal(query('Schulweg', ['--group', 'paper', '--year', '2024', '--paper-type', 'Antwort']).total, 1);
+  assert.equal(query('NOT nonexistenttoken', ['--group', 'paper', '--kind', 'Person']).total, 1100,
+    'objects without Paper relations are retained separately');
   const filters = ['--kind', 'Page', '--year', '2023', '--paper-type', 'Antrag', '--organization', 'alpha'];
   assert.equal(query('Schulweg', filters).total, 1);
   assert.equal(query('Schulweg', ['--kind', 'Page', '--year', '2024', '--paper-type', 'Antwort']).total, 1);

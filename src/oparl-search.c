@@ -31,6 +31,7 @@ int main(int argc, char **argv) {
                 "  --limit N             Top results, 1..100 (default: 20)\n"
                 "  --offset N            Skip N ranked hits (default: 0)\n"
                 "  --sort ORDER          relevance (default), date-desc or date-asc\n"
+                "  --group MODE          record (default) or paper: one hit per related Paper\n"
                 "  --json                Structured results with sources and page numbers\n"
                 "  --batch               One query per stdin line; keep the index loaded\n"
                 "  --benchmark N         Warm query repetitions, 20..100000\n"
@@ -53,11 +54,16 @@ int main(int argc, char **argv) {
         if (rt_strcmp(flag, "--year") == 0 || rt_strcmp(flag, "--paper-type") == 0 ||
             rt_strcmp(flag, "--organization") == 0 || rt_strcmp(flag, "--kind") == 0 ||
             rt_strcmp(flag, "--limit") == 0 || rt_strcmp(flag, "--offset") == 0 ||
-            rt_strcmp(flag, "--sort") == 0) filter_set = 1;
+            rt_strcmp(flag, "--sort") == 0 || rt_strcmp(flag, "--group") == 0) filter_set = 1;
         if (rt_strcmp(flag, "--index") == 0) path = value;
         else if (rt_strcmp(flag, "--paper-type") == 0) filter.paper_type = value;
         else if (rt_strcmp(flag, "--organization") == 0) filter.organization = value;
         else if (rt_strcmp(flag, "--kind") == 0) filter.kind = value;
+        else if (rt_strcmp(flag, "--group") == 0) {
+            if (rt_strcmp(value, "record") == 0) filter.group = SEARCH_RECORDS;
+            else if (rt_strcmp(value, "paper") == 0) filter.group = SEARCH_PAPERS;
+            else { search_error("expected record or paper", flag); return 1; }
+        }
         else if (rt_strcmp(flag, "--sort") == 0) {
             if (rt_strcmp(value, "relevance") == 0) filter.sort = SEARCH_RELEVANCE;
             else if (rt_strcmp(value, "date-desc") == 0) filter.sort = SEARCH_DATE_DESC;

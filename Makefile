@@ -73,7 +73,7 @@ endif
 OBJECTS := $(addprefix $(BUILD)/obj/,$(addsuffix .o,$(basename $(COMMON) $(PLATFORM) $(START))))
 APP_OBJECTS := $(addprefix $(BUILD)/obj/,$(APP:.c=.o))
 INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o json.o pdf-text.o)
-SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-web.o json.o)
+SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-web.o search-mcp.o json.o)
 
 .DEFAULT_GOAL := all
 .PHONY: all test check-deps benchmark
@@ -88,7 +88,7 @@ $(INDEX_PROGRAM): $(INDEX_OBJECTS) $(INDEX_COMMON) $(OBJECTS) $(LINK_DEPS)
 $(SEARCH_PROGRAM): $(SEARCH_OBJECTS) $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(SEARCH_OBJECTS) $(OBJECTS))
 
-$(BUILD)/obj/src/search.o $(BUILD)/obj/src/oparl-index.o $(BUILD)/obj/src/oparl-search.o $(BUILD)/obj/src/search-web.o $(BUILD)/obj/src/pdf-text.o: CFLAGS += -O3
+$(BUILD)/obj/src/search.o $(BUILD)/obj/src/oparl-index.o $(BUILD)/obj/src/oparl-search.o $(BUILD)/obj/src/search-web.o $(BUILD)/obj/src/search-mcp.o $(BUILD)/obj/src/pdf-text.o: CFLAGS += -O3
 $(BUILD)/test-json$(EXE): $(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS))
 

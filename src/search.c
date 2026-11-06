@@ -1,4 +1,5 @@
 #include "search.h"
+#include "pdf-text.h"
 #include "json.h"
 #include "runtime.h"
 #include "hash_util.h"
@@ -774,7 +775,8 @@ static int hit_before(const SearchIndex *index, SearchSort sort, const SearchHit
         order = rt_strncmp(x, y, 10);
         if (order) return sort == SEARCH_DATE_ASC ? order < 0 : order > 0;
     }
-    return a->score > b->score || (a->score == b->score && a->record < b->record);
+    return a->score > b->score || (a->score == b->score &&
+        (a->record < b->record || (a->record == b->record && a->paper < b->paper)));
 }
 
 /* Keep the worst retained hit at the root, so pagination needs only offset + limit hits. */
@@ -789,23 +791,44 @@ static void sift_hits(const SearchIndex *index, SearchSort sort, SearchHit *hits
     hits[root] = value;
 }
 
+static void retain_hit(const SearchIndex *index, SearchSort sort, SearchHit *hits,
+                       size_t *retained, size_t keep, SearchHit hit) {
+    if (*retained < keep) {
+        size_t p = (*retained)++;
+        while (p && hit_before(index, sort, &hits[(p - 1) / 2], &hit)) {
+            hits[p] = hits[(p - 1) / 2]; p = (p - 1) / 2;
+        }
+        hits[p] = hit;
+    } else if (keep && hit_before(index, sort, &hit, &hits[0])) {
+        hits[0] = hit; sift_hits(index, sort, hits, *retained, 0);
+    }
+}
+
+static void group_hit(const SearchIndex *index, SearchHit *groups, uint32_t group, SearchHit hit) {
+    uint32_t matches = groups[group].matches + 1;
+    if (!groups[group].matches || hit_before(index, SEARCH_RELEVANCE, &hit, &groups[group]))
+        groups[group] = hit;
+    groups[group].matches = matches;
+}
+
 int search_query(const SearchIndex *index, SearchWorkspace *workspace, const char *text, const SearchFilter *filter,
                   SearchResult *result, const char **error) {
     Parser *parser;
     Query query;
     unsigned char positive[QUERY_TERMS];
     uint64_t *atoms;
-    SearchHit *hits;
+    SearchHit *hits, *groups;
     size_t i, count = index->record_count, blocks = (count + 63) / 64;
     size_t base_bytes = (size_t)aligned(count * (3 * sizeof(uint32_t) + 1)), capacity, needed;
-    size_t retained = 0, keep = 0, hit_capacity;
+    size_t retained = 0, keep = 0, hit_capacity, group_capacity;
     unsigned int limit = filter->limit ? filter->limit : 20;
     int root;
     rt_memset(result, 0, sizeof(*result));
     *error = "cannot allocate query workspace";
-    if (limit > 100 || filter->sort > SEARCH_DATE_ASC || rt_strlen(text) > 16384) {
-        *error = "query/limit/sort exceeds supported bounds"; return -1;
+    if (limit > 100 || filter->sort > SEARCH_DATE_ASC || filter->group > SEARCH_PAPERS || rt_strlen(text) > 16384) {
+        *error = "query/limit/sort/group exceeds supported bounds"; return -1;
     }
+    result->group = filter->group;
     if (!workspace->parser) workspace->parser = rt_malloc(sizeof(*parser));
     parser = (Parser *)workspace->parser;
     if (parser == 0) return SEARCH_QUERY_RESOURCE;
@@ -823,16 +846,20 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
     }
     hit_capacity = workspace->record_count == count && workspace->hit_capacity >= keep ?
                    workspace->hit_capacity : keep;
-    needed = base_bytes + (capacity + 1) * blocks * sizeof(uint64_t) + hit_capacity * sizeof(SearchHit);
+    group_capacity = workspace->record_count == count ? workspace->group_capacity : 0;
+    if (filter->group == SEARCH_PAPERS) group_capacity = count;
+    needed = base_bytes + (capacity + 1) * blocks * sizeof(uint64_t) +
+             (hit_capacity + group_capacity) * sizeof(SearchHit);
     if (index->memory_bytes + needed + sizeof(*parser) > SEARCH_RAM_LIMIT) {
         *error = "index plus query workspace exceeds the 4 GiB search RAM budget"; return SEARCH_QUERY_RESOURCE;
     }
     if (!workspace->allocation || workspace->record_count != count || workspace->atom_capacity != capacity ||
-        workspace->hit_capacity != hit_capacity) {
+        workspace->hit_capacity != hit_capacity || workspace->group_capacity != group_capacity) {
         rt_free(workspace->allocation);
         workspace->allocation = rt_malloc(needed ? needed : 1);
         if (!workspace->allocation) return SEARCH_QUERY_RESOURCE;
         workspace->record_count = count; workspace->atom_capacity = capacity; workspace->hit_capacity = hit_capacity;
+        workspace->group_capacity = group_capacity;
     }
     query.index = index; query.filter = filter;
     query.scores = (float *)workspace->allocation;
@@ -843,6 +870,8 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
     atoms = (uint64_t *)(void *)((unsigned char *)workspace->allocation + base_bytes);
     query.seen = atoms + capacity * blocks;
     hits = (SearchHit *)(void *)(query.seen + blocks);
+    groups = hits + hit_capacity;
+    if (filter->group == SEARCH_PAPERS) rt_memset(groups, 0, count * sizeof(*groups));
     rt_memset(query.states, 0, count);
     rt_memset(atoms, 0, parser->atom_count * blocks * sizeof(uint64_t));
     rt_memset(query.seen, 0, blocks * sizeof(uint64_t));
@@ -860,20 +889,32 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
             SearchHit hit;
             candidates &= candidates - 1;
             if (!record_eligible(&query, record)) continue;
-            result->total++;
             hit.record = record; hit.byte = seen && query.bytes[record] != NONE ? query.bytes[record] : 0;
             hit.paper = query.owners[source == NONE ? record : source];
+            hit.matches = 1;
             hit.score = seen ? query.scores[record] : 0;
-            if (retained < keep) {
-                size_t p = retained++;
-                while (p && hit_before(index, filter->sort, &hits[(p - 1) / 2], &hit)) {
-                    hits[p] = hits[(p - 1) / 2]; p = (p - 1) / 2;
+            if (filter->group == SEARCH_PAPERS) {
+                size_t j;
+                int owned = 0;
+                if (source == NONE) source = record;
+                if (index->links[source].paper) {
+                    hit.paper = source; group_hit(index, groups, source, hit); continue;
                 }
-                hits[p] = hit;
-            } else if (keep && hit_before(index, filter->sort, &hit, &hits[0])) {
-                hits[0] = hit; sift_hits(index, filter->sort, hits, retained, 0);
+                for (j = index->links[source].start; j < (size_t)index->links[source].start + index->links[source].count; j++) {
+                    uint32_t paper = index->related_papers[j];
+                    if (!paper_matches(&query, paper)) continue;
+                    hit.paper = paper; group_hit(index, groups, paper, hit); owned = 1;
+                }
+                if (!owned) { hit.paper = NONE; group_hit(index, groups, source, hit); }
+            } else {
+                result->total++;
+                retain_hit(index, filter->sort, hits, &retained, keep, hit);
             }
         }
+    }
+    if (filter->group == SEARCH_PAPERS) for (i = 0; i < count; i++) if (groups[i].matches) {
+        result->total++;
+        retain_hit(index, filter->sort, hits, &retained, keep, groups[i]);
     }
     for (i = retained; i > 1; i--) {
         SearchHit hit = hits[0]; hits[0] = hits[i - 1]; hits[i - 1] = hit;
@@ -884,26 +925,35 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
     return 0;
 }
 
-static int out_text(ToolOutputBuffer *out, const char *text) {
-    return tool_output_buffer_write_cstr(out, text);
+typedef struct { ToolOutputBuffer stream; ToolByteBuffer *memory; } SearchOutput;
+
+static int out_write(SearchOutput *out, const char *text, size_t length) {
+    if (!out->memory) return tool_output_buffer_write(&out->stream, text, length);
+    if (out->memory->size > 16U * 1024U * 1024U || length > 16U * 1024U * 1024U - out->memory->size)
+        return -1;
+    return tool_byte_buffer_append(out->memory, text, length);
 }
 
-static int out_char(ToolOutputBuffer *out, char ch) {
-    return tool_output_buffer_write_char(out, ch);
+static int out_text(SearchOutput *out, const char *text) {
+    return out_write(out, text, rt_strlen(text));
 }
 
-static int out_uint(ToolOutputBuffer *out, unsigned long long value) {
+static int out_char(SearchOutput *out, char ch) {
+    return out_write(out, &ch, 1);
+}
+
+static int out_uint(SearchOutput *out, unsigned long long value) {
     char text[32];
     rt_unsigned_to_string(value, text, sizeof(text));
     return out_text(out, text);
 }
 
-static int out_line(ToolOutputBuffer *out, const char *text) {
+static int out_line(SearchOutput *out, const char *text) {
     return out_text(out, text) != 0 || out_char(out, '\n') != 0 ? -1 : 0;
 }
 
 /* newos' fd-based JSON writer emits each byte separately; buffer the same escaping. */
-static int out_string(ToolOutputBuffer *out, const char *text) {
+static int out_string(SearchOutput *out, const char *text) {
     static const char hex[] = "0123456789abcdef";
     const char *p = text;
     if (out_char(out, '"') != 0) return -1;
@@ -913,7 +963,7 @@ static int out_string(ToolOutputBuffer *out, const char *text) {
         char escape[6] = {'\\', 'u', '0', '0', '0', '0'};
         size_t length = 6;
         while (*p && (unsigned char)*p >= 32 && *p != '"' && *p != '\\') p++;
-        if (tool_output_buffer_write(out, start, (size_t)(p - start)) != 0) return -1;
+        if (out_write(out, start, (size_t)(p - start)) != 0) return -1;
         if (!*p) break;
         ch = (unsigned char)*p++;
         if (ch == '"' || ch == '\\' || ch == '\n' || ch == '\r' || ch == '\t') {
@@ -922,28 +972,28 @@ static int out_string(ToolOutputBuffer *out, const char *text) {
         } else {
             escape[4] = hex[ch >> 4]; escape[5] = hex[ch & 15];
         }
-        if (tool_output_buffer_write(out, escape, length) != 0) return -1;
+        if (out_write(out, escape, length) != 0) return -1;
     }
     return out_char(out, '"');
 }
 
-static int out_key(ToolOutputBuffer *out, const char *name) {
+static int out_key(SearchOutput *out, const char *name) {
     return out_text(out, ",\"") != 0 || out_text(out, name) != 0 || out_text(out, "\":") != 0 ? -1 : 0;
 }
 
-static int out_field_string(ToolOutputBuffer *out, const char *name, const char *value) {
+static int out_field_string(SearchOutput *out, const char *name, const char *value) {
     return out_key(out, name) != 0 || out_string(out, value) != 0 ? -1 : 0;
 }
 
-static int out_field_uint(ToolOutputBuffer *out, const char *name, unsigned long long value) {
+static int out_field_uint(SearchOutput *out, const char *name, unsigned long long value) {
     return out_key(out, name) != 0 || out_uint(out, value) != 0 ? -1 : 0;
 }
 
-static int out_field_bool(ToolOutputBuffer *out, const char *name, int value) {
+static int out_field_bool(SearchOutput *out, const char *name, int value) {
     return out_key(out, name) != 0 || out_text(out, value ? "true" : "false") != 0 ? -1 : 0;
 }
 
-static int out_document_url(ToolOutputBuffer *out, const SearchIndex *index, const SearchRecord *record) {
+static int out_document_url(SearchOutput *out, const SearchIndex *index, const SearchRecord *record) {
     Json json;
     const JsonToken *token;
     size_t value;
@@ -960,16 +1010,17 @@ static int out_document_url(ToolOutputBuffer *out, const SearchIndex *index, con
         if (token->kind != JSON_STRING) status = search_error("document URL is not a string", index->strings + record->id);
         else if (token->end - token->start > 2)
             status = out_key(out, "documentUrl") != 0 ||
-                tool_output_buffer_write(out, json.text + token->start, token->end - token->start) != 0 ? -1 : 0;
+                out_write(out, json.text + token->start, token->end - token->start) != 0 ? -1 : 0;
     }
     json_free(&json);
     return status;
 }
 
-static int print_results(ToolOutputBuffer *out, const SearchIndex *index, const SearchResult *result, int json) {
+static int print_results(SearchOutput *out, const SearchIndex *index, const SearchResult *result, int json) {
     unsigned int i;
     if (json && (out_text(out, "{\"total\":") != 0 || out_uint(out, result->total) != 0 ||
         out_field_bool(out, "incomplete", index->incomplete != 0) != 0 ||
+        out_field_string(out, "group", result->group == SEARCH_PAPERS ? "paper" : "record") != 0 ||
         out_text(out, ",\"hits\":[") != 0)) return -1;
     for (i = 0; i < result->count; i++) {
         const SearchHit *hit = &result->hits[i];
@@ -982,8 +1033,15 @@ static int print_results(ToolOutputBuffer *out, const SearchIndex *index, const 
         while (end > start && ((unsigned char)index->strings[r->text + end] & 0xc0) == 0x80) end--;
         memcpy(snippet, index->strings + r->text + start, end - start); snippet[end-start] = '\0';
         {
-            size_t j;
-            for (j = 0; j < end - start; j++) if ((unsigned char)snippet[j] < 32) snippet[j] = ' ';
+            size_t j, used = 0;
+            int space = 0;
+            for (j = 0; j < end - start; j++) {
+                unsigned char ch = (unsigned char)snippet[j];
+                if (ch <= 32) { space = used != 0; continue; }
+                if (space) snippet[used++] = ' ';
+                snippet[used++] = (char)ch; space = 0;
+            }
+            snippet[used] = '\0';
         }
         if (json) {
             if ((i && out_text(out, ",") != 0) ||
@@ -997,6 +1055,7 @@ static int print_results(ToolOutputBuffer *out, const SearchIndex *index, const 
                 out_field_string(out, "source", index->strings + r->source) != 0 ||
                 out_field_uint(out, "page", r->page) != 0 ||
                 out_field_uint(out, "warnings", r->warnings) != 0 ||
+                out_field_uint(out, "matchCount", hit->matches) != 0 ||
                 out_field_string(out, "snippet", snippet) != 0 ||
                 out_document_url(out, index, r) != 0) return -1;
             if (hit->paper != NONE && out_field_string(out, "relatedPaper",
@@ -1033,7 +1092,7 @@ const SearchRecord *search_find(const SearchIndex *index, const char *id, unsign
     return 0;
 }
 
-static int print_record(ToolOutputBuffer *out, const SearchIndex *index, const SearchRecord *r, int json) {
+static int print_record(SearchOutput *out, const SearchIndex *index, const SearchRecord *r, int json) {
     const char *body = index->strings + r->text + r->body_start;
     if (!json) return out_line(out, r->page ? body : index->strings + r->payload);
     if (out_text(out, "{\"id\":") != 0 || out_string(out, index->strings + r->id) != 0 ||
@@ -1049,15 +1108,51 @@ static int print_record(ToolOutputBuffer *out, const SearchIndex *index, const S
 }
 
 int search_print(int fd, const SearchIndex *index, const SearchResult *result, int json) {
-    ToolOutputBuffer out;
-    tool_output_buffer_init(&out, fd);
-    return print_results(&out, index, result, json) != 0 || tool_output_buffer_flush(&out) != 0 ? -1 : 0;
+    SearchOutput out;
+    out.memory = 0; tool_output_buffer_init(&out.stream, fd);
+    return print_results(&out, index, result, json) != 0 || tool_output_buffer_flush(&out.stream) != 0 ? -1 : 0;
 }
 
 int search_show(int fd, const SearchIndex *index, const SearchRecord *record, int json) {
-    ToolOutputBuffer out;
-    tool_output_buffer_init(&out, fd);
-    return print_record(&out, index, record, json) != 0 || tool_output_buffer_flush(&out) != 0 ? -1 : 0;
+    SearchOutput out;
+    out.memory = 0; tool_output_buffer_init(&out.stream, fd);
+    return print_record(&out, index, record, json) != 0 || tool_output_buffer_flush(&out.stream) != 0 ? -1 : 0;
+}
+
+int search_results_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchResult *result) {
+    SearchOutput out;
+    out.memory = buffer;
+    return print_results(&out, index, result, 1);
+}
+
+int search_json_quote(ToolByteBuffer *buffer, const char *text) {
+    SearchOutput out;
+    out.memory = buffer;
+    return out_string(&out, text);
+}
+
+int search_record_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchRecord *record) {
+    SearchOutput out;
+    out.memory = buffer;
+    return print_record(&out, index, record, 1);
+}
+
+int search_status_json(ToolByteBuffer *buffer, const SearchIndex *index) {
+    SearchOutput out;
+    size_t i, pages = 0, warnings = 0, ocr = 0;
+    out.memory = buffer;
+    for (i = 0; i < index->record_count; i++) if (index->records[i].page) {
+        pages++;
+        if (index->records[i].warnings) warnings++;
+        if (index->records[i].warnings & PDF_TEXT_NEEDS_OCR) ocr++;
+    }
+    return out_text(&out, "{\"records\":") != 0 || out_uint(&out, index->record_count) != 0 ||
+        out_field_uint(&out, "terms", index->term_count) != 0 ||
+        out_field_uint(&out, "indexBytes", index->file_bytes) != 0 ||
+        out_field_uint(&out, "indexMemoryBytes", index->memory_bytes) != 0 ||
+        out_field_uint(&out, "pages", pages) != 0 || out_field_uint(&out, "warningPages", warnings) != 0 ||
+        out_field_uint(&out, "ocrPages", ocr) != 0 || out_field_bool(&out, "incomplete", index->incomplete != 0) != 0 ||
+        out_text(&out, "}\n") != 0 ? -1 : 0;
 }
 
 typedef struct {
@@ -1197,27 +1292,37 @@ fail:
     return -1;
 }
 
-int search_case_print(int fd, const SearchIndex *index, const SearchCase *context) {
-    ToolOutputBuffer out;
+static int print_case(SearchOutput *out, const SearchIndex *index, const SearchCase *context) {
     size_t i;
     const CaseObject *root = (const CaseObject *)tool_array_get_const(&context->objects, 0);
-    tool_output_buffer_init(&out, fd);
-    if (out_text(&out, "{\"id\":") != 0 || out_string(&out, root->id) != 0 ||
-        out_field_bool(&out, "incomplete", context->incomplete) != 0 || out_text(&out, ",\"objects\":[") != 0) return -1;
+    if (out_text(out, "{\"id\":") != 0 || out_string(out, root->id) != 0 ||
+        out_field_bool(out, "incomplete", context->incomplete) != 0 || out_text(out, ",\"objects\":[") != 0) return -1;
     for (i = 0; i < context->objects.count; i++) {
         const CaseObject *object = (const CaseObject *)tool_array_get_const(&context->objects, i);
         const SearchRecord *record = object->record;
-        if ((i && out_char(&out, ',') != 0) || out_text(&out, "{\"id\":") != 0 ||
-            out_string(&out, object->id) != 0 ||
-            out_field_string(&out, "kind", object->kind) != 0 ||
-            out_field_bool(&out, "indexed", record != 0) != 0 ||
-            out_field_string(&out, "source", record ? index->strings + record->source : "") != 0 ||
-            out_field_uint(&out, "warnings", record ? record->warnings : 0) != 0 ||
-            out_key(&out, "metadata") != 0) return -1;
+        if ((i && out_char(out, ',') != 0) || out_text(out, "{\"id\":") != 0 ||
+            out_string(out, object->id) != 0 ||
+            out_field_string(out, "kind", object->kind) != 0 ||
+            out_field_bool(out, "indexed", record != 0) != 0 ||
+            out_field_string(out, "source", record ? index->strings + record->source : "") != 0 ||
+            out_field_uint(out, "warnings", record ? record->warnings : 0) != 0 ||
+            out_key(out, "metadata") != 0) return -1;
         if (object->json.text) {
-            if (tool_output_buffer_write(&out, object->json.text, object->json.length) != 0) return -1;
-        } else if (out_text(&out, "null") != 0) return -1;
-        if (out_char(&out, '}') != 0) return -1;
+            if (out_write(out, object->json.text, object->json.length) != 0) return -1;
+        } else if (out_text(out, "null") != 0) return -1;
+        if (out_char(out, '}') != 0) return -1;
     }
-    return out_text(&out, "]}\n") != 0 || tool_output_buffer_flush(&out) != 0 ? -1 : 0;
+    return out_text(out, "]}\n");
+}
+
+int search_case_print(int fd, const SearchIndex *index, const SearchCase *context) {
+    SearchOutput out;
+    out.memory = 0; tool_output_buffer_init(&out.stream, fd);
+    return print_case(&out, index, context) != 0 || tool_output_buffer_flush(&out.stream) != 0 ? -1 : 0;
+}
+
+int search_case_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchCase *context) {
+    SearchOutput out;
+    out.memory = buffer;
+    return print_case(&out, index, context);
 }

@@ -40,21 +40,24 @@ typedef struct {
 /* Zero-initialize one workspace per concurrent caller; the index stays immutable. */
 typedef struct {
     void *parser, *allocation;
-    size_t record_count, atom_capacity, hit_capacity;
+    size_t record_count, atom_capacity, hit_capacity, group_capacity;
 } SearchWorkspace;
 
 typedef enum { SEARCH_RELEVANCE, SEARCH_DATE_DESC, SEARCH_DATE_ASC } SearchSort;
+typedef enum { SEARCH_RECORDS, SEARCH_PAPERS } SearchGroup;
 typedef struct {
     unsigned int year, limit, offset;
     SearchSort sort;
+    SearchGroup group;
     const char *paper_type, *organization, *kind;
 } SearchFilter;
 
-typedef struct { uint32_t record, byte, paper; float score; } SearchHit;
+typedef struct { uint32_t record, byte, paper, matches; float score; } SearchHit;
 typedef struct {
     SearchHit hits[100];
     unsigned int count;
     size_t total;
+    SearchGroup group;
 } SearchResult;
 
 typedef struct { ToolArray objects; int incomplete; } SearchCase;
@@ -79,6 +82,11 @@ int search_show(int fd, const SearchIndex *index, const SearchRecord *record, in
 int search_case_open(SearchCase *context, const SearchIndex *index, const SearchRecord *paper, const char **error);
 void search_case_close(SearchCase *context);
 int search_case_print(int fd, const SearchIndex *index, const SearchCase *context);
+int search_results_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchResult *result);
+int search_record_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchRecord *record);
+int search_case_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchCase *context);
+int search_status_json(ToolByteBuffer *buffer, const SearchIndex *index);
+int search_json_quote(ToolByteBuffer *buffer, const char *text);
 int search_serve(const SearchIndex *index, unsigned int port);
 int search_error(const char *message, const char *detail);
 

@@ -191,6 +191,22 @@ static int resolve(const Extractor *extractor, const Token *value, Dictionary *d
     return 1;
 }
 
+static int array_value(const Extractor *extractor, Token *value) {
+    unsigned int depth;
+    for (depth = 0; depth < 8; depth++) {
+        unsigned int n, g;
+        const PdfObjectSpan *span;
+        Dictionary body;
+        size_t p = 0;
+        if (value->kind == 2) return 1;
+        if (!reference(value, &n, &g) || !(span = object(extractor, n, g))) return 0;
+        body = dictionary(extractor, span);
+        value->data = body.data; value->size = body.size;
+        if (token_next(value, &p, 0) != 1) return 0;
+    }
+    return 0;
+}
+
 static int code(const Token *token, unsigned int *value, unsigned int *length) {
     ToolByteBuffer raw;
     size_t i;
@@ -374,7 +390,7 @@ static Font *font_get(Extractor *extractor, Dictionary dict) {
             }
         }
     }
-    if (member(dict, "/Widths", &value) && value.kind == 2) {
+    if (member(dict, "/Widths", &value) && array_value(extractor, &value)) {
         size_t p = value.start + 1, q;
         unsigned long long index = 0, width;
         Token item = value, first;
@@ -489,13 +505,49 @@ static double numeric(const Token *token) {
     return result * sign;
 }
 
-typedef struct { size_t font; double size, spacing, word_spacing, scale; } TextStyle;
+typedef struct {
+    size_t font;
+    double size, spacing, word_spacing, scale, leading, ctm[6];
+} TextStyle;
 typedef struct {
     TextStyle style, saved[64];
-    double x, y, a;
+    double x, y, a, b, c, d, line_x, line_y, end_x, end_y;
     size_t saved_count;
     int positioned;
 } TextState;
+
+static void transform(TextStyle *style, const double matrix[6]) {
+    double *m = style->ctm, a = m[0], b = m[1], c = m[2], d = m[3];
+    m[0] = a * matrix[0] + c * matrix[1]; m[1] = b * matrix[0] + d * matrix[1];
+    m[2] = a * matrix[2] + c * matrix[3]; m[3] = b * matrix[2] + d * matrix[3];
+    m[4] += a * matrix[4] + c * matrix[5]; m[5] += b * matrix[4] + d * matrix[5];
+}
+
+static void text_line(TextState *state, double x, double y) {
+    state->line_x += state->a * x + state->c * y;
+    state->line_y += state->b * x + state->d * y;
+    state->x = state->line_x; state->y = state->line_y;
+}
+
+static int text_start(const TextState *state, ToolByteBuffer *text) {
+    const double *m = state->style.ctm;
+    double x = m[0] * state->x + m[2] * state->y + m[4];
+    double y = m[1] * state->x + m[3] * state->y + m[5];
+    double scale = (m[0] * state->a + m[2] * state->b) * state->style.scale;
+    if (scale < 0) scale = -scale;
+    if (!state->positioned) return 0;
+    if (y > state->end_y + .5 || y < state->end_y - .5) return separator(text, '\n');
+    return x > state->end_x + state->style.size * scale * .15 ? separator(text, ' ') : 0;
+}
+
+static void text_advance(TextState *state, double advance) {
+    const double *m = state->style.ctm;
+    advance *= state->style.scale;
+    state->x += advance * state->a; state->y += advance * state->b;
+    state->end_x = m[0] * state->x + m[2] * state->y + m[4];
+    state->end_y = m[1] * state->x + m[3] * state->y + m[5];
+    state->positioned = 1;
+}
 
 static int content(Extractor *extractor, const unsigned char *bytes, size_t size,
                     Dictionary resources, ToolByteBuffer *text, unsigned int depth, TextState *state) {
@@ -516,10 +568,19 @@ static int content(Extractor *extractor, const unsigned char *bytes, size_t size
             state->saved[state->saved_count++] = state->style;
         } else if (equals(&token, "Q")) {
             if (state->saved_count) state->style = state->saved[--state->saved_count];
-        } else if (equals(&token, "BT")) state->positioned = 0;
+        } else if (equals(&token, "cm") && count == 6) {
+            double matrix[6];
+            size_t i;
+            for (i = 0; i < 6; i++) matrix[i] = numeric(&operands[i]);
+            transform(&state->style, matrix);
+        } else if (equals(&token, "BT")) {
+            state->x = state->y = state->line_x = state->line_y = 0;
+            state->a = state->d = 1; state->b = state->c = 0;
+        }
         else if (equals(&token, "Tc") && count == 1) state->style.spacing = numeric(operands);
         else if (equals(&token, "Tw") && count == 1) state->style.word_spacing = numeric(operands);
         else if (equals(&token, "Tz") && count == 1) state->style.scale = numeric(operands) / 100;
+        else if (equals(&token, "TL") && count == 1) state->style.leading = numeric(operands);
         else if (equals(&token, "Tf") && count >= 2) {
             Dictionary dict;
             if (named_resource(extractor, resources, "/Font", &operands[count - 2], &dict)) {
@@ -535,41 +596,49 @@ static int content(Extractor *extractor, const unsigned char *bytes, size_t size
             Font *font = state->style.font < extractor->fonts.count ?
                          (Font *)tool_array_get(&extractor->fonts, state->style.font) : 0;
             double advance = 0;
-            if (!equals(&token, "Tj") && separator(text, '\n') != 0) return -1;
+            if (!equals(&token, "Tj")) {
+                if (equals(&token, "\"") && count == 3) {
+                    state->style.word_spacing = numeric(operands);
+                    state->style.spacing = numeric(&operands[1]);
+                }
+                text_line(state, 0, -state->style.leading);
+                if (separator(text, '\n') != 0) return -1;
+            }
+            if (text_start(state, text) != 0) return -1;
             if (operands[count - 1].kind != 1 || show(extractor, font, &operands[count - 1], text,
                 state->style.size, state->style.spacing, state->style.word_spacing, &advance) != 0)
                 return -1;
-            state->x += advance * state->a * state->style.scale;
+            text_advance(state, advance);
         } else if (equals(&token, "TJ") && count && operands[count - 1].kind == 2) {
             Token item = operands[count - 1];
             size_t q = item.start + 1, end = item.end - 1;
             Font *font = state->style.font < extractor->fonts.count ?
                          (Font *)tool_array_get(&extractor->fonts, state->style.font) : 0;
+            if (text_start(state, text) != 0) return -1;
             while (q < end && token_next(&item, &q, 0) == 1 && item.start < end) {
                 if (item.kind == 1) {
                     double advance = 0;
                     if (show(extractor, font, &item, text, state->style.size,
                         state->style.spacing, state->style.word_spacing, &advance) != 0) return -1;
-                    state->x += advance * state->a * state->style.scale;
+                    text_advance(state, advance);
                 } else {
                     double adjustment = numeric(&item);
                     if (adjustment < -120 && separator(text, ' ') != 0) return -1;
-                    state->x -= adjustment / 1000 * state->style.size * state->style.scale * state->a;
+                    text_advance(state, -adjustment / 1000 * state->style.size);
                 }
             }
         } else if (equals(&token, "Tm") && count == 6) {
-            double x = numeric(&operands[4]), y = numeric(&operands[5]);
-            if (state->positioned && (y > state->y + 0.5 || y < state->y - 0.5) && separator(text, '\n') != 0)
-                return -1;
-            if (state->positioned && x > state->x + state->style.size * .15 && separator(text, ' ') != 0)
-                return -1;
-            state->x = x; state->y = y; state->a = numeric(operands); state->positioned = 1;
-        } else if (equals(&token, "T*") || equals(&token, "ET") ||
-                   ((equals(&token, "Td") || equals(&token, "TD")) && count == 2 && numeric(&operands[1]) != 0)) {
+            state->a = numeric(operands); state->b = numeric(&operands[1]);
+            state->c = numeric(&operands[2]); state->d = numeric(&operands[3]);
+            state->x = state->line_x = numeric(&operands[4]);
+            state->y = state->line_y = numeric(&operands[5]);
+        } else if (equals(&token, "T*")) {
+            text_line(state, 0, -state->style.leading);
             if (separator(text, '\n') != 0) return -1;
-        } else if ((equals(&token, "Td") || equals(&token, "TD")) &&
-                   count == 2 && numeric(operands) != 0) {
-            if (separator(text, ' ') != 0) return -1;
+        } else if ((equals(&token, "Td") || equals(&token, "TD")) && count == 2) {
+            double x = numeric(operands), y = numeric(&operands[1]);
+            if (equals(&token, "TD")) state->style.leading = -y;
+            text_line(state, x, y);
         } else if (equals(&token, "Do") && count) {
             Dictionary dict;
             Token subtype, value;
@@ -590,6 +659,8 @@ static int content(Extractor *extractor, const unsigned char *bytes, size_t size
                         if (pdf_object_stream_data(&extractor->document, span, 1, &decoded) != 0 ||
                             content(extractor, decoded.data, decoded.size, nested, text, depth + 1, &nested_state) != 0)
                             extractor->warnings |= PDF_TEXT_UNSUPPORTED_STREAM;
+                        state->end_x = nested_state.end_x; state->end_y = nested_state.end_y;
+                        state->positioned = nested_state.positioned;
                         break;
                     }
                     pdf_buffer_free(&decoded);
@@ -732,6 +803,48 @@ static int page_marks_only(const unsigned char *text, size_t length) {
     return 1;
 }
 
+static int latin_letter(unsigned int cp) {
+    return (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
+           (cp >= 0xc0 && cp <= 0xff && cp != 0xd7 && cp != 0xf7);
+}
+
+static int join_line_hyphens(ToolByteBuffer *text) {
+    size_t read = 0, used = 0;
+    unsigned int previous = 0;
+    while (read < text->size) {
+        size_t next = read;
+        unsigned int cp;
+        if (rt_utf8_decode((const char *)text->data, text->size, &next, &cp) != 0) return -1;
+        if (cp == 0xad) { read = next; continue; }
+        if (cp == '-' && latin_letter(previous)) {
+            size_t p = next, end;
+            int newline = 0, suspended = 0;
+            unsigned int following = 0;
+            static const char *connectors[] = {"und", "oder", "bzw", "sowie"};
+            size_t i;
+            while (p < text->size && rt_is_space((char)text->data[p])) {
+                if (text->data[p] == '\r' || text->data[p] == '\n') newline = 1;
+                p++;
+            }
+            end = p;
+            if (newline && rt_utf8_decode((const char *)text->data, text->size, &end, &following) == 0 &&
+                ((following >= 'a' && following <= 'z') ||
+                 (following >= 0xe0 && following <= 0xff && following != 0xf7))) {
+                for (i = 0; i < sizeof(connectors) / sizeof(*connectors); i++) {
+                    size_t n = rt_strlen(connectors[i]);
+                    if (text->size - p >= n && !memcmp(text->data + p, connectors[i], n) &&
+                        (text->size == p + n || !latin_letter(text->data[p + n]))) suspended = 1;
+                }
+                if (!suspended) { read = p; continue; }
+            }
+        }
+        memmove(text->data + used, text->data + read, next - read);
+        used += next - read; read = next; previous = cp;
+    }
+    text->size = used;
+    return 0;
+}
+
 int pdf_text_extract(const unsigned char *bytes, size_t length, PdfTextPage callback,
                      void *user, const char **error) {
     Extractor extractor;
@@ -763,7 +876,8 @@ int pdf_text_extract(const unsigned char *bytes, size_t length, PdfTextPage call
         Token contents;
         TextState state;
         rt_memset(&state, 0, sizeof(state));
-        state.style.font = (size_t)-1; state.style.size = 12; state.style.scale = state.a = 1;
+        state.style.font = (size_t)-1; state.style.size = 12;
+        state.style.scale = state.a = state.d = state.style.ctm[0] = state.style.ctm[3] = 1;
         extractor.warnings = extractor.image = 0;
         tool_byte_buffer_init(&text);
         dict = dictionary(&extractor, span);
@@ -771,6 +885,11 @@ int pdf_text_extract(const unsigned char *bytes, size_t length, PdfTextPage call
         if (member(dict, "/Contents", &contents) && page_contents(&extractor, &contents, resources, &text, 0, &state) != 0)
             extractor.warnings |= PDF_TEXT_UNSUPPORTED_STREAM;
         if (extractor.image && page_marks_only(text.data, text.size)) extractor.warnings |= PDF_TEXT_NEEDS_OCR;
+        if (join_line_hyphens(&text) != 0) {
+            tool_byte_buffer_free(&text);
+            *error = "invalid UTF-8 in extracted PDF text";
+            goto done;
+        }
         if (tool_byte_buffer_terminate(&text) != 0 ||
             callback((unsigned int)i + 1, text.data != 0 ? (const char *)text.data : "", text.size,
                      extractor.warnings, user) != 0) {

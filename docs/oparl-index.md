@@ -91,7 +91,18 @@ Unterstuetzt werden unter anderem:
 - Die tatsaechliche Seitenreihenfolge aus dem PDF-Seitenbaum.
 - WinAnsi und ausgewaehlte Encoding-Differences.
 - ToUnicode-bfchar/bfrange einschliesslich UTF-16-Surrogaten.
-- Form-XObjects, Fontzustand und Textabstaende.
+- Form-XObjects, Fontzustand, Grafiktransformationen und Textabstaende.
+- Direkte und indirekte Breitenarrays einfacher Schriften.
+
+Benachbarte Textlaeufe bleiben auch ueber BT/ET-Grenzen hinweg zusammen;
+relative Textpositionen werden vom Textzeilenursprung aus berechnet.
+Zeilenendtrennungen vor lateinischen Kleinbuchstaben werden vor der
+Indexierung zusammengezogen; Ergaenzungsstriche vor `und`, `oder`,
+`bzw` und `sowie` bleiben erhalten. Weiche Trennzeichen werden entfernt.
+Das ist eine Heuristik, keine woerterbuchgestuetzte Rechtschreibkorrektur.
+Bereits vorhandene falsche Leerzeichen innerhalb eines PDF-Textstrings
+werden nicht beliebig geloescht. Fuer diese Textverbesserungen vorhandene
+Indizes neu bauen; Original-PDFs und archivierte Metadaten bleiben unveraendert.
 
 Textraeume werden aus Textoperatoren und verfuegbaren Fontbreiten
 angenaehert. Das ist kein vollstaendiger PDF-Renderer und keine
@@ -143,8 +154,8 @@ in Suchantworten und als CLI-Warnung sichtbar. Ein solcher Index darf
 durchsucht werden; keine Treffer bedeuten aber nicht zwingend, dass
 ein Sachverhalt im RIS nicht vorkommt.
 
-Im zuletzt vermessenen Bestand 2023 bis 2026 wurden 2.966 Seiten mit
-Warnungen erfasst, darunter 789 mit OCR-Bedarf. 22 Dateien waren nicht
+Im zuletzt vermessenen Bestand 2023 bis 2026 wurden 2.969 Seiten mit
+Warnungen erfasst, darunter 792 mit OCR-Bedarf. 22 Dateien waren nicht
 als unterstuetzte PDF verarbeitbar, drei referenzierte Dateien fehlten.
 Zwei Quellarchive waren bereits als unvollstaendig markiert.
 Von 6.772 ausgewaehlten Drucksachen ist eine ausdruecklich als geloescht

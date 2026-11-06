@@ -10,8 +10,8 @@ Die Suche benoetigt weder Zugriff auf das RIS noch externe
 Suchdienste.
 
 **Aktueller Stand:** CLI mit Einzelaufruf, Batchbetrieb und Benchmark
-sowie ein lokaler Webdienst mit deutscher Suchoberflaeche und JSON-API
-unter macOS und Linux. Ein MCP-Transport ist noch nicht implementiert.
+sowie ein lokaler Webdienst mit deutscher Suchoberflaeche, JSON-API
+und lesendem HTTP-MCP-Endpunkt unter macOS und Linux.
 
 ## Schnellstart
 
@@ -46,6 +46,7 @@ build/macos-aarch64/oparl-search --kind Paper --organization Fraktion \
 | `--limit N` | Zahl der besten Treffer, 1 bis 100; Standard 20 |
 | `--offset N` | Die ersten N sortierten Treffer ueberspringen, 0 bis 4294967295; Standard 0 |
 | `--sort REIHENFOLGE` | `relevance` (Standard), `date-desc` oder `date-asc` |
+| `--group MODUS` | `record` (CLI/API-Standard) oder `paper`: ein Treffer pro Vorgang |
 | `--json` | Strukturierte Ausgabe statt lesbarer Textausgabe |
 | `--batch` | Eine Suchanfrage je stdin-Zeile bei einmal geladenem Index |
 | `--benchmark N` | 20 bis 100000 warme Wiederholungen einer Anfrage |
@@ -120,6 +121,17 @@ internen Datensatzreihenfolge stabil aufgeloest, nicht zufaellig.
 Gesamttrefferzahl. Mit `--offset` sind auch Treffer jenseits der ersten
 100 erreichbar.
 
+Mit `--group paper` werden passende Metadaten und PDF-Seiten **vor**
+Sortierung, Gesamtzahl und Seiteneinteilung nach Vorgang zusammengefasst.
+Eine gemeinsam verwendete Datei erscheint in jedem passenden Paper-Kontext;
+alle Metadatenfilter muessen weiterhin denselben Kontext erfuellen.
+Die relevanteste passende Fundstelle liefert Ausschnitt, Quelle und PDF-Seite.
+Der Gruppenwert ist der beste Einzelwert, keine Summe mit einem Bonus fuer
+lange PDFs. `matchCount` zaehlt passende Datensaetze, nicht einzelne
+Wortvorkommen. Nicht zuordenbare Dateien werden pro Datei, andere Objekte
+weiter einzeln ausgegeben. AND/Phrasen werden weiterhin innerhalb eines
+Datensatzes ausgewertet, nicht ueber mehrere Seiten verteilt.
+
 `--sort date-desc` zeigt neueste, `--sort date-asc` aelteste Datensaetze
 zuerst. Massgeblich ist der Kalendertag in `relatedDate`, sonst `date`:
 bei PDF-Seiten also normalerweise das Datum der passenden Vorlage,
@@ -136,12 +148,13 @@ build/macos-aarch64/oparl-search --year 2024 --sort date-desc \
 
 `--json` liefert ein Objekt mit:
 
-- `total`: exakte Zahl der passenden Datensaetze, auch ueber das Limit hinaus.
+- `total`: exakte Zahl passender Datensaetze beziehungsweise Vorgangsgruppen.
+- `group`: `record` oder `paper`.
 - `incomplete`: bekannte Archiv- oder Extraktionsluecken.
 - `hits`: die besten Treffer bis zum gewaehlten Limit.
 
 Jeder Treffer enthaelt `id`, `kind`, `name`, `reference`, `date`,
-`paperType`, `organization`, `source`, `page`, `warnings` und `snippet`.
+`paperType`, `organization`, `source`, `page`, `warnings`, `matchCount` und `snippet`.
 Datei-/PDF-Seitentreffer enthalten ausserdem `documentUrl`, sofern
 die archivierten File-Metadaten eine nicht leere `downloadUrl` oder
 ersatzweise `accessUrl` nennen. Die URL wird nicht aus der OParl-ID
@@ -221,8 +234,10 @@ direkt zur archivierten Original-URL, bei Potsdam normalerweise
 auf `egov.potsdam.de`, in einem neuen Tab/Fenster. OParl-JSON-Links
 stehen in den Metadatendetails, nicht anstelle des Dokumentlinks.
 Lange lokale Quellenpfade und Extraktionswarnungen stehen
-in den aufklappbaren Details. Mehrere Seiten derselben Datei bleiben
-eigenstaendige Treffer. Auf grossen Bildschirmen stehen Filter neben
+in den aufklappbaren Details. Die Websuche verwendet standardmaessig
+`group=paper`: ein Treffer pro Vorgang mit Hinweis auf weitere passende
+Fundstellen. Ausschnitte fassen aufeinanderfolgende Leerraeume zusammen.
+Auf grossen Bildschirmen stehen Filter neben
 den Ergebnissen; auf kleinen darueber, mit ausklappbaren Filtern.
 
 Suchanfragen, Filter, Sortierung und Seitenposition stehen in der
@@ -316,7 +331,7 @@ Antworten sind UTF-8-JSON; `HEAD` liefert keinen Antwortkoerper.
 | Endpunkt | Parameter | Antwort |
 | --- | --- | --- |
 | `/api/status` | Keine | `records`, `terms`, `indexBytes`, `indexMemoryBytes`, `pages`, `warningPages`, `ocrPages`, `incomplete` des geladenen Indexes |
-| `/api/search` | `q` erforderlich; optional `year`, `paperType`, `organization`, `kind`, `limit`, `offset`, `sort` | Dieselbe JSON-Struktur wie die CLI-Suche |
+| `/api/search` | `q` erforderlich; optional `year`, `paperType`, `organization`, `kind`, `limit`, `offset`, `sort`, `group` | Dieselbe JSON-Struktur wie die CLI-Suche |
 | `/api/object` | `id` erforderlich; optional `page` ab 1 | Dieselbe JSON-Struktur wie `--show ID --json`, mit `page` wie `--show ID --page N --json` |
 | `/api/paper` | Nur `id` erforderlich, muss ein indexiertes Paper sein | Aufgeloester Vorgang mit `id`, `incomplete`, `objects` |
 
@@ -330,6 +345,9 @@ Ohne `limit` gilt fuer direkte API-Anfragen wie bei der CLI weiterhin
 `offset` zaehlt ab 0; auch jenseits des letzten Treffers bleibt
 `total` exakt und `hits` ist leer. `sort` akzeptiert `relevance`,
 `date-desc` und `date-asc`.
+`group` akzeptiert `record` und `paper`. CLI und direkte JSON-API bleiben
+standardmaessig bei einzelnen Datensaetzen; Weboberflaeche und MCP suchen
+standardmaessig Vorgangsgruppen.
 
 ```sh
 curl --get http://127.0.0.1:8080/api/search \
@@ -358,8 +376,8 @@ Fehlerantworten haben die Form `{"error":"Beschreibung"}`:
 | `400` | Ungueltige Anfrage, Parameter oder Suchsyntax |
 | `403` | Nicht erlaubter Host oder herkunftsfremde API-Anfrage |
 | `404` | Unbekannter Endpunkt oder nicht vorhandene ID/Seite |
-| `405` | Andere Methode als GET/HEAD |
-| `408` | Zeitlimit fuer den vollstaendigen Anfrageheader ueberschritten |
+| `405` | Nicht erlaubte Methode; nur `/mcp` erlaubt POST |
+| `408` | Zeitlimit fuer die vollstaendige Anfrage ueberschritten |
 | `431` | Anfrageheader einschliesslich URL groesser als 64 KiB |
 | `500` | Interner Fehler, etwa fehlender Anfragespeicher |
 | `503` | Alle Verbindungsplaetze belegt |
@@ -368,6 +386,78 @@ Fehler erscheinen zusaetzlich auf stderr. Abgebrochene Clients
 beenden nicht den Suchdienst. Ein unvollstaendiger Index bleibt
 durchsuchbar und wird weiterhin mit `incomplete: true` gekennzeichnet.
 
+### HTTP-MCP
+
+Der bestehende Dienst stellt unter `/mcp` einen **Streamable-HTTP**-Transport
+bereit, lokal beispielsweise `http://127.0.0.1:8080/mcp`, auf dem
+bereitgestellten Server `http://178.254.23.157:8080/mcp`.
+Es gibt keinen zusaetzlichen Port oder Prozess und keine MCP-SDK-
+Laufzeitabhaengigkeit.
+
+| Werkzeug | Argumente | Ergebnis |
+| --- | --- | --- |
+| `search` | `q`; optional dieselben Filter wie `/api/search`, einschliesslich `group` | Suchantwort; Standard 20 Treffer und `group=paper` |
+| `get_object` | `id`; optional `page` ab 1 | Originalmetadaten oder extrahierter PDF-Seitentext |
+| `get_paper` | `id` eines Papers | Aufgeloester Vorgang wie `/api/paper` |
+| `get_index_status` | Keine | Indexgroesse, Zaehler und Abdeckung wie `/api/status` |
+
+Alle Werkzeuge sind nur lesend und greifen ausschliesslich auf den geladenen
+Index zu, nicht auf beliebige Dateien oder URLs. Erfolgreiche Aufrufe liefern
+dieselben Daten in `structuredContent` und als JSON im Textinhalt.
+Unbekannte Werkzeuge und fehlerhafte RPC-Nachrichten erzeugen JSON-RPC-Fehler;
+ungueltige Werkzeugargumente, Suchsyntax und fehlende Objekte liefern
+`isError: true` mit Beschreibung statt erfundener Ergebnisse.
+
+Unterstuetzt werden:
+
+- **2026-07-28:** zustandslose Anfragen mit `server/discover`, `resultType`
+  und Pflichtfeldern fuer Protokollversion und Client-Capabilities in
+  `params._meta`. `MCP-Protocol-Version` und `Mcp-Method` muessen dem Body
+  entsprechen; bei `tools/call` auch `Mcp-Name` (einschliesslich Base64-Sentinel).
+- **2025-11-25, 2025-06-18 und 2025-03-26:** `initialize`, danach
+  `notifications/initialized` und der ausgehandelte `MCP-Protocol-Version`-
+  Header. Der Server vergibt keine Session-ID.
+
+Zum Beispiel mit einem Client fuer die Version 2025-11-25:
+
+```json
+{
+  "servers": {
+    "potsdam-ris": {
+      "type": "http",
+      "url": "http://178.254.23.157:8080/mcp"
+    }
+  }
+}
+```
+
+Dies ist das VS-Code-Format fuer `.vscode/mcp.json`; andere Clients verwenden
+ihre eigene Konfigurationsstruktur. Entscheidend sind HTTP-Transport und URL.
+Oeffentliches HTTP ohne TLS wird nicht von jedem Client akzeptiert.
+
+Einzelner Werkzeugaufruf nach der Initialisierung:
+
+```sh
+curl http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  --data '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"q":"Noosha","sort":"date-desc"}}}'
+```
+
+Jeder POST enthaelt genau eine JSON-RPC-Nachricht, mit `Content-Length`
+und hoechstens 64 KiB Body. JSON-RPC-Batches, Chunked-Bodys und `Expect`
+werden abgelehnt. Akzeptierte Notifications erhalten HTTP 202 ohne Body,
+Anfragen eine einzelne JSON-Antwort; GET/DELETE auf `/mcp` erhalten 405.
+Es gibt keine SSE-Dauerverbindungen, Subscriptions oder serverinitiierten
+Anfragen. Serialisierte Werkzeugdaten sind auf 16 MiB begrenzt; groessere
+Ergebnisse verursachen einen ausdruecklichen Fehler statt stiller Kuerzung.
+Host-/Origin-Pruefung und die uebrigen Dienstgrenzen gelten auch fuer MCP.
+
+Protokollgrundlagen:
+[2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+und [2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
+
 ### Betriebsgrenzen
 
 - Feste Bindung an `127.0.0.1`, kein oeffentlicher oder LAN-Listener.
@@ -375,15 +465,15 @@ durchsuchbar und wird weiterhin mit `incomplete: true` gekennzeichnet.
   Listener gehoert in einen separat abgesicherten Reverse Proxy,
   nicht in das Suchprogramm; ein konkretes Setup folgt unten.
 - Host-Header muessen `127.0.0.1` oder `localhost` mit dem passenden
-  Port nennen. Die API weist fremde Origins und herkunftsfremde
+  Port nennen. API und MCP weisen fremde Origins und herkunftsfremde
   Browseranfragen zurueck; es gibt keine allgemeine CORS-Freigabe.
-- Hoechstens acht angenommene Verbindungen. Unvollstaendige Header
+- Hoechstens acht angenommene Verbindungen. Unvollstaendige Anfragen
   haben insgesamt fuenf Sekunden Zeit; blockierte Schreiboperationen
   haben ebenfalls ein Fuenf-Sekunden-Zeitlimit.
 - Header werden ueber Polling unabhaengig gesammelt; eigentliche
   Suchanfragen und Antworten werden nacheinander bearbeitet.
   Es gibt noch keinen parallelen Anfrage-Workerpool.
-- Keine Request-Bodys, kein HTTP-Keep-Alive und kein Pipelining.
+- Request-Bodys ausschliesslich fuer POST `/mcp`, kein HTTP-Keep-Alive oder Pipelining.
   Jede Antwort beendet ihre Verbindung.
 
 Auf Windows meldet `--serve` einen ausdruecklichen Fehler, weil das
@@ -434,6 +524,8 @@ Der Proxy prueft den oeffentlichen Host und vorhandene Origin-Header,
 bevor er Host und erlaubte Origins fuer das lokale Backend umsetzt.
 Er aktiviert kein CORS und keinen Forward Proxy. `Sec-Fetch-Site`
 wird nicht entfernt; die Herkunftspruefung der API bleibt aktiv.
+POST und Request-Bodys sind ausschliesslich fuer `/mcp` freigegeben,
+mit 64 KiB Bodylimit und weiterhin ohne Chunked/Expect.
 Header-Lesezeiten, Backendverbindungen und Worker sind begrenzt.
 Ein zusaetzliches Access-Log mit Suchanfragen wird nicht geschrieben.
 

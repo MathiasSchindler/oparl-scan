@@ -39,6 +39,7 @@ RequestReadTimeout header=5-10,MinRate=500 body=5,MinRate=500
 LimitRequestLine 60000
 LimitRequestFieldSize 8190
 LimitRequestFields 32
+LimitRequestBody 65536
 
 <Directory />
     Require all denied
@@ -50,8 +51,14 @@ RewriteRule ^ - [F,END]
 RewriteCond expr "-n req('Origin') && req('Origin') != 'http://${PublicAddress}:${PublicPort}'"
 RewriteRule ^ - [F,END]
 RewriteCond %{REQUEST_METHOD} !^(GET|HEAD)$
+RewriteCond expr "!(%{REQUEST_METHOD} == 'POST' && %{REQUEST_URI} == '/mcp')"
 RewriteRule ^ - [R=405,END]
-RewriteCond expr "-n req('Content-Length') || -n req('Transfer-Encoding') || -n req('Expect')"
+RewriteCond expr "-n req('Transfer-Encoding') || -n req('Expect')"
+RewriteRule ^ - [R=400,END]
+RewriteCond %{REQUEST_URI} !^/mcp$
+RewriteCond expr "-n req('Content-Length')"
+RewriteRule ^ - [R=400,END]
+RewriteCond expr "%{REQUEST_METHOD} != 'POST' && -n req('Content-Length')"
 RewriteRule ^ - [R=400,END]
 
 ProxyRequests Off

@@ -5,6 +5,7 @@ import { stat } from 'node:fs/promises';
 import { createServer, connect } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Script } from 'node:vm';
+import { testSearchMcp } from './search-mcp.mjs';
 
 export async function testSearchWeb(binary, index, fileId) {
   if (process.platform === 'win32') {
@@ -126,10 +127,11 @@ export async function testSearchWeb(binary, index, fileId) {
       ['NOT nonexistenttoken', { kind: 'Person', sort: 'date-asc', offset: '1095' }],
       ['NOT nonexistenttoken', { kind: 'Person', offset: '4294967295' }],
       ['Schulweg', { kind: 'Page', year: '2024', sort: 'date-desc' }],
+      ['Schulweg', { group: 'paper', sort: 'date-desc', limit: '1', offset: '1' }],
       ['nonexistenttoken', {}],
     ];
     const flags = { kind: '--kind', year: '--year', paperType: '--paper-type',
-      organization: '--organization', limit: '--limit', offset: '--offset', sort: '--sort' };
+      organization: '--organization', limit: '--limit', offset: '--offset', sort: '--sort', group: '--group' };
     for (const [q, filters] of cases) {
       const response = await get('/api/search?' + new URLSearchParams({ q, ...filters }));
       assert.equal(response.status, 200);
@@ -160,6 +162,9 @@ export async function testSearchWeb(binary, index, fileId) {
       ['/api/search?q=Schulweg&offset=', 400], ['/api/search?q=Schulweg&offset=1&offset=2', 400],
       ['/api/search?q=Schulweg&sort=newest', 400], ['/api/search?q=Schulweg&sort=', 400],
       ['/api/search?q=Schulweg&sort=relevance&sort=date-asc', 400],
+      ['/api/search?q=Schulweg&group=page', 400],
+      ['/api/search?q=Schulweg&group=paper&group=record', 400],
+      ['/api/object?id=missing&group=paper', 400],
       ['/api/object', 400], ['/api/object?id=missing', 404], ['/api/object?id=missing&page=0', 400],
       ['/api/object?id=missing&q=foo', 400], ['/api/object?id=missing&sort=relevance', 400],
       ['/api/status?q=foo', 400],
@@ -196,6 +201,7 @@ export async function testSearchWeb(binary, index, fileId) {
     const oversizedPrefix = `GET / HTTP/1.1\r\n${host}X-Long: `;
     assert.match(await raw(oversizedPrefix + 'x'.repeat(65536 - oversizedPrefix.length)),
       /^HTTP\/1.1 431 /);
+    await testSearchMcp(base, raw, cli, fileId, port);
     for (let i = 0; i < 8; i++) {
       const socket = connect(port, '127.0.0.1');
       held.push(socket);
@@ -205,8 +211,10 @@ export async function testSearchWeb(binary, index, fileId) {
     assert.match(await raw(''), /^HTTP\/1.1 503 /);
     for (const socket of held) socket.destroy();
     const timedOut = raw(`GET / HTTP/1.1\r\n${host}X-Partial: `);
+    const bodyTimedOut = raw(`POST /mcp HTTP/1.1\r\n${host}Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: 100\r\n\r\n{`);
     assert.equal((await get('/api/status')).status, 200, 'partial requests must not block other clients');
     assert.match(await timedOut, /^HTTP\/1.1 408 /);
+    assert.match(await bodyTimedOut, /^HTTP\/1.1 408 /);
     assert.equal((await get('/api/status')).status, 200, 'server must recover from rejected requests');
     assert.equal(child.exitCode, null, log);
     assert.equal(stdout, '', 'HTTP responses must not leak to process stdout');

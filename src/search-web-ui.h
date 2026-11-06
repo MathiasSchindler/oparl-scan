@@ -159,6 +159,7 @@ static const char *const search_web_script[] = {
 "if(value)meta.append(element('span',value));article.append(meta);"
 "if(hit.page||hit.relatedName)article.append(element('p',[hit.name,hit.page?'PDF-Seite '+hit.page:''].filter(Boolean).join(' \\u00b7 '),'document'));"
 "article.append(element('p',hit.snippet,'snippet'));"
+"if(hit.matchCount>1)article.append(element('p',count.format(hit.matchCount)+' passende Fundstellen '+(paper?'in diesem Vorgang':'in diesem Dokument')+'. Angezeigt wird der relevanteste Ausschnitt.','muted'));"
 "const actions=element('div',undefined,'actions');"
 "original(actions,hit.documentUrl,hit.page?'PDF \\u00f6ffnen':'Originaldokument \\u00f6ffnen');"
 "if(paper)localLink(actions,paperUrl(paper),'Vorgang ansehen');article.append(actions);",
@@ -175,6 +176,7 @@ static const char *const search_web_script[] = {
 "article.append(details);return article;}\n",
 "async function search(params){if(controller)controller.abort();controller=new AbortController();const current=++sequence;"
 "if(!params.has('limit'))params.set('limit','50');if(!params.has('sort'))params.set('sort','relevance');"
+"if(!params.has('group'))params.set('group','paper');"
 "results.replaceChildren();results.setAttribute('aria-busy','true');status.dataset.error='false';status.textContent='Suche l\\u00e4uft ...';"
 "pagination(true);sortDescription(params.get('sort'));"
 "try{const data=await api('/api/search?'+params,controller.signal);if(current!==sequence)return;"

@@ -13,11 +13,11 @@ Dokumentationsseiten:
 | --- | --- | --- |
 | **oparl-scan** | OParl-Metadaten und Dokumente herunterladen und aktualisieren | [Benutzung, Optionen, Archivformat und Fehlerbehandlung](docs/oparl-scan.md) |
 | **oparl-index** | Gemeinsamen Metadaten- und PDF-Volltextindex aufbauen | [Benutzung, Importregeln, PDF-Grenzen und Abdeckungsbericht](docs/oparl-index.md) |
-| **oparl-search** | Metadaten und Volltexte durchsuchen und Inhalte mit Quellen abrufen | [CLI, Suchsyntax, Filter, JSON, Batchbetrieb und Benchmarks](docs/oparl-search.md) |
+| **oparl-search** | Metadaten und Volltexte durchsuchen und Inhalte mit Quellen abrufen | [CLI, Weboberflaeche, HTTP-MCP, JSON und Benchmarks](docs/oparl-search.md) |
 
 `oparl-search` bietet eine CLI sowie unter macOS und Linux einen
-lokalen Webdienst mit Suchoberflaeche und JSON-API. Alle verwenden
-denselben Suchkern. Ein MCP-Transport ist noch nicht implementiert.
+lokalen Webdienst mit Suchoberflaeche, JSON-API und lesendem
+HTTP-MCP-Endpunkt `/mcp`. Alle verwenden denselben Suchkern.
 
 Die erlaubten Produktionshosts und URL-Pfade sowie die Jahrgangsauswahl
 des Downloaders sind derzeit auf Potsdam abgestimmt. Weitere Endpunkte
