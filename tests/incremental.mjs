@@ -227,8 +227,12 @@ try {
 
   checkpoint = await rewind(directory);
   changeFile(1); mode = 'denied';
-  const failed = await scan(directory, [], 1);
+  const failed = await scan(directory, ['--no-skip-unavailable-files'], 1);
   assert.equal(failed.syncCheckpointEpochSeconds, checkpoint);
+  const unavailable = await scan(directory, [], 3);
+  assert.equal(unavailable.state, 'incomplete');
+  assert.equal(unavailable.unavailableDocuments, 1);
+  assert.equal(unavailable.syncCheckpointEpochSeconds, checkpoint);
   mode = '';
   assert.equal((await scan(directory)).complete, true);
   assert.deepEqual(await document(directory, 1), payload(1));
@@ -294,7 +298,7 @@ try {
 
   reset(); mode = 'denied';
   const interrupted = join(root, 'interrupted-initial');
-  assert.equal((await scan(interrupted, [], 1)).syncCheckpointEpochSeconds, 0);
+  assert.equal((await scan(interrupted, [], 3)).syncCheckpointEpochSeconds, 0);
   mode = '';
   assert.equal((await scan(interrupted)).syncMode, 'full', 'failed initial archives are not legacy bootstraps');
   console.log('Incremental synchronization tests passed');

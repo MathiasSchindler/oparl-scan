@@ -627,9 +627,10 @@ try {
   }
   mode = 'noauth';
   const unavailable = join(root, 'unavailable');
-  assert.match(await run(unavailable, [], 1), /access denied/);
+  assert.match(await run(unavailable, ['--skip-unavailable-files', '--no-skip-unavailable-files'], 1),
+    /access denied/);
   start = requests.length;
-  const unavailableDiagnostics = await run(unavailable, ['--skip-unavailable-files', '--color', 'always'], 3);
+  const unavailableDiagnostics = await run(unavailable, ['--color', 'always'], 3);
   assert.match(unavailableDiagnostics, /\x1b\[1;33moparl-scan: warning: \x1b\[0munavailable document recorded/);
   assert.match(unavailableDiagnostics, /\x1b\[1;33mINCOMPLETE \(unavailable documents\)\x1b\[0m/);
   const unavailableSummary = JSON.parse(await readFile(join(unavailable, 'archive.json')));
@@ -647,7 +648,7 @@ try {
     'duplicate references to a denied File are tried and reported only once per run');
   assert.ok(!requests.some(path => path.includes('noauth')), 'authentication redirects are never followed');
   start = requests.length;
-  await run(unavailable, ['--skip-unavailable-files'], 3);
+  await run(unavailable, ['--no-skip-unavailable-files', '--skip-unavailable-files'], 3);
   assert.equal(requests.slice(start).filter(path => path === '/content/1').length, 1,
     'a missing file is retried on resume rather than treated as cached');
   assert.deepEqual((await readFile(report, 'utf8')).trim().split('\n').map(line => JSON.parse(line)), records);
@@ -661,7 +662,7 @@ try {
     mode = variant;
     const directory = join(root, variant);
     const denied = variant === 'unauthorized' || variant === 'forbidden';
-    await run(directory, ['--skip-unavailable-files'], denied ? 3 : 1);
+    await run(directory, [], denied ? 3 : 1);
     const state = JSON.parse(await readFile(join(directory, 'archive.json')));
     assert.equal(state.complete, false);
     assert.equal(state.unavailableDocuments, denied ? 1 : 0,
@@ -677,14 +678,14 @@ try {
     mode = variant;
     const directory = join(root, variant);
     start = requests.length;
-    const stderr = await run(directory, [], 1);
+    const stderr = await run(directory, ['--accept-size-mismatch', '--no-accept-size-mismatch'], 1);
     assert.match(stderr, new RegExp(`expected bytes=${pdf.length + 7}, received bytes=${pdf.length}`));
     assert.equal(requests.slice(start).filter(path => path === '/content/1').length, 1,
       'a complete but mismatched size is not a transient transfer failure');
-    const mismatchDiagnostics = await run(directory, ['--accept-size-mismatch', '--color', 'always']);
+    const mismatchDiagnostics = await run(directory, ['--color', 'always']);
     assert.match(mismatchDiagnostics, /\x1b\[1;33moparl-scan: warning: \x1b\[0maccepting document size mismatch/);
     const state = JSON.parse(await readFile(join(directory, 'archive.json')));
-    assert.equal(state.complete, true, 'all files acquired under the explicit acceptance policy');
+    assert.equal(state.complete, true, 'all files acquired under the default acceptance policy');
     assert.equal(state.acceptSizeMismatch, true);
     assert.equal(state.sizeMismatchedDocuments, 1);
     const mismatchReport = join(directory, 'size-mismatches.jsonl');
@@ -700,7 +701,7 @@ try {
       const cached = join(directory, 'documents', names.find(name => name.startsWith(hash(file(1).id))));
       await writeFile(cached, 'corrupted');
       start = exchanges.length;
-      await run(directory, ['--accept-size-mismatch']);
+      await run(directory, ['--no-accept-size-mismatch', '--accept-size-mismatch']);
       assert.deepEqual(await readFile(cached), pdf, 'wrong-size caches must be revalidated by a fresh download');
       assert.equal(exchanges.slice(start).filter(request =>
         request.url === '/content/1' && request.method === 'GET').length, 1);
@@ -719,7 +720,7 @@ try {
   for (const variant of ['size-unframed', 'truncated']) {
     mode = variant;
     const directory = join(root, `${variant}-accept-size`);
-    await run(directory, ['--accept-size-mismatch'], 1);
+    await run(directory, [], 1);
     assert.equal(JSON.parse(await readFile(join(directory, 'archive.json'))).complete, false);
     assert.equal((await readdir(join(directory, 'documents'))).length, 0,
       'accepting advisory metadata sizes never accepts truncated or unverified-length transfers');

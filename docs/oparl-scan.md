@@ -42,14 +42,9 @@ build/macos-aarch64/oparl-scan --calendar-only \
   --calendar-from 2026-11-01 --calendar-through 2026-11-30 \
   --output downloads/calendar-2026-11
 
-# Bei Zugriffsverweigerungen einzelner Dokumente mit den anderen fortfahren.
+# Optional streng: bei verweigerten Dokumenten oder falscher OParl-Groesse abbrechen.
 build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
-  --skip-unavailable-files
-
-# Zusaetzlich vollstaendige Downloads mit falscher OParl-Groesse akzeptieren.
-# Denselben Aufruf fuer eine gezielte Aktualisierung erneut ausfuehren.
-build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
-  --skip-unavailable-files --accept-size-mismatch
+  --no-skip-unavailable-files --no-accept-size-mismatch
 
 # Kleiner Live-Test, absichtlich unvollstaendig: Exitcode 2.
 build/macos-aarch64/oparl-scan --output build/live-smoke \
@@ -67,8 +62,10 @@ build/macos-aarch64/oparl-scan --output build/live-smoke \
 | `--calendar-through YYYY-MM-DD` | Letzter Kalendertag, einschliesslich |
 | `--calendar-only` | Nur unabhaengige Kalender und deren gezielten Kontext; kein Paper-Suchlauf |
 | `--metadata-only` | Keine Dokumentdateien herunterladen |
-| `--skip-unavailable-files` | Verweigerte Dokumente protokollieren und fortfahren |
-| `--accept-size-mismatch` | Vollstaendige Uebertragungen trotz falscher OParl-Groesse akzeptieren |
+| `--skip-unavailable-files` | Verweigerte Dokumente mit Warnung protokollieren und fortfahren; Standard |
+| `--no-skip-unavailable-files` | Bei verweigerten Dokumenten abbrechen |
+| `--accept-size-mismatch` | Vollstaendige Uebertragungen trotz falscher OParl-Groesse mit Warnung akzeptieren; Standard |
+| `--no-accept-size-mismatch` | Bei abweichender OParl-Groesse abbrechen |
 | `--full` | Alle Metadaten und Dokumentverknuepfungen abgleichen, statt nur Aenderungen |
 | `--refresh` | Vollabgleich und Inhaltsabrufe ohne bedingte HTTP-Anfragen erzwingen |
 | `--page-size N` | Objekte je Seite, 1 bis 100; Standard 100 |
@@ -80,6 +77,10 @@ build/macos-aarch64/oparl-scan --output build/live-smoke \
 | `--ca-file DATEI` | Vertrauenswuerdige CA-Zertifikate als PEM-Buendel |
 | `--color MODUS` | `auto`, `always` oder `never`; Standard `auto` |
 | `--help` | Kurze Kommandozeilenhilfe |
+
+Die beiden Standardverhaltensweisen lassen sich unabhaengig abschalten.
+Die bisherigen positiven Optionen bleiben gueltig und schalten das Verhalten
+wieder ein. Bei wiederholten Angaben gilt jeweils die letzte Option.
 
 Unter Linux und Windows den passenden Programmpfad einsetzen.
 Auf allen Plattformen Schraegstriche `/` in Pfaden verwenden.
@@ -169,12 +170,11 @@ Archivordner und die bisherigen Pruefoptionen verwenden, ohne `--refresh`:
 
 ```sh
 build/macos-aarch64/oparl-scan --year 2024 --output downloads/2024 \
-  --timeout-ms 120000 --delay-ms 1500 \
-  --skip-unavailable-files --accept-size-mismatch
+  --timeout-ms 120000 --delay-ms 1500
 ```
 
-Die beiden letzten Optionen nur beibehalten, wenn diese Ausnahmen auch
-bisher bewusst gewaehlt wurden. Bereits vollstaendige Metadaten und
+Verweigerte Dokumente und falsche OParl-Groessen werden standardmaessig mit
+Warnungen und Berichten behandelt. Bereits vollstaendige Metadaten und
 gueltige Dokumente werden wiederverwendet. Wiederholungen bleiben auf
 drei Versuche begrenzt; ein nicht antwortender Server fuehrt weiterhin
 zu einem ausdruecklichen Fehler und einem unvollstaendigen Archiv.
@@ -562,12 +562,13 @@ den vorherigen abgeschlossenen Lauf.
 
 Einige oeffentlich gelistete Potsdamer Dokumente leiten auf `./noauth`
 weiter. Das ist kein Dokumentdownload; dieser Authentifizierungsroute
-wird niemals gefolgt. Standardmaessig bricht das Programm mit einer
-ausdruecklichen Fehlermeldung ab.
+wird niemals gefolgt.
 
-Mit `--skip-unavailable-files` werden Dokumentantworten mit genau dieser
-Weiterleitung oder HTTP 401/403 stattdessen in `unavailable-files.jsonl`
-verzeichnet. Die uebrigen Downloads laufen weiter. Jede Zeile enthaelt
+Standardmaessig werden Dokumentantworten mit genau dieser Weiterleitung oder
+HTTP 401/403 mit Warnung in `unavailable-files.jsonl` verzeichnet.
+Die uebrigen Downloads laufen weiter. `--no-skip-unavailable-files` schaltet
+dieses Verhalten ab und fuehrt stattdessen zum Abbruch mit Fehler.
+Die positive Option `--skip-unavailable-files` bleibt gueltig. Jede Zeile enthaelt
 `id`, angefragte `url`, urspruenglichen `fileName` und
 `reason: "access-denied"`. Es werden weder Platzhalter noch
 Anmeldeseiten als Dokument gespeichert. Doppelte Datei-IDs werden pro
@@ -592,15 +593,17 @@ vorherigen abgeschlossenen Durchlauf.
 
 ### Falsche OParl-Dateigroessen
 
-Die Groessenpruefung bleibt standardmaessig streng. Manche Potsdamer
+Manche Potsdamer
 Eintraege geben selbst in frisch abgerufenen Metadaten eine falsche
 Groesse an: Datei `2912324` nennt beispielsweise 83.930 Bytes,
 der Dokumentserver liefert aber eine PDF mit 83.944 Bytes.
 
-Mit `--accept-size-mismatch` wird die OParl-Groesse ausdruecklich als
+Standardmaessig wird eine abweichende OParl-Groesse mit Warnung als
 unverbindlich behandelt, wenn die vollstaendige HTTP-Uebertragung durch
 `Content-Length` oder gueltige Chunk-Kodierung unabhaengig bestaetigt
-ist. Abgebrochene Uebertragungen bleiben Fehler. Eine abweichende Antwort
+ist. Mit `--no-accept-size-mismatch` wird die strenge OParl-Groessenpruefung
+eingeschaltet; die positive Option `--accept-size-mismatch` bleibt gueltig.
+Abgebrochene Uebertragungen bleiben Fehler. Eine abweichende Antwort
 ohne eine dieser beiden Rahmeninformationen wird nicht akzeptiert.
 Eine vollstaendig uebertragene Groessenabweichung wird nicht wie ein
 voruebergehender Netzwerkfehler erneut versucht.
@@ -610,7 +613,7 @@ Akzeptierte Dateien werden normal gespeichert und in
 und `actualSize` verzeichnet. Das originale OParl-JSON wird nicht
 veraendert. `archive.json` enthaelt `acceptSizeMismatch` und
 `sizeMismatchedDocuments`. Akzeptierte Abweichungen sind keine fehlenden
-Dateien und verhindern daher unter dieser ausdruecklich gewaehlten
+Dateien und verhindern daher unter dieser
 Pruefregel keinen vollstaendigen Abschluss. Zugriffsfehlstellen und
 konfigurierte Grenzen tun dies weiterhin.
 
@@ -644,8 +647,8 @@ ist daher kein atomarer Datenbankschnappschuss zu einem einzigen Zeitpunkt.
 
 Die Grenzen betragen 32 MiB pro Metadatenantwort, 4 GiB pro Dokument
 und 64 Verschachtelungsebenen fuer JSON. Fehler beenden den Lauf,
-abgesehen von HTTP 404 und den oben beschriebenen, ausdruecklich
-aktivierten Ausnahmen. HTTP-Fehler und ungueltige Eingaben werden niemals durch
+abgesehen von HTTP 404 und den oben beschriebenen Standardregeln fuer
+Dokumentverweigerungen und Groessenabweichungen. HTTP-Fehler und ungueltige Eingaben werden niemals durch
 leere, scheinbar erfolgreiche Antworten ersetzt.
 
 ## Tests und Verifikation

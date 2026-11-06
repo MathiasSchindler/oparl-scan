@@ -122,6 +122,10 @@ OParl-Aenderungsfilter, statt alle Drucksachenlisten erneut einzulesen.
 Geaenderte File-Objekte werden auch ohne Aenderung ihrer Drucksache erkannt.
 `--full` erzwingt einen vollstaendigen Metadatenabgleich; `--refresh`
 zusaetzlich neue Inhaltsabrufe. Neue Archive werden zuerst voll aufgebaut.
+Verweigerte Dokumente werden standardmaessig mit Warnung ausgelassen und
+protokolliert; vollstaendige HTTP-Uebertragungen trotz falscher OParl-Groesse
+werden mit Warnung akzeptiert. Mit `--no-skip-unavailable-files` und
+`--no-accept-size-mismatch` laesst sich jeweils die strenge Abbruchregel waehlen.
 Beim Aktualisieren alter Archive ohne HTTP-Cache prueft der Scanner vorhandene
 Dateien per HEAD gegen Groesse und lokalen Dateizeitstempel, statt sie pauschal
 erneut herunterzuladen. Voraussetzung sind seit dem Download unveraenderte

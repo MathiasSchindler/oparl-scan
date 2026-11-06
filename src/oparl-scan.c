@@ -118,8 +118,10 @@ static void usage(void) {
         "Usage: oparl-scan [OPTIONS]\n"
         "  --output DIR       Archive directory (default: downloads)\n"
         "  --metadata-only    Do not download document binaries\n"
-        "  --skip-unavailable-files  Report access-denied documents and continue\n"
-        "  --accept-size-mismatch   Report complete transfers with wrong OParl sizes\n"
+        "  --skip-unavailable-files  Report access-denied documents and continue (default)\n"
+        "  --no-skip-unavailable-files  Abort on document access denials\n"
+        "  --accept-size-mismatch   Warn on complete transfers with wrong OParl sizes (default)\n"
+        "  --no-accept-size-mismatch  Require matching OParl document sizes\n"
         "  --year YYYY        Select reference prefix YY/, including later follow-ups\n"
         "  --calendar-from DATE     Independent calendar, inclusive YYYY-MM-DD\n"
         "  --calendar-through DATE  End date; default with --year: Jan 1 through Dec 31\n"
@@ -147,6 +149,8 @@ static int options(Archive *archive, int argc, char **argv) {
     archive->output = "downloads";
     archive->system = DEFAULT_SYSTEM;
     archive->page_size = 100;
+    archive->skip_unavailable_files = 1;
+    archive->accept_size_mismatch = 1;
     archive->selection_fd = -1;
     archive->unavailable_fd = -1;
     archive->missing_fd = -1;
@@ -167,12 +171,14 @@ static int options(Archive *archive, int argc, char **argv) {
             archive->metadata_only = 1;
             continue;
         }
-        if (rt_strcmp(flag, "--skip-unavailable-files") == 0) {
-            archive->skip_unavailable_files = 1;
+        if (rt_strcmp(flag, "--skip-unavailable-files") == 0 ||
+            rt_strcmp(flag, "--no-skip-unavailable-files") == 0) {
+            archive->skip_unavailable_files = rt_strcmp(flag, "--skip-unavailable-files") == 0;
             continue;
         }
-        if (rt_strcmp(flag, "--accept-size-mismatch") == 0) {
-            archive->accept_size_mismatch = 1;
+        if (rt_strcmp(flag, "--accept-size-mismatch") == 0 ||
+            rt_strcmp(flag, "--no-accept-size-mismatch") == 0) {
+            archive->accept_size_mismatch = rt_strcmp(flag, "--accept-size-mismatch") == 0;
             continue;
         }
         if (rt_strcmp(flag, "--refresh") == 0) {

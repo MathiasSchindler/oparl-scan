@@ -201,10 +201,8 @@ try {
     for (const variant of ['same-origin', 'redirect', 'metadata-redirect', 'retry', 'retry-redirect', 'missing', 'denied', 'size']) {
       mode = variant;
       const directory = join(root, variant);
-      const args = variant === 'denied' ? ['--skip-unavailable-files'] :
-        variant === 'size' ? ['--accept-size-mismatch'] : [];
       const expected = variant === 'missing' || variant === 'denied' ? 3 : 0;
-      const result = await run(directory, args, expected);
+      const result = await run(directory, [], expected);
       const state = JSON.parse(await readFile(join(directory, 'archive.json')));
       assert.equal(state.complete, expected === 0);
       assert.equal(Object.keys(await documents(directory)).length, expected === 3 ? 3 : 4);
@@ -221,7 +219,7 @@ try {
       }
       if (expected === 3) {
         mode = 'normal';
-        const resumed = await run(directory, args);
+        const resumed = await run(directory);
         assert.deepEqual(resumed.events.filter(event =>
           event.path.startsWith('/content/') && event.method === 'GET').map(event => event.path), ['/content/1']);
         assert.equal(JSON.parse(await readFile(join(directory, 'archive.json'))).complete, true);
