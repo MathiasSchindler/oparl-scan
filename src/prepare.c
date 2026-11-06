@@ -1,5 +1,6 @@
 #include "prepare.h"
 #include "hash_util.h"
+#include "pdf-structure.h"
 #include "platform.h"
 #include "runtime.h"
 
@@ -254,12 +255,142 @@ static int artifact_path(const char *root, const char *key, const char *hash, ch
     memcpy(name + 64, ".json", 6);
     return rt_join_path(root, key, dir, sizeof(dir)) || rt_join_path(dir, name, out, 4096);
 }
+static int cell_shape(const Json *j, size_t cell, size_t length) {
+    size_t sources = json_get(j, cell, "sources"), text = json_get(j, cell, "text"), i;
+    const JsonToken *t = json_token(j, text);
+    if (!t || t->kind != JSON_STRING || !array(j, sources))
+        return -1;
+    if (json_equals(j, text, "") != (json_token(j, sources)->next == sources + 1))
+        return -1;
+    for (i = sources + 1; i < json_token(j, sources)->next; i = json_token(j, i)->next) {
+        unsigned long long start, size;
+        if (json_uint(j, json_get(j, i, "start"), &start) ||
+            json_uint(j, json_get(j, i, "length"), &size) || !size || start > length ||
+            size > length - start)
+            return -1;
+    }
+    return 0;
+}
+static int structure_shape(const Json *j, size_t page, unsigned long long counts[5]) {
+    size_t structure = json_get(j, page, "structure"), tables = json_get(j, structure, "tables");
+    size_t items = json_get(j, structure, "agendaItems"),
+           diagnostics = json_get(j, structure, "diagnostics");
+    size_t i, k, cell, table_count = 0, item_count = 0, length = 0;
+    unsigned long long format;
+    char *layout = 0;
+    int status = -1;
+    if (json_uint(j, json_get(j, structure, "format"), &format) || format != 1 ||
+        !array(j, tables) || !array(j, items) || !array(j, diagnostics))
+        return -1;
+    if (!json_equals(j, json_get(j, structure, "status"), "rule-supported") &&
+        !json_equals(j, json_get(j, structure, "status"), "unrecognized") &&
+        !json_equals(j, json_get(j, structure, "status"), "ambiguous") &&
+        !json_equals(j, json_get(j, structure, "status"), "pdf-warnings") &&
+        !json_equals(j, json_get(j, structure, "status"), "unsupported-layout"))
+        return -1;
+    if (json_token(j, tables)->next > tables + 1 || json_token(j, items)->next > items + 1) {
+        size_t text = json_get(j, json_get(j, page, "layout"), "text");
+        const JsonToken *t = json_token(j, text);
+        if (!t || t->kind != JSON_STRING)
+            return -1;
+        layout = (char *)rt_malloc(t->end - t->start + 1);
+        if (!layout || json_string(j, text, layout, t->end - t->start + 1))
+            goto done;
+        length = rt_strlen(layout);
+    }
+    for (i = tables + 1; i < json_token(j, tables)->next; i = json_token(j, i)->next) {
+        static const char *const consultation_columns[] = {"date", "committee", "responsibility"};
+        static const char *const agenda_columns[] = {"number", "text", "reference"};
+        size_t rows = json_get(j, i, "rows"), columns = json_get(j, i, "columns"), n = 0;
+        int consultation = json_equals(j, json_get(j, i, "kind"), "consultation");
+        if ((!consultation && !json_equals(j, json_get(j, i, "kind"), "agenda")) ||
+            !array(j, rows) || !array(j, columns) ||
+            (consultation && cell_shape(j, json_get(j, i, "header"), length)))
+            goto done;
+        for (k = columns + 1; k < json_token(j, columns)->next; k = json_token(j, k)->next) {
+            if (n >= 3 ||
+                !json_equals(j, k, consultation ? consultation_columns[n] : agenda_columns[n]))
+                goto done;
+            n++;
+        }
+        if (n != 3)
+            goto done;
+        for (k = rows + 1; k < json_token(j, rows)->next; k = json_token(j, k)->next) {
+            size_t cells = json_get(j, k, "cells"), n = 0;
+            int ambiguous = json_equals(j, json_get(j, k, "status"), "ambiguous");
+            if ((!ambiguous && !json_equals(j, json_get(j, k, "status"), "rule-supported")) ||
+                !array(j, cells))
+                goto done;
+            for (cell = cells + 1; cell < json_token(j, cells)->next;
+                 cell = json_token(j, cell)->next) {
+                if (cell_shape(j, cell, length))
+                    goto done;
+                n++;
+            }
+            if (n != 3)
+                goto done;
+            counts[2] += ambiguous;
+        }
+        table_count++;
+    }
+    for (i = items + 1; i < json_token(j, items)->next; i = json_token(j, i)->next) {
+        char number_value[32];
+        int protocol = json_equals(j, json_get(j, i, "kind"), "protocol-top");
+        if ((!protocol && !json_equals(j, json_get(j, i, "kind"), "agenda-top")) ||
+            string(j, i, "number", number_value, sizeof(number_value)) || !number_value[0])
+            goto done;
+        if (protocol) {
+            size_t references = json_get(j, i, "references"), outcome = json_get(j, i, "outcome");
+            const JsonToken *t = json_token(j, outcome);
+            if (cell_shape(j, json_get(j, i, "heading"), length) ||
+                cell_shape(j, json_get(j, i, "body"), length) || !array(j, references) || !t ||
+                (t->kind != JSON_NULL && cell_shape(j, outcome, length)))
+                goto done;
+            for (k = references + 1; k < json_token(j, references)->next;
+                 k = json_token(j, k)->next)
+                if (cell_shape(j, k, length))
+                    goto done;
+        } else {
+            unsigned long long table, row;
+            size_t target = tables + 1, rows;
+            if (json_uint(j, json_get(j, i, "table"), &table) || table >= table_count ||
+                json_uint(j, json_get(j, i, "row"), &row) ||
+                (!json_equals(j, json_get(j, i, "section"), "public") &&
+                 !json_equals(j, json_get(j, i, "section"), "nonpublic") &&
+                 !json_equals(j, json_get(j, i, "section"), "unknown")))
+                goto done;
+            for (k = 0; k < table; k++)
+                target = json_token(j, target)->next;
+            rows = json_get(j, target, "rows");
+            k = rows + 1;
+            while (row && k < json_token(j, rows)->next) {
+                k = json_token(j, k)->next;
+                row--;
+            }
+            if (k >= json_token(j, rows)->next ||
+                !json_equals(j, json_get(j, target, "kind"), "agenda") ||
+                !json_equals(j, json_get(j, k, "status"), "rule-supported"))
+                goto done;
+        }
+        item_count++;
+    }
+    counts[0] += table_count;
+    counts[1] += item_count;
+    counts[3] += table_count || item_count;
+    counts[4] += json_equals(j, json_get(j, structure, "status"), "pdf-warnings") ||
+                 json_equals(j, json_get(j, structure, "status"), "unsupported-layout");
+    status = 0;
+done:
+    rt_free(layout);
+    return status;
+}
 int prepared_open(PreparedDocument *d, const char *root, const char *key, const char *hash,
                   unsigned long long size) {
     char path[4096], actual[65], expected[65], source[65], pipeline[65], engine[128];
     PlatformDirEntry info;
     size_t length, pages, i;
     unsigned long long n, format, page = 0, warning_pages = 0;
+    unsigned long long structure_counts[5] = {0, 0, 0, 0, 0};
     const JsonToken *data;
     rt_memset(d, 0, sizeof(*d));
     if (artifact_path(root, key, hash, path) || platform_get_path_info(path, &info) ||
@@ -292,6 +423,17 @@ int prepared_open(PreparedDocument *d, const char *root, const char *key, const 
             goto invalid;
         if (n)
             warning_pages++;
+        if (structure_shape(&d->json, i, structure_counts))
+            goto invalid;
+    }
+    {
+        static const char *const names[] = {"tables", "agendaItems", "uncertainRows",
+                                            "structuredPages", "skippedPages"};
+        size_t structure = json_get(&d->json, d->data, "structure");
+        for (i = 0; i < 5; i++)
+            if (json_uint(&d->json, json_get(&d->json, structure, names[i]), &n) ||
+                n != structure_counts[i])
+                goto invalid;
     }
     if (json_uint(&d->json, json_get(&d->json, d->data, "pageCount"), &n) || n != page ||
         json_uint(&d->json, json_get(&d->json, d->data, "warningPages"), &n) || n != warning_pages)
@@ -394,6 +536,8 @@ typedef struct {
     const PrepareConfig *config;
     ToolByteBuffer pages, fields;
     size_t count, warnings, matched, unmatched, ambiguous;
+    size_t tables, agenda_items, uncertain_rows, structured_pages, skipped_pages;
+    PdfStructureState structure_state;
     int resource;
 } Build;
 static int header_limit(const Json *json, size_t definition, const PdfTextLayout *layout,
@@ -607,16 +751,20 @@ static int signed_number(ToolByteBuffer *out, double number_value) {
 static int page_callback(unsigned int page, const char *text, size_t length, unsigned int warnings,
                          const PdfTextLayout *layout, void *user) {
     Build *b = (Build *)user;
-    ToolByteBuffer out;
+    ToolByteBuffer out, structure;
+    PdfStructureResult result;
     size_t i;
     int status = 0;
     tool_byte_buffer_init(&out);
+    tool_byte_buffer_init(&structure);
     if (page == 1 && annotate(b, layout, page, warnings))
+        goto error;
+    if (pdf_structure_page(&structure, layout, warnings, &b->structure_state, &result))
         goto error;
     if (put(&out, "{\"page\":") || number(&out, page) || integer(&out, "warnings", warnings) ||
         put(&out, ",\"text\":") || json_quote(&out, text))
         goto error;
-    if (page == 1 || b->config->layout) {
+    if (page == 1 || b->config->layout || result.keep_layout) {
         if (put(&out, ",\"layout\":{\"space\":\"pdf-user-space-milliunits\",\"text\":") ||
             json_quote(&out, layout->text) || put(&out, ",\"spans\":["))
             goto error;
@@ -633,18 +781,27 @@ static int page_callback(unsigned int page, const char *text, size_t length, uns
         if (put(&out, "]}"))
             goto error;
     }
-    if (put(&out, "}") || b->pages.size + out.size > LIMIT / 2 ||
-        (b->count && put(&b->pages, ",")) || tool_byte_buffer_append(&b->pages, out.data, out.size))
+    if (put(&out, ",\"structure\":") ||
+        tool_byte_buffer_append(&out, structure.data, structure.size) || put(&out, "}") ||
+        b->pages.size + out.size > LIMIT / 2 || (b->count && put(&b->pages, ",")) ||
+        tool_byte_buffer_append(&b->pages, out.data, out.size))
         goto error;
     b->count++;
+    b->tables += result.tables;
+    b->agenda_items += result.agenda_items;
+    b->uncertain_rows += result.uncertain_rows;
+    b->structured_pages += result.tables || result.agenda_items;
+    b->skipped_pages += result.skipped;
     if (warnings)
         b->warnings++;
     tool_byte_buffer_free(&out);
+    tool_byte_buffer_free(&structure);
     (void)length;
     return status;
 error:
     b->resource = 1;
     tool_byte_buffer_free(&out);
+    tool_byte_buffer_free(&structure);
     return -1;
 }
 int prepare_document(const PrepareConfig *c, const char *root, const unsigned char *bytes,
@@ -695,7 +852,11 @@ int prepare_document(const PrepareConfig *c, const char *root, const unsigned ch
         integer(&payload, "unmatchedHeaders", build.unmatched) ||
         integer(&payload, "ambiguousHeaders", build.ambiguous) || put(&payload, ",\"fields\":[") ||
         tool_byte_buffer_append(&payload, build.fields.data, build.fields.size) ||
-        put(&payload, "],\"pages\":[") ||
+        put(&payload, "],\"structure\":{\"tables\":") || number(&payload, build.tables) ||
+        integer(&payload, "agendaItems", build.agenda_items) ||
+        integer(&payload, "uncertainRows", build.uncertain_rows) ||
+        integer(&payload, "structuredPages", build.structured_pages) ||
+        integer(&payload, "skippedPages", build.skipped_pages) || put(&payload, "},\"pages\":[") ||
         tool_byte_buffer_append(&payload, build.pages.data, build.pages.size) ||
         put(&payload, "]}"))
         goto done;
@@ -717,7 +878,7 @@ int prepared_summary(ToolByteBuffer *out, const PreparedDocument *d) {
     static const char *const names[] = {
         "sourceSha256",     "key",          "status",         "error",
         "pageCount",        "warningPages", "matchedHeaders", "unmatchedHeaders",
-        "ambiguousHeaders", "fields"};
+        "ambiguousHeaders", "fields",       "structure"};
     size_t i;
     if (put(out, "{\"format\":1"))
         return -1;

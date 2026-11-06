@@ -73,10 +73,10 @@ endif
 
 OBJECTS := $(addprefix $(BUILD)/obj/,$(addsuffix .o,$(basename $(COMMON) $(PLATFORM) $(START))))
 APP_OBJECTS := $(addprefix $(BUILD)/obj/,$(APP:.c=.o))
-INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o search-model.o search-date.o search-research.o json.o pdf-text.o archive-version.o archive-walk.o prepare.o)
+INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o search-model.o search-date.o search-research.o json.o pdf-text.o pdf-structure.o archive-version.o archive-walk.o prepare.o)
 SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-model.o search-date.o search-research.o search-web.o search-mcp.o json.o)
-PREPARE_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-prepare.o prepare.o pdf-text.o json.o archive-walk.o)
-PREPARE_SOURCES := src/prepare.c src/prepare.h src/pdf-text.c src/pdf-text.h src/json.c src/json.h \
+PREPARE_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-prepare.o prepare.o pdf-text.o pdf-structure.o json.o archive-walk.o)
+PREPARE_SOURCES := src/prepare.c src/prepare.h src/pdf-text.c src/pdf-text.h src/pdf-structure.c src/pdf-structure.h src/json.c src/json.h \
 	$(NEWOS)/src/shared/pdf.c $(NEWOS)/src/shared/compression/zlib.c \
 	$(NEWOS)/src/shared/compression/crc32.c \
 	$(wildcard $(NEWOS)/src/shared/*.h $(NEWOS)/src/shared/compression/*.h) $(COMMON) Makefile
@@ -100,7 +100,7 @@ $(SEARCH_PROGRAM): $(SEARCH_OBJECTS) $(OBJECTS) $(LINK_DEPS)
 $(PREPARE_PROGRAM): $(PREPARE_OBJECTS) $(INDEX_COMMON) $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(PREPARE_OBJECTS) $(INDEX_COMMON) $(OBJECTS))
 
-$(BUILD)/obj/src/search.o $(BUILD)/obj/src/search-model.o $(BUILD)/obj/src/search-date.o $(BUILD)/obj/src/search-research.o $(BUILD)/obj/src/oparl-index.o $(BUILD)/obj/src/oparl-search.o $(BUILD)/obj/src/search-web.o $(BUILD)/obj/src/search-mcp.o $(BUILD)/obj/src/pdf-text.o: CFLAGS += -O3
+$(BUILD)/obj/src/search.o $(BUILD)/obj/src/search-model.o $(BUILD)/obj/src/search-date.o $(BUILD)/obj/src/search-research.o $(BUILD)/obj/src/oparl-index.o $(BUILD)/obj/src/oparl-search.o $(BUILD)/obj/src/search-web.o $(BUILD)/obj/src/search-mcp.o $(BUILD)/obj/src/pdf-text.o $(BUILD)/obj/src/pdf-structure.o: CFLAGS += -O3
 $(BUILD)/test-json$(EXE): $(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS))
 

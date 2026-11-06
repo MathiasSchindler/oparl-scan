@@ -12,7 +12,7 @@ Dokumentationsseiten:
 | Programm | Aufgabe | Dokumentation |
 | --- | --- | --- |
 | **oparl-scan** | OParl-Metadaten und Dokumente herunterladen und aktualisieren | [Benutzung, Optionen, Archivformat und Fehlerbehandlung](docs/oparl-scan.md) |
-| **oparl-prepare** | PDF-Texte, Positionen und belegte Formularfelder wiederverwendbar aufbereiten | [Benutzung, Cachevertrag, Templates und Grenzen](docs/oparl-prepare.md) |
+| **oparl-prepare** | PDF-Texte, Formularfelder, bekannte Tabellen und TOP-Bloecke belegt aufbereiten | [Benutzung, Cachevertrag, Templates und Grenzen](docs/oparl-prepare.md) |
 | **oparl-index** | Gemeinsamen Metadaten- und PDF-Volltextindex aufbauen | [Benutzung, Importregeln, PDF-Grenzen und Abdeckungsbericht](docs/oparl-index.md) |
 | **oparl-search** | Metadaten und Volltexte durchsuchen und Inhalte mit Quellen abrufen | [CLI, Weboberflaeche, HTTP-MCP, JSON und Benchmarks](docs/oparl-search.md) |
 
@@ -123,6 +123,14 @@ getrennten Erstellungs-, Eingangs- und Fristdaten sowie geometrisch
 begrenzte mehrzeilige Einreicherangaben. Diese belegten Quellenfelder sind
 noch keine fertigen Bearbeitungszeitstatistiken; Details und Grenzen stehen
 bei [oparl-prepare](docs/oparl-prepare.md#templates-und-erste-m5-bausteine).
+
+Die [Strukturstufe](docs/oparl-prepare.md#tabellen-und-top-bloecke) erschliesst
+Beratungstabellen, TOP-Bloecke in Protokollauszuegen und mehrseitige
+Tagesordnungen deterministisch aus Textpositionen. Jede Zelle behaelt
+Quelltextbereiche; Unsicherheiten und leere Zellen bleiben sichtbar.
+Vollstaendige Strukturen stehen zunaechst nur in den Prepare-Artefakten,
+im Index nur kompakte Zaehlungen. Keine allgemeine Tabellen-/Vollprotokoll-
+Erkennung und keine OCR.
 
 `--year 2024` meint Drucksachenkennzeichen mit `24/`, nicht das Datum
 der Drucksache oder PDF. Verknuepfte spaetere Vorgaenge koennen ebenfalls

@@ -28,18 +28,20 @@ const show = (object, page, which = index) => JSON.parse(run(searcher, [
   '--index', which, '--json', '--raw', '--show', object, ...(page ? ['--page', String(page)] : []),
 ]).stdout);
 function textPdf(lines, secondPage = false) {
+  const contents = lines => stream(`BT /F1 12 Tf 16 TL 1 0 0 1 40 740 Tm ${lines.map((line, i) => {
+    const [position, s] = Array.isArray(line)
+      ? [`1 0 0 1 ${line[0]} ${line[1]} Tm `, line[2]] : [i ? 'T* ' : '', line];
+    return `${position}(${s.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')}) Tj`;
+  }).join('\n')} ET`);
   const objects = [null, '<< /Type /Catalog /Pages 2 0 R >>',
     `<< /Type /Pages /Kids [3 0 R${secondPage ? ' 6 0 R' : ''}] /Count ${secondPage ? 2 : 1} >>`,
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
-    stream(`BT /F1 12 Tf 16 TL 1 0 0 1 40 740 Tm ${lines.map((line, i) => {
-      const [position, s] = Array.isArray(line)
-        ? [`1 0 0 1 ${line[0]} ${line[1]} Tm `, line[2]] : [i ? 'T* ' : '', line];
-      return `${position}(${s.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')}) Tj`;
-    }).join('\n')} ET`)];
+    contents(lines)];
   if (secondPage) objects.push(
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>',
-    stream('BT /F1 12 Tf 16 TL 1 0 0 1 40 740 Tm (Fernwaer-) Tj T* (me) Tj ET'));
+    Array.isArray(secondPage) ? contents(secondPage) :
+      stream('BT /F1 12 Tf 16 TL 1 0 0 1 40 740 Tm (Fernwaer-) Tj T* (me) Tj ET'));
   return pdf(objects);
 }
 const header = (date = '16.07.2026', extra = '') => [
@@ -386,6 +388,155 @@ try {
   invalidConfig.templates[0].fields[1].maxLines = 5;
   await writeFile(customPath, JSON.stringify(invalidConfig));
   run(prepare, ['--input', sourcePath, '--output', cache, '--templates', customPath], 1);
+  const consultation = textPdf([
+    [440, 700, 'Zuständigkeit'], [40, 700, 'Datum der Sitzung'], [160, 700, 'Gremium'],
+    [440, 680, 'Entscheidung'], [40, 680, '03.05.2023'], [160, 680, 'Stadtverordnetenversammlung'],
+    [160, 666, 'der Landeshauptstadt Potsdam'],
+    [40, 640, '04.05.2023'], [160, 640, 'Hauptausschuss'],
+    [40, 610, 'Beschlussvorschlag: Nicht Teil der Tabelle.'],
+  ]);
+  const centeredConsultationLines = [
+    [40, 700, 'geplanter'], [160, 700, 'Gremium'], [440, 700, 'Zuständigkeit'],
+    [40, 690, 'Sitzungstermin'],
+    [160, 672, 'Stadtverordnetenversammlung'],
+    [40, 666, '04.05.2023'], [440, 666, 'zur Kenntnis'],
+    [160, 660, 'der Landeshauptstadt Potsdam'],
+    [40, 620, 'Anlass des Auskunftsersuchens: Nicht Teil der Tabelle.'],
+  ];
+  const centeredConsultation = textPdf(centeredConsultationLines);
+  const protocol = textPdf([
+    [200, 760, 'Protokollauszug'], [240, 740, 'aus der'],
+    [40, 700, 'Top 3.12'], [120, 700, 'Erhalt einer Straße'],
+    [120, 686, 'mit Gehweg'],
+    [40, 672, '23/SVV/0576'], [40, 658, 'ungeändert beschlossen'],
+    [40, 630, 'Beratung und Abstimmung zum Antrag.'],
+    [40, 610, 'Ein Verweis auf TOP 99 im Text ist keine weitere Überschrift.'],
+    [40, 570, 'Top 3.13'], [120, 570, 'Zweiter Vorgang'],
+    [40, 556, '23/SVV/0577'], [40, 542, 'vertagt'],
+    [40, 515, 'Beratung des zweiten Vorgangs.'],
+    [40, 20, '1 von 1 in Zusammenstellung'],
+  ]);
+  const agendaFirstPage = [
+    [150, 760, 'öffentliche Bekanntmachung'], [40, 710, 'Tagesordnung:'],
+    [40, 690, 'Öffentlicher Teil'],
+    [40, 660, '1'], [120, 660, 'Eröffnung der Sitzung'],
+    [40, 620, '5.1.1'], [120, 620, 'Sitzungskalender'], [450, 620, '24/SVV/0811-01'],
+    [120, 606, 'Fraktion Beispiel'],
+    [40, 20, '1 von 2 in Zusammenstellung'],
+  ];
+  const agenda = textPdf(agendaFirstPage, [
+    [120, 770, 'Fortsetzung ohne eigene Nummer'],
+    [40, 740, '5.2'], [120, 740, 'Weiterer Punkt'], [450, 740, '24/SVV/0906'],
+    [40, 700, 'Nichtöffentlicher Teil'],
+    [40, 680, '1'], [120, 680, 'Weiterer veröffentlichter TOP-Titel'],
+    [40, 20, '2 von 2 in Zusammenstellung'],
+  ]);
+  const verifyCells = (page, object) => {
+    if (!object || typeof object !== 'object') return;
+    if (Array.isArray(object.sources)) {
+      const raw = Buffer.from(page.layout.text);
+      const pieces = object.sources.map(source => {
+        assert.ok(source.start >= 0 && source.length > 0 && source.start + source.length <= raw.length);
+        return raw.subarray(source.start, source.start + source.length).toString();
+      });
+      assert.equal(pieces.join(' ').replace(/\s+/g, ' ').trim(), object.text,
+        'Each geometric cell must be independently reconstructable from byte-exact source ranges');
+    }
+    for (const value of Object.values(object)) verifyCells(page, value);
+  };
+  for (const [name, bytes] of [['consultation', consultation],
+    ['consultation-centered', centeredConsultation], ['protocol', protocol], ['agenda', agenda]]) {
+    const path = join(root, `structure-${name}.pdf`);
+    await writeFile(path, bytes);
+    prepareRun(path);
+    const found = (await artifact(bytes)).data;
+    for (const page of found.pages) verifyCells(page, page.structure);
+    if (name === 'consultation-centered') {
+      const tables = found.pages[0].structure.tables;
+      assert.equal(tables.length, 1, 'A centered date between two committee baselines still identifies one row');
+      assert.equal(tables[0].rows.length, 1);
+      assert.deepEqual(tables[0].rows[0].cells.map(c => c.text),
+        ['04.05.2023', 'Stadtverordnetenversammlung der Landeshauptstadt Potsdam', 'zur Kenntnis']);
+    } else if (name === 'consultation') {
+      const table = found.pages[0].structure.tables[0];
+      assert.equal(table.kind, 'consultation');
+      assert.deepEqual(table.rows[0].cells.map(c => c.text),
+        ['03.05.2023', 'Stadtverordnetenversammlung', 'Entscheidung']);
+      assert.equal(table.rows[1].status, 'ambiguous', 'A blank date cannot silently inherit a previous table row');
+      assert.equal(table.rows[1].cells[0].text, '');
+      assert.equal(table.rows[2].cells[2].text, '', 'Empty responsibility cells must remain empty');
+      assert.equal(table.rows.length, 3, 'Following body paragraphs do not belong to the consultation table');
+    } else if (name === 'protocol') {
+      const items = found.pages[0].structure.agendaItems;
+      assert.equal(items.length, 2, 'Only explicit TOP headings create agenda blocks');
+      assert.equal(items[0].number, '3.12');
+      assert.equal(items[0].heading.text, 'Top 3.12 Erhalt einer Straße mit Gehweg');
+      assert.equal(items[0].references[0].text, '23/SVV/0576');
+      assert.equal(items[0].outcome.text, 'ungeändert beschlossen');
+      assert.match(items[0].body.text, /Beratung und Abstimmung/);
+      assert.doesNotMatch(items[0].body.text, /zweiten Vorgangs|Zweiter Vorgang/,
+        'The next explicit TOP starts a new block instead of being assigned to the previous discussion');
+      assert.equal(items[1].number, '3.13');
+      assert.match(items[1].body.text, /Beratung des zweiten Vorgangs/);
+      assert.doesNotMatch(items[0].body.text, /Zusammenstellung/);
+      await writeFile(sourcePath, bytes);
+      prepareRun();
+      run(indexer, ['--input', archive, '--output', index, '--prepared', cache]);
+      assert.deepEqual(show(file).preparation.structure, found.structure,
+        'The standalone index retains compact structure counts without copying unbounded table data');
+      await preparedApi(file, found.fields);
+      await writeFile(sourcePath, source);
+    } else {
+      assert.equal(found.structure.agendaItems, 4);
+      assert.deepEqual(found.pages[0].structure.agendaItems.map(i => i.number), ['1', '5.1.1']);
+      assert.deepEqual(found.pages[1].structure.agendaItems.map(i => [i.number, i.section]),
+        [['5.2', 'public'], ['1', 'nonpublic']]);
+      const rows = found.pages[1].structure.tables[0].rows;
+      assert.equal(rows[0].status, 'ambiguous', 'Cross-page fragments must not be assigned to an invented TOP');
+      assert.equal(rows[1].cells[2].text, '24/SVV/0906');
+      assert.ok(found.pages[1].layout, 'Structured pages retain complete source layout even without --layout');
+      const cached = await artifact(bytes), envelope = JSON.parse(await readFile(cached.path, 'utf8'));
+      envelope.data.structure.agendaItems++;
+      envelope.sha256 = hash(JSON.stringify(envelope.data));
+      await writeFile(cached.path, JSON.stringify(envelope));
+      run(prepare, ['--input', path, '--output', cache], 1);
+      prepareRun(path, ['--force']);
+      const badSource = JSON.parse(await readFile(cached.path, 'utf8'));
+      badSource.data.pages[0].structure.tables[0].rows[0].cells[0].sources[0].start = 999999999;
+      badSource.sha256 = hash(JSON.stringify(badSource.data));
+      await writeFile(cached.path, JSON.stringify(badSource));
+      run(prepare, ['--input', path, '--output', cache], 1);
+      prepareRun(path, ['--force']);
+    }
+  }
+  const prose = textPdf(['Tagesordnung: Eine nummerierte Liste ist noch keine Tabelle.',
+    '1. Erste Frage', '2. Zweite Frage', 'Der Ausschuss diskutiert TOP 3.12.']);
+  const prosePath = join(root, 'structure-prose.pdf');
+  await writeFile(prosePath, prose);
+  prepareRun(prosePath);
+  assert.equal((await artifact(prose)).data.structure.agendaItems, 0);
+  assert.equal((await artifact(prose)).data.structure.tables, 0);
+  const asymmetric = textPdf(centeredConsultationLines.map(line =>
+    line[0] === 160 && line[1] === 660 ? [160, 650, line[2]] : line));
+  const asymmetricPath = join(root, 'structure-asymmetric.pdf');
+  await writeFile(asymmetricPath, asymmetric);
+  prepareRun(asymmetricPath);
+  assert.equal((await artifact(asymmetric)).data.structure.tables, 0,
+    'Only symmetrically centered baselines justify joining a date to two committee lines');
+  assert.equal((await artifact(asymmetric)).data.pages[0].structure.status, 'ambiguous');
+  for (const [name, second, diagnostic] of [
+    ['backwards', [[40, 760, '4'], [120, 760, 'Keine sichere Fortsetzung']],
+      'nonmonotonic-agenda-number'],
+    ['new-document', [[40, 760, 'Drucksache Nr. 24/SVV/0666'],
+      [40, 700, '6'], [120, 700, 'Nummerierte Frage in einem anderen Dokument']], null],
+  ]) {
+    const bytes = textPdf(agendaFirstPage, second), path = join(root, `structure-${name}.pdf`);
+    await writeFile(path, bytes);
+    prepareRun(path);
+    const page = (await artifact(bytes)).data.pages[1];
+    assert.equal(page.structure.agendaItems.length, 0, 'Unproven cross-page agenda continuation is not emitted');
+    if (diagnostic) assert.ok(page.structure.diagnostics.includes(diagnostic));
+  }
   const image = pdf([null, '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /XObject << /I 4 0 R >> >> /Contents 5 0 R >>',
@@ -395,6 +546,8 @@ try {
   await writeFile(imagePath, image);
   prepareRun(imagePath, [], 3);
   assert.equal((await artifact(image)).data.pages[0].warnings & 4, 4, 'Image-only PDFs retain explicit OCR gaps');
+  assert.equal((await artifact(image)).data.pages[0].structure.status, 'pdf-warnings',
+    'Unreliable PDF pages have an explicit structure gap; no OCR or fabricated cells');
   const badPath = join(root, 'broken.pdf');
   await writeFile(badPath, 'not a PDF');
   assert.equal(prepareRun(badPath, [], 3).warningOrFailedDocuments, 1);

@@ -38,7 +38,7 @@ Originalarchive ablegen; Vorbereitung und Download nicht gleichzeitig ausfuehren
 | `--input PFAD` | Archiv, Elternverzeichnis oder PDF; Standard `downloads` |
 | `--output VERZEICHNIS` | Ableitungen; Standard `build/prepared` |
 | `--templates DATEI` | Regeldatei; Standard `templates/potsdam.json` |
-| `--layout` | Positionen auf allen statt nur auf der ersten Seite speichern |
+| `--layout` | Positionen auf allen statt nur auf der ersten und strukturierten Seiten speichern |
 | `--force` | Artefakte neu erzeugen, auch nach Cachebeschaedigung |
 | `--help` | Kommandozeilenhilfe |
 
@@ -83,7 +83,8 @@ Jede Dokumentdatei hat die Form
 `{"format":1,"sha256":"...","data":{...}}`. Die Pruefsumme gilt fuer die exakten
 serialisierten Bytes von `data`, einschliesslich aller Leerzeichen.
 Der Leser prueft ausserdem Pipeline, Extraktor, Quellhash, Bytezahl,
-Seitenfolge und Warnungswerte. Eine beschaedigte Datei wird ausdruecklich
+Seitenfolge, Warnungswerte, Strukturzaehlungen, Zellformen, Quellenbereiche
+und Tabellen-/Zeilenverweise. Eine beschaedigte Datei wird ausdruecklich
 abgewiesen, nicht still durch erneute Extraktion ersetzt.
 `--force` repariert solche abgeleiteten Dateien; Originale bleiben unberuehrt.
 Die Pruefsumme ist keine Signatur: Der Cache muss wie der Index vor
@@ -112,6 +113,10 @@ gelesen und gehasht, um die verwendete Fassung zu verifizieren. Ohne
   Template-ID, Regelversion, Seite, Quellenbeschriftung, maximaler Zeilenzahl
   und Originaltext. Mehrzeilige Textwerte werden mit einfachen Leerzeichen
   verbunden; `sourceText` und seine Bytepositionen bleiben unveraendert.
+- `structure`: kompakte Dokumentzaehlungen fuer `tables`, `agendaItems`,
+  `uncertainRows`, `structuredPages` und `skippedPages`.
+- `pages[].structure`: erkannte Tabellen, TOP-Bloecke und Diagnosen je Seite;
+  Format 1, Regel `potsdam-layout-structure-v1`.
 
 Der normalisierte Seitentext bleibt fuer Suche und Abschnittsidentitaeten
 massgeblich. `layout.text` erhaelt dagegen den Text **vor**
@@ -130,7 +135,9 @@ Ein Zeilenwechsel bleibt auch dann erhalten, wenn der vorherige PDF-Textlauf
 bereits mit Leerzeichen endet. Diese Leerzeichen werden nicht nachtraeglich
 aus dem Layouttext geloescht, damit Textspannen ihre Bytepositionen behalten.
 
-Standardmaessig wird Layout nur fuer die erste Seite gespeichert.
+Standardmaessig wird Layout fuer die erste Seite sowie fuer Seiten mit
+Strukturbefunden oder Strukturdiagnosen gespeichert. So bleiben auch dort
+die Quellen der einzelnen Zellen nachpruefbar.
 `--layout` haelt es fuer jede Seite vor, kostet aber deutlich mehr Platz.
 Pro Quelldatei gelten 512 MiB Eingabebudget, pro Artefakt 64 MiB und fuer
 gesammelte serialisierte Seiten 32 MiB. Eine Seite hat hoechstens 262.144
@@ -229,6 +236,64 @@ Feldstatus sind `rule-supported`, `missing`, `ambiguous`, `invalid`,
 `placeholder`, `too-long` oder `unsupported-placement`; nur bei
 `rule-supported` ist `value` gesetzt. Es werden keine Personen-IDs geraten.
 
+## Tabellen und TOP-Bloecke
+
+Die Strukturstufe verwendet vorhandene Textspannen und ihre Grundlinien.
+Sie gruppiert horizontale Spannen mit maximal zwei PDF-Einheiten
+Hoehenunterschied und sortiert sie geometrisch von links nach rechts.
+Bekannte Beschriftungen und Spaltenabstaende begrenzen die Erkennung:
+
+- **Beratungstabellen** mit Datums-/Sitzungsterminspalte, `Gremium` und
+  `Zustaendigkeit`: `kind: "consultation"`, Spalten `date`, `committee`,
+  `responsibility`. Beschriftungen im PDF verwenden die exakten Umlaute.
+  Datumswerte bleiben Quelltext in der Form `DD.MM.YYYY`, keine neue
+  normalisierte Such-Datumsrolle. Datumlose Fortsetzungszeilen bleiben
+  `ambiguous`; leere Zellen werden nicht mit Nachbarwerten aufgefuellt.
+  Eine eng begrenzte Ausnahme erkennt symmetrisch um das Datum liegende,
+  gleich eingerueckte Gremiumszeilen als eine vertikal zentrierte Zelle.
+  Einseitige oder asymmetrische Fortsetzungen werden nicht so verbunden.
+- **Protokollauszuege** mit explizitem `Protokollauszug`-/`aus der`-Kopf
+  und geometrisch passender TOP-Ueberschrift: `kind: "protocol-top"`,
+  `number`, `heading`, `references`, `outcome` und `body`.
+  Die TOP-Nummer bleibt ein String, etwa `3.12`. Eine isolierte
+  Drucksachenreferenz oder bekannte Ergebniszeile muss den Kopf stuetzen.
+  Ergebnisangaben bleiben Quellenformulierungen und beweisen fuer sich
+  keinen verbindlichen SVV-Beschluss. Eine folgende explizite TOP-Ueberschrift
+  begrenzt den vorherigen Block. Diskussionen werden ohne erneuten
+  expliziten TOP nicht automatisch ueber Seiten hinweg verbunden.
+- **Tagesordnungen** aus Bekanntmachungen/Einladungen: `kind: "agenda"`,
+  Spalten `number`, `text`, `reference`. Mehrzeilige Texte und Einreicher
+  bleiben gemeinsam in der Textspalte; Titel-/Autorenrollen werden nicht
+  geraten. `agenda-top`-Befunde referenzieren `table` und `row` als
+  0-basierte Indizes auf derselben Seite. `section` ist `public`,
+  `nonpublic` oder `unknown`, abgeleitet nur aus expliziten Teilueberschriften.
+  Die Strukturierung verarbeitet ausschliesslich bereits archivierte
+  oeffentliche Dateien und erschliesst keinen nichtoeffentlichen Zugang.
+  Passende Spaltenrahmen koennen auf Folgeseiten weitergelten; nicht
+  verknuepfbare Fortsetzungen bleiben unsicher. Rueckwaerts laufende
+  TOP-Nummern ohne expliziten Abschnittswechsel werden nicht sicher zugeordnet.
+
+Zellen sowie Ueberschriften, Referenzen, Ergebnis- und Diskussionstexte
+haben diese Form:
+
+```json
+{"text":"normalisierter Zelltext","sources":[{"start":123,"length":45}]}
+```
+
+`sources` sind geordnet aufzufassende UTF-8-Bytebereiche im **Layouttext
+derselben Seite**. Sie sind keine Positionen im normalisierten Seitentext.
+Nur Whitespace wird fuer `text` vereinheitlicht; Trennstriche bleiben erhalten.
+Leere Zellen haben leeren Text und keine Quellenbereiche.
+
+Seitenstatus sind `rule-supported`, `unrecognized`, `ambiguous`,
+`pdf-warnings` oder `unsupported-layout`; `diagnostics` nennt gegebenenfalls
+die Regelgrenze. Bestehende PDF-Warnungen sowie schraege/rueckwaerts laufende
+Grundlinien verhindern eine fachliche Strukturierung der Seite.
+`rule-supported` bedeutet eine passende deterministische Regel, keine
+manuell gepruefte inhaltliche Richtigkeit. Allgemeine Zahlentabellen,
+Finanz-/Massnahmentabellen, vollstaendige Sitzungsprotokolle und OCR
+sind damit noch nicht geloest.
+
 ## Nutzung im Index und Grenzen
 
 Ein vorbereiteter Index behaelt die Rohmetadaten und fuehrt die kompakten
@@ -243,10 +308,16 @@ Sie werden nicht in bestehende Such-Datumsrollen wie `submittedAt`
 umgedeutet; entsprechende fachliche Filter und Friststatistiken bleiben
 einem spaeteren M5-Ausbau vorbehalten.
 
+Der Index uebernimmt bewusst nur die kompakten `preparation.structure`-
+Zaehlungen, nicht saemtliche Tabellen-/TOP-Texte. Vollstaendige Strukturen
+stehen in den Prepare-Artefakten; die bestehende Volltextsuche und ihre
+Abschnittsidentitaeten bleiben unveraendert. Neue strukturbezogene Such-/
+Nachladefunktionen und automatische Graphverknuepfungen sind nicht enthalten.
+
 Dies ist die gemeinsame technische Grundlage fuer M5 und kleinere M6-Fundstellen,
 **nicht die vollstaendige Erledigung dieser Meilensteine**. Insbesondere fehlen
-Personen-/Fraktionsidentitaeten, Fachsegmentierung,
-Tabellen und eine verlaessliche Erkennung von Antworten ohne ausdrueckliche
+Personen-/Fraktionsidentitaeten, allgemeine Fach-/Tabellensegmentierung
+und eine verlaessliche Erkennung von Antworten ohne ausdrueckliche
 Antwortueberschrift. Beim realen `26/SVV/0677-002` sind Datum und
 Einreicherbezeichnung belegbar, die Antwortrolle bleibt vorsichtig ungeklart.
 Ein Dateinamensuffix oder der OParl-Rohtyp wird dafuer nicht umgedeutet.
@@ -255,6 +326,9 @@ Die [Vorbereitungstests](../tests/prepare.mjs) pruefen unter anderem
 Textparitaet, Layoutfundstellen, Positionsgrenzen, konservative Templates,
 Zeilenwechsel trotz abschliessender Leerzeichen, begrenzte mehrzeilige
 Akteure, alte Formulare mit getrennten Datumsrollen und leeren Zellen,
+Beratungsspalten trotz abweichender PDF-Schreibreihenfolge, TOP-Blockgrenzen,
+mehrseitige Tagesordnungen, nicht zugeordnete Fortsetzungen, genaue
+Zellfundstellen und begrenzte HTTP-/MCP-Antwortgroessen,
 OCR-Luecken, Cachewiederverwendung/-invalidierung/-korruption, atomar erhaltene
 vorherige Indizes, unveraenderte Originale und Verzeichnisse mit mehr als
 1.024 Dateien. Build und Importpruefung umfassen das vierte native Binary.
