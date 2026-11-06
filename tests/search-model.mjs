@@ -74,6 +74,8 @@ try {
   const file = show(id('files/shared'));
   const page = show(id('files/shared'), 1);
   assert.equal(file.model.documentVersion.sha256, hash(fixture.documents.find(d => d.id === file.id).bytes));
+  assert.equal(file.model.documentVersion.observedAtEpochSeconds, null);
+  assert.equal(file.model.documentVersion.fetchedAtEpochSeconds, null);
   assert.equal(show(file.model.documentVersion.id).id, file.id);
   assert.equal(show(file.model.documentVersion.id, 1).model.identity, page.model.identity);
   assert.equal(show(page.model.identity).text, page.text);
@@ -109,7 +111,7 @@ try {
   checksum.fill(0, 112, 144);
   assert.equal(hash(checksum), original.subarray(112, 144).toString('hex'));
   assert.equal(model.snapshotId, hash(checksum), 'Snapshot identity covers every model section and the header');
-  assert.equal(original.readUInt32LE(8), 2);
+  assert.equal(original.readUInt32LE(8), 3);
   const header = {
     records: Number(original.readBigUInt64LE(32)), owners: Number(original.readBigUInt64LE(56)),
     relations: Number(original.readBigUInt64LE(144)), facts: Number(original.readBigUInt64LE(152)),
@@ -140,6 +142,7 @@ try {
     b => b.writeUInt32LE(0xffffffff, header.facts + 8),
     b => b.writeUInt32LE(0xffffffff, header.evidence),
     b => b.writeUInt32LE(taxRecord, header.versions),
+    b => b.writeBigUInt64LE(1n, header.versions + 32),
     b => b.writeUInt32LE(noFilesRecord, header.owners + 4),
     b => b.writeUInt32LE(1, relationRow(5) + 8), // A Meeting attachment cannot become Paper.mainFile.
     b => b.writeUInt32LE(original.readUInt32LE(header.records + taxRecord * 88), relationRow(24) + 4),
@@ -152,9 +155,12 @@ try {
     run(searcher, ['--index', join(root, 'broken.ops'), 'Schulweg'], 1);
   }
   const legacy = Buffer.alloc(144);
-  legacy.write('OPARLIDX'); legacy.writeUInt32LE(1, 8);
-  await writeFile(join(root, 'old.ops'), legacy);
-  assert.match(run(searcher, ['--index', join(root, 'old.ops'), 'x'], 1).stderr, /rebuild with oparl-index/);
+  legacy.write('OPARLIDX');
+  for (const version of [1, 2]) {
+    legacy.writeUInt32LE(version, 8);
+    await writeFile(join(root, 'old.ops'), legacy);
+    assert.match(run(searcher, ['--index', join(root, 'old.ops'), 'x'], 1).stderr, /rebuild with oparl-index/);
+  }
   await rename(hidden, fixture.archive);
   run(indexer, ['--input', fixture.archive, '--output', index]);
   assert.equal(show(file.id).model.documentVersion.id, file.model.documentVersion.id);

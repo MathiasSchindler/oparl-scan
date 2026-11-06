@@ -24,7 +24,7 @@ _Static_assert(sizeof(Header) == 232, "fixed binary index header");
 _Static_assert(sizeof(SearchRecord) == 88 && sizeof(SearchTerm) == 24 &&
     sizeof(SearchOccurrence) == 16 && sizeof(SearchOwner) == 8, "fixed binary section layouts");
 _Static_assert(sizeof(SearchRelation) == 24 && sizeof(SearchFact) == 16 &&
-    sizeof(SearchEvidence) == 32 && sizeof(SearchVersion) == 24 &&
+    sizeof(SearchEvidence) == 32 && sizeof(SearchVersion) == 40 &&
     sizeof(SearchSection) == 24, "fixed canonical model layouts");
 
 int search_error(const char *message, const char *detail) {
@@ -316,7 +316,7 @@ int search_write(SearchBuilder *builder, const char *path) {
     parts[9] = builder->sections.data; sizes[9] = builder->sections.count * sizeof(SearchSection);
     rt_memset(&header, 0, sizeof(header));
     memcpy(header.magic, "OPARLIDX", 8);
-    header.version = 2; header.endian = 0x01020304U; header.incomplete = builder->incomplete;
+    header.version = 3; header.endian = 0x01020304U; header.incomplete = builder->incomplete;
     offsets[0] = aligned(sizeof(header));
     for (i = 0; i < 10; i++) offsets[i + 1] = offsets[i] + aligned(sizes[i]);
     header.strings = offsets[0]; header.records = offsets[1]; header.terms = offsets[2];
@@ -389,7 +389,7 @@ int search_open(SearchIndex *index, const char *path) {
         if (got <= 0) goto invalid;
         p += (size_t)got;
     }
-    if (memcmp(header.magic, "OPARLIDX", 8) == 0 && header.version != 2) {
+    if (memcmp(header.magic, "OPARLIDX", 8) == 0 && header.version != 3) {
         platform_close(fd);
         return search_error("unsupported index format; rebuild with oparl-index --input ARCHIVE --output INDEX", path);
     }
@@ -399,7 +399,7 @@ int search_open(SearchIndex *index, const char *path) {
         if (got <= 0) goto invalid;
         p += (size_t)got;
     }
-    if (memcmp(header.magic, "OPARLIDX", 8) != 0 || header.version != 2 ||
+    if (memcmp(header.magic, "OPARLIDX", 8) != 0 || header.version != 3 ||
         header.endian != 0x01020304U || header.size != info.size || header.reserved ||
         header.incomplete > 1 || !header.imported_at || header.imported_at > INT64_MAX ||
         header.strings != aligned(sizeof(header)) || header.string_bytes == 0) goto invalid;
@@ -1227,7 +1227,7 @@ int search_status_json(ToolByteBuffer *buffer, const SearchIndex *index) {
     }
     return out_text(&out, "{\"records\":") != 0 || out_uint(&out, index->record_count) != 0 ||
         out_field_uint(&out, "terms", index->term_count) != 0 ||
-        out_field_uint(&out, "formatVersion", 2) != 0 ||
+        out_field_uint(&out, "formatVersion", 3) != 0 ||
         out_field_string(&out, "snapshotId", index->snapshot_id) != 0 ||
         out_field_uint(&out, "importedAtEpochSeconds", index->imported_at) != 0 ||
         out_field_uint(&out, "relations", index->relation_count) != 0 ||

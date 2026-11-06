@@ -34,7 +34,13 @@ build/macos-aarch64/oparl-scan --output downloads
 build/macos-aarch64/oparl-scan --output downloads --metadata-only
 
 # Vorgaenge des Jahrgangs 2025, einschliesslich spaeterer Beratungen und Dateien.
+# Dazu unabhaengig den Sitzungskalender 2025.
 build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025
+
+# Nur den unabhaengigen November-Kalender, ohne Paper-Familien nachzuziehen.
+build/macos-aarch64/oparl-scan --calendar-only \
+  --calendar-from 2026-11-01 --calendar-through 2026-11-30 \
+  --output downloads/calendar-2026-11
 
 # Bei Zugriffsverweigerungen einzelner Dokumente mit den anderen fortfahren.
 build/macos-aarch64/oparl-scan --year 2025 --output downloads/2025 \
@@ -56,7 +62,10 @@ build/macos-aarch64/oparl-scan --output build/live-smoke \
 | --- | --- |
 | `--output VERZEICHNIS` | Archivverzeichnis; Standard `downloads` |
 | `--system URL` | OParl-System; Standard der oben genannte Potsdamer Endpunkt |
-| `--year YYYY` | Referenzjahr 2000 bis 2099; ohne Option alle Sammlungen |
+| `--year YYYY` | Paper-Referenzjahr 2000 bis 2099 und Standard-Kalenderfenster dieses Jahres |
+| `--calendar-from YYYY-MM-DD` | Erster Kalendertag, einschliesslich; nur gemeinsam mit `--calendar-through` |
+| `--calendar-through YYYY-MM-DD` | Letzter Kalendertag, einschliesslich |
+| `--calendar-only` | Nur unabhaengige Kalender und deren gezielten Kontext; kein Paper-Suchlauf |
 | `--metadata-only` | Keine Dokumentdateien herunterladen |
 | `--skip-unavailable-files` | Verweigerte Dokumente protokollieren und fortfahren |
 | `--accept-size-mismatch` | Vollstaendige Uebertragungen trotz falscher OParl-Groesse akzeptieren |
@@ -229,7 +238,7 @@ Verarbeitung als Organisationen erkannt. Das archivierte JSON bleibt
 unveraendert; fehlende oder ungueltige Klassen-URIs und abweichende
 Ressourcen-IDs fuehren weiterhin zu Fehlern.
 
-Zu verknuepften Sitzungen werden Einladungen, Protokolle, Anlagen und
+Zu nur ueber Papers verknuepften Sitzungen werden Einladungen, Protokolle, Anlagen und
 Organisations- beziehungsweise Ortsinformationen erfasst. Das originale
 Meeting-JSON kann die gesamte Tagesordnung enthalten; sitzungsweite PDFs
 koennen weitere Vorgaenge behandeln. Unbeteiligte Tagesordnungspunkte werden
@@ -246,6 +255,40 @@ des Laufs aktualisiert. `selectedPapers` zaehlt nur die Ausgangsdrucksachen,
 nicht alle Kontextobjekte. Fuer jeden Jahrgang und jedes System ist ein
 eigenes Ausgabeverzeichnis noetig. Eine Vermischung wird abgelehnt, ohne die
 vorhandene Archividentitaet zu ersetzen.
+
+### Unabhaengiger Sitzungskalender
+
+Zusaetzlich zum Paper-Graph wird `Body.meeting` fuer jede veroeffentlichte
+Koerperschaft gelesen. Ohne Zeitfenster werden alle Kalendertermine erfasst;
+`--year 2026` setzt standardmaessig `2026-01-01` bis `2026-12-31`.
+Die beiden `--calendar-*`-Optionen ueberschreiben dieses Fenster, nicht das
+Paper-Referenzjahr. `--calendar-only` braucht ein solches Fenster oder `--year`
+als dessen Standard und weist `referenceYear: 0` aus.
+
+Die Grenzen sind einschliesslich und beziehen sich auf den lokalen Kalendertag
+von `Meeting.start`, nicht auf Paper-Datum, UTC-Tag, `created` oder `modified`.
+Da kein verlaesslicher serverseitiger Kalenderfilter bekannt ist, werden alle
+Listenseiten gelesen. Sie bleiben als Discovery unter `index/` und gelangen
+nicht ungefiltert in den Suchindex. Nur ausgewaehlte Sitzungen werden einzeln
+abgerufen und mit ihren oeffentlichen TOP, Beratungen, Beschlussdateien,
+Einladungen, Protokollen, Gremien und Orten expandiert.
+
+Kalender-Beratungen ziehen keine Paper-Familien oder fremden Sitzungen nach.
+Ein nur ueber einen Paper verknuepfter Termin ausserhalb des Fensters behaelt
+die bisherige begrenzte Kontextverfolgung, nicht die komplette TOP-Expansion.
+Dieselbe URL darf in beiden Scopes verarbeitet werden; Dateien bleiben nach
+File-ID dedupliziert.
+
+`meetingState` bleibt unveraendert. Ein vergangenes `eingeladen` beweist keine
+Durchfuehrung. Fehlende Startdaten bleiben ausdruecklich unbekannt: ihre
+Metadaten werden erfasst, Dokumente nicht expandiert, der Kalenderstand wird
+als unvollstaendig gemeldet. Ungueltige Datumswerte sind Fehler.
+Explizite `deleted`-Objekte aus Kalender-/Paper-Listen werden als Tombstones
+mit der Listenseite als Beobachtungsquelle gespeichert; HTTP 404 allein gilt
+nicht als Loeschungsnachweis.
+
+Kalenderfenster und Modus gehoeren zur Archividentitaet. Fuer andere Grenzen
+ein anderes Verzeichnis verwenden; derselbe Aufruf aktualisiert den Stand.
 
 ### TLS und Zertifikatspruefung
 
@@ -278,6 +321,10 @@ downloads/
   documents/<sha256-oparl-datei-id>-<bereinigter-originalname>
   cache/metadata-<sha256-anfrage-url>.json  # HTTP-Pruefdaten und Inhaltshash
   cache/document-<sha256-oparl-datei-id>.json
+  history/metadata/<sha256-anfrage-url>/<sha256-inhalt>
+  history/documents/<sha256-oparl-datei-id>/<sha256-inhalt>
+  observations/<lauf-id>.jsonl             # Quellen, Hashes, Fassungspfade, Abrufstaende
+  imports/<lauf-id>.json                   # dauerhafter Laufabschluss/-fortschritt
 ```
 
 Die Metadatenseiten behalten das originale UTF-8-JSON mit Beziehungen,
@@ -336,13 +383,50 @@ Nachweis, dass die API alle oeffentlichen RIS-Daten bereitstellt.
 
 Zur Wiederaufnahme denselben Befehl erneut ausfuehren. Unvollstaendige
 `.part`-Dateien werden neu begonnen, nicht byteweise fortgesetzt.
-`--refresh` erzwingt weiterhin vollstaendige Abrufe ohne Cachepruefung,
+`--refresh` erzwingt weiterhin vollstaendige Abrufe ohne bedingte HTTP-Anfrage,
 ist aber fuer die normale Aktualisierung nicht erforderlich.
-Angetroffene Metadaten und geaenderte Dokumente werden ersetzt; eine
-Versionshistorie entsteht nicht. Alte, nicht mehr verknuepfte Dateien
+Auch dabei werden vorhandene Bytes vor dem Ersatz lokal verifiziert und als
+unveraenderliche Inhaltsfassung gesichert. Neue Bytes werden vor der
+Veroeffentlichung gehasht und unter `history/` gesichert; eine bereits
+vorhandene, abweichende historische Datei ist ein Fehler, kein Anlass zum
+Ueberschreiben. Gleiche Inhalte erzeugen keine doppelte Fassung. Alte, nicht mehr verknuepfte Dateien
 werden nicht automatisch geloescht. Fuer einen getrennten neuen
 Schnappschuss ein anderes Verzeichnis verwenden. Nie zwei Prozesse
 gleichzeitig dasselbe Ausgabeverzeichnis verwenden lassen.
+
+Pruefdatensaetze enthalten `observedAtEpochSeconds` (letzte erfolgreiche
+200-/304-/HEAD-Bestaetigung) und `fetchedAtEpochSeconds` (letzter tatsaechlicher
+Inhaltsabruf), in Unix-Sekunden. Revalidierung erfindet keinen neuen
+Inhaltsabruf. Vorhandene Legacy-Pruefdaten ohne Zeitbeleg behalten unbekannte
+Abrufzeiten (`0`); Dateisystem-mtime wird nicht als Ersatz verwendet.
+`currentPath` benennt bei Dokumenten die aktuelle relative Archivdatei.
+Namensaenderungen derselben File-ID behalten diesen verifizierten Speicherort.
+Der aktuelle Originalname steht weiterhin im OParl-JSON.
+
+`archive.json` nennt Lauf-ID, `state` (`running`, `complete`, `incomplete`,
+`failed`), Beginn/Ende, `lastSuccessfulRunEndEpochSeconds`, Kalendergrenzen
+und ausgewaehlte beziehungsweise undatierte Sitzungen. `imports/` erhaelt
+jeden Lauf dauerhaft; `observations/` verbindet Inhaltsfassungen mit der
+tatsaechlichen Beobachtung. Tombstones aus Listen haben keinen erfundenen
+Einzelressourcen-Abrufzeitpunkt. Bei hartem Abbruch bleiben `running` und
+die offenen `.part`-Dateien sichtbar.
+
+`types` schluesselt System, Body, Paper, Meeting, AgendaItem, Consultation,
+File, Organization, Person, Membership, Location, LegislativeTerm und
+unbekannte Ressourcen auf. `scheduledWorkItems`/`finishedWorkItems` zaehlen
+Sammlungs- beziehungsweise Ressourcenauftraege und File-Binaerpruefungen,
+nicht eindeutige OParl-Objekte. Beide Scopes koennen dieselbe URL beitragen.
+`listedObjects` zaehlt Listeneintraege einschliesslich Discovery ausserhalb
+des Fensters. `collections`, `completeCollections` und `incompleteCollections`
+umfassen auch noch nicht gestartete Sammlungen; Fehler und HTTP-404-Fehlstellen
+werden separat gezaehlt. Ein Typ mit nicht abgearbeiteten Auftraegen oder
+unbekannten Kalenderdaten gilt nicht als vollstaendig.
+
+Der letzte erfolgreiche Gesamtlauf wird bei Fehlern und Limits nicht ersetzt.
+Je Typ wird nur ein komplett und fehlerfrei abgearbeiteter eigener Umfang als
+erfolgreich fortgeschrieben. Diese Angaben gelten fuer den gewaehlten Modus,
+nicht fuer die Vollstaendigkeit aller RIS-Daten; insbesondere bedeutet
+`metadataOnly` keine PDF-Abdeckung.
 
 `newMetadataPages` zaehlt vollstaendig abgerufene Metadatenantworten,
 `cachedMetadataPages` per HTTP 304 bestaetigte lokale Antworten.
@@ -472,7 +556,8 @@ Bericht ueber nicht verfuegbare Dateien.
   Dokumentfehler.
 - `2`: Wegen konfigurierter Grenzen absichtlich unvollstaendig.
 - `3`: Durchlauf beendet, aber wegen HTTP 404 fehlen Ressourcen oder
-  wegen Zugriffsverweigerungen fehlen Dokumente. Dies hat Vorrang
+  wegen Zugriffsverweigerungen fehlen Dokumente beziehungsweise Kalenderdaten
+  bleiben wegen fehlender Startzeiten unbekannt. Dies hat Vorrang
   vor Exitcode `2`; fatale Fehler liefern weiterhin `1`.
 
 Im Modus `--metadata-only` bedeutet Vollstaendigkeit nur vollstaendige

@@ -183,7 +183,11 @@ try {
     const serial = await run(serialDirectory, ['--workers', '1']);
     assert.equal(serial.maximum, 1);
     assert.deepEqual(await documents(serialDirectory), await documents(parallelDirectory));
-    for (const name of ['archive.json', 'selection.jsonl', 'missing-resources.jsonl'])
+    const withoutRunTimes = bytes => JSON.parse(bytes, (key, value) =>
+      key === 'runId' || key.endsWith('EpochSeconds') ? undefined : value);
+    assert.deepEqual(withoutRunTimes(await readFile(join(serialDirectory, 'archive.json'))),
+      withoutRunTimes(await readFile(join(parallelDirectory, 'archive.json'))));
+    for (const name of ['selection.jsonl', 'missing-resources.jsonl'])
       assert.deepEqual(await readFile(join(serialDirectory, name)), await readFile(join(parallelDirectory, name)));
     console.log(`Serial: ${serial.elapsed.toFixed(0)} ms, maximum overlap=${serial.maximum}`);
     const defaultPause = await run(join(root, 'default-pause'), [], 0, true);

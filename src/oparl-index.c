@@ -4,6 +4,7 @@
 #include "hash_util.h"
 #include "runtime.h"
 #include "platform.h"
+#include "archive-version.h"
 
 #define NONE UINT32_MAX
 #define PATH_SIZE 4096
@@ -14,7 +15,8 @@ typedef struct { uint32_t id, role, property; } EntityLink;
 typedef struct {
     SearchRecord record;
     uint32_t modified, archive, pdf, hash, search_record, detail;
-    unsigned long long mtime, metadata_mtime;
+    unsigned long long mtime, metadata_mtime, metadata_observed, pdf_observed, pdf_fetched;
+    uint32_t pdf_digest;
     int rank, deleted;
     uint32_t dates[SEARCH_DATE_END], authority, version;
     ToolArray links, organizations, owners;
@@ -25,10 +27,56 @@ typedef struct {
     ToolArray entities, archives;
     Map ids, files;
     uint32_t archive, current_file;
-    unsigned long long mtime;
+    unsigned long long mtime, observed;
     int report_fd;
     unsigned long long metadata, pdfs, pages, warning_pages, failed_pdfs, missing_pdfs;
 } Import;
+static const char *string(Import *import, uint32_t n);
+typedef struct {
+    char digest[65], current[256];
+    unsigned long long observed, fetched, size;
+    int present;
+} Attestation;
+
+static int attestation(Import *import, const char *kind, const char *hash, Attestation *out) {
+    char name[128], directory[PATH_SIZE], path[PATH_SIZE];
+    PlatformDirEntry info;
+    unsigned char *bytes = 0;
+    size_t length, used, i;
+    Json json;
+    int valid;
+    rt_memset(out, 0, sizeof(*out));
+    rt_copy_string(name, sizeof(name), kind); used = rt_strlen(name);
+    name[used++] = '-'; memcpy(name + used, hash, 64); memcpy(name + used + 64, ".json", 6);
+    if (rt_join_path(string(import, import->archive), "cache", directory, sizeof(directory)) != 0 ||
+        rt_join_path(directory, name, path, sizeof(path)) != 0) return search_error("cache path is too long", 0);
+    if (platform_get_path_info(path, &info) != 0) return 0;
+    if (info.size > 32768 || tool_read_all_input(path, &bytes, &length) != 0)
+        return search_error("cannot read archive attestation", path);
+    if (json_parse(&json, (const char *)bytes, length) != 0) {
+        rt_free(bytes); return search_error("invalid archive attestation JSON", path);
+    }
+    valid = json_string(&json, json_get(&json, 0, "sha256"), out->digest, sizeof(out->digest)) == 0 &&
+        rt_strlen(out->digest) == 64 && json_uint(&json, json_get(&json, 0, "size"), &out->size) == 0;
+    if (json_get(&json, 0, "observedAtEpochSeconds") != JSON_NONE &&
+        json_uint(&json, json_get(&json, 0, "observedAtEpochSeconds"), &out->observed) != 0) valid = 0;
+    if (json_get(&json, 0, "fetchedAtEpochSeconds") != JSON_NONE &&
+        json_uint(&json, json_get(&json, 0, "fetchedAtEpochSeconds"), &out->fetched) != 0) valid = 0;
+    if (json_get(&json, 0, "currentPath") != JSON_NONE &&
+        json_string(&json, json_get(&json, 0, "currentPath"), out->current, sizeof(out->current)) != 0) valid = 0;
+    for (i = 0; i < 64; i++) if (tool_hex_value(out->digest[i]) < 0) valid = 0;
+    if (out->fetched > out->observed || out->observed > 0x7fffffffffffffffULL) valid = 0;
+    if (out->current[0] && !rt_strcmp(kind, "document")) {
+        if (rt_strncmp(out->current, "documents/", 10) || rt_strncmp(out->current + 10, hash, 64) ||
+            out->current[74] != '-') valid = 0;
+        for (i = 75; i < rt_strlen(out->current); i++)
+            if (out->current[i] == '/' || out->current[i] == '\\') valid = 0;
+    }
+    json_free(&json); rt_free(bytes);
+    if (!valid) return search_error("invalid archive attestation", path);
+    out->present = 1;
+    return 0;
+}
 
 #if defined(_WIN32)
 __declspec(dllimport) void *__stdcall LoadLibraryA(const char *);
@@ -272,6 +320,7 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
     const RelationKey *keys = 0;
     size_t count = 0, i, type = json_get(json, object, "type");
     uint32_t id, n, modified, kind;
+    unsigned long long observed;
     Entity *e;
     char type_text[128];
     if (json_equals(json, type, "at") || json_equals(json, type, "gr")) type = json_get(json, object, "Type");
@@ -284,8 +333,14 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
     n = map_get(import, &import->ids, string(import, id));
     if (n == NONE && (n = new_entity(import, id)) == NONE) return -1;
     e = entity(import, n);
-    if (rank < e->rank) return 0;
-    if (rank == e->rank) {
+    observed = import->observed;
+    if (rank == 1 && !json_true(json, json_get(json, object, "deleted")) &&
+        json_get(json, object, "name") == JSON_NONE && json_get(json, object, "fileName") == JSON_NONE &&
+        json_get(json, object, "accessUrl") == JSON_NONE && json_get(json, object, "start") == JSON_NONE &&
+        json_get(json, object, "reference") == JSON_NONE) observed = 0;
+    if (observed < e->metadata_observed) return 0;
+    if (observed == e->metadata_observed && rank < e->rank) return 0;
+    if (observed == e->metadata_observed && rank == e->rank) {
         int compare = modified && e->modified ?
             rt_strcmp(string(import, modified), string(import, e->modified)) : 0;
         if (compare < 0 || (compare == 0 && import->mtime < e->metadata_mtime)) return 0;
@@ -293,13 +348,25 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
     e->rank = rank; e->modified = modified; e->archive = import->archive;
     e->record.metadata_origin = (uint32_t)rank;
     e->metadata_mtime = import->mtime;
+    e->metadata_observed = observed;
     e->deleted = json_true(json, json_get(json, object, "deleted"));
+    if (!rt_strcmp(type_text + 29, "AgendaItem")) {
+        size_t public = json_get(json, object, "public");
+        const JsonToken *token = json_token(json, public);
+        if (token && token->kind == JSON_BOOL && !json_true(json, public)) e->deleted = 1;
+    }
     e->record.kind = kind; e->record.source = import->current_file;
     e->record.name = json_text(import, json, object, "name");
     if (!e->record.name) e->record.name = json_text(import, json, object, "fileName");
     e->record.reference = json_text(import, json, object, "reference");
     e->record.date = json_text(import, json, object, "date");
     rt_memset(e->dates, 0, sizeof(e->dates));
+    if (observed) {
+        char timestamp[64];
+        if (archive_timestamp(observed, timestamp, sizeof(timestamp)) != 0)
+            return search_error("cannot format verified observation time", string(import, id));
+        e->dates[SEARCH_OBSERVED] = text(import, timestamp);
+    }
     e->dates[SEARCH_CREATED] = json_text(import, json, object, "created");
     e->dates[SEARCH_MODIFIED] = modified;
     e->record.system = e->record.body = 0;
@@ -386,6 +453,28 @@ static int metadata_file(const char *path, const PlatformDirEntry *entry, int de
     }
     import->current_file = text(import, path);
     import->mtime = (unsigned long long)entry->mtime;
+    import->observed = 0;
+    {
+        const char *name = path;
+        char hash[65], digest[65];
+        Attestation cache;
+        for (index = 0; path[index]; index++) if (path[index] == '/') name = path + index + 1;
+        if (rt_strlen(name) == 69) {
+            memcpy(hash, name, 64); hash[64] = 0;
+            for (index = 0; index < 64 && tool_hex_value(hash[index]) >= 0; index++) {}
+            if (index == 64) {
+                if (attestation(import, "metadata", hash, &cache) != 0) result = -1;
+                else if (cache.present) {
+                    unsigned char sha[32];
+                    crypto_sha256_hash(bytes, length, sha); hash_to_hex(sha, 32, digest);
+                    if (length != cache.size || rt_strcmp(digest, cache.digest))
+                        result = search_error("metadata differs from archive attestation; refresh the archive", path);
+                    else import->observed = cache.observed;
+                }
+            }
+        }
+    }
+    if (result != 0) { json_free(&json); rt_free(bytes); return -1; }
     result = ingest(import, &json, 0, 2);
     data = json_get(&json, 0, "data");
     if (data != JSON_NONE && json_token(&json, data)->kind == JSON_ARRAY) {
@@ -445,6 +534,7 @@ static int document_file(const char *path, const PlatformDirEntry *entry, int de
     Entity *e;
     size_t i, length = rt_strlen(path);
     int preferred;
+    Attestation cache;
     (void)depth; (void)control;
     if (entry->is_dir || (length >= 5 && rt_strcmp(path + length - 5, ".part") == 0)) return 0;
     for (i = 0; path[i]; i++) if (path[i] == '/') name = path + i + 1;
@@ -452,6 +542,17 @@ static int document_file(const char *path, const PlatformDirEntry *entry, int de
     memcpy(hash, name, 64); hash[64] = '\0';
     for (i = 0; i < 64; i++) if (tool_hex_value(hash[i]) < 0)
         return search_error("invalid document identity hash", path);
+    if (attestation(import, "document", hash, &cache) != 0) return -1;
+    if (cache.current[0]) {
+        char current[PATH_SIZE];
+        PlatformDirEntry info;
+        if (rt_join_path(string(import, import->archive), cache.current, current, sizeof(current)) != 0 ||
+            platform_get_path_info(current, &info) != 0 || info.is_dir)
+            return search_error("attested current document is missing", cache.current);
+        if (rt_strcmp(current, path)) return 0;
+    }
+    if (cache.present && entry->size != cache.size)
+        return search_error("document size differs from archive attestation; refresh the archive", path);
     n = map_get(import, &import->files, hash);
     if (n == NONE) {
         char id[128];
@@ -466,8 +567,11 @@ static int document_file(const char *path, const PlatformDirEntry *entry, int de
     }
     e = entity(import, n);
     preferred = e->archive == import->archive;
-    if (!e->pdf || preferred || (!e->archive && entry->mtime > (long long)e->mtime)) {
+    if (!e->pdf || cache.observed > e->pdf_observed ||
+        (cache.observed == e->pdf_observed && (preferred || (!e->archive && entry->mtime > (long long)e->mtime)))) {
         e->pdf = text(import, path); e->mtime = (unsigned long long)entry->mtime;
+        e->pdf_observed = cache.observed; e->pdf_fetched = cache.fetched;
+        e->pdf_digest = cache.present ? text(import, cache.digest) : 0;
         if (!e->record.payload) e->record.source = e->pdf;
     }
     return import->builder.failed ? -1 : 0;
@@ -545,7 +649,7 @@ static uint32_t evidence(Import *import, uint32_t object, uint32_t version, uint
 
 static int model_entity(Import *import, Entity *e) {
     static const char *const date_properties[SEARCH_DATE_END] = {
-        "", "date", "", "start", "end", "", "", "", "", "created", "modified", "", "", "reference"
+        "", "date", "", "start", "end", "", "", "", "", "created", "modified", "observedAtEpochSeconds", "", "reference"
     };
     size_t i;
     char year[32];
@@ -559,8 +663,9 @@ static int model_entity(Import *import, Entity *e) {
         if (!fact) return search_error("cannot allocate dated facts", 0);
         fact->record = e->search_record; fact->role = (uint32_t)i; fact->value = e->dates[i];
         fact->evidence = evidence(import, e->record.id, 0, 0, 0, property,
-            i == SEARCH_REFERENCE_YEAR ? "reference-prefix-YY-v1" : "oparl-property-v1",
-            i == SEARCH_REFERENCE_YEAR ? SEARCH_DERIVED : SEARCH_ASSERTED);
+            i == SEARCH_REFERENCE_YEAR ? "reference-prefix-YY-v1" :
+            i == SEARCH_OBSERVED ? "verified-archive-observation-v1" : "oparl-property-v1",
+            i == SEARCH_REFERENCE_YEAR || i == SEARCH_OBSERVED ? SEARCH_DERIVED : SEARCH_ASSERTED);
     }
     for (i = 0; i < e->links.count; i++) {
         const EntityLink *link = (const EntityLink *)tool_array_get_const(&e->links, i);
@@ -599,6 +704,8 @@ static int document_version(Import *import, Entity *e, const unsigned char *byte
     uint32_t version_id, hash_id;
     crypto_sha256_hash(bytes, length, digest);
     hash_to_hex(digest, 32, content);
+    if (e->pdf_digest && rt_strcmp(content, string(import, e->pdf_digest)))
+        return search_error("document differs from archive attestation; refresh the archive", string(import, e->pdf));
     hash_id = text(import, content);
     tool_byte_buffer_init(&name);
     if (tool_byte_buffer_append_cstr(&name, "urn:oparl-search:document:") != 0 ||
@@ -613,7 +720,8 @@ static int document_version(Import *import, Entity *e, const unsigned char *byte
     if (!version) return search_error("cannot allocate document versions", 0);
     rt_memset(version, 0, sizeof(*version));
     version->record = e->search_record; version->id = version_id; version->hash = hash_id;
-    version->bytes = length; e->version = version_id;
+    version->bytes = length; version->observed_at = e->pdf_observed; version->fetched_at = e->pdf_fetched;
+    e->version = version_id;
     return import->builder.failed ? -1 : 0;
 }
 

@@ -125,6 +125,7 @@ int search_model_validate(const SearchIndex *index) {
         const SearchVersion *v = &index->versions[i];
         if (v->record >= index->record_count || !valid_text(index, v->id) || !v->id ||
             !valid_text(index, v->hash) || rt_strlen(index->strings + v->hash) != 64 || v->reserved ||
+            v->fetched_at > v->observed_at || v->observed_at > 0x7fffffffffffffffULL ||
             rt_strcmp(index->strings + index->records[v->record].kind, "File") ||
             (i && index->versions[i-1].record >= v->record)) return -1;
         for (j = 0; j < 64; j++) if (tool_hex_value(index->strings[v->hash+j]) < 0) return -1;
@@ -213,7 +214,11 @@ int search_model_json(ToolByteBuffer *out, const SearchIndex *index, const Searc
     if (version) {
         if (put(out, "{\"id\":") != 0 || value(out, index, version->id) != 0 ||
             field(out, index, "sha256", version->hash) != 0 || key(out, "bytes") != 0 ||
-            number(out, version->bytes) != 0 || put(out, "}") != 0) return -1;
+            number(out, version->bytes) != 0 || key(out, "observedAtEpochSeconds") != 0 ||
+            (version->observed_at ? number(out, version->observed_at) : put(out, "null")) != 0 ||
+            key(out, "fetchedAtEpochSeconds") != 0 ||
+            (version->fetched_at ? number(out, version->fetched_at) : put(out, "null")) != 0 ||
+            put(out, "}") != 0) return -1;
     } else if (put(out, "null") != 0) return -1;
     if (put(out, ",\"sections\":[") != 0) return -1;
     for (i = 0; i < index->section_count; i++) if (index->sections[i].record == n) {

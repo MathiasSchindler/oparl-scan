@@ -290,7 +290,7 @@ async function run(directory, args = [], expected = 0, env = {}) {
 try {
   const archive = join(root, 'complete');
   await run(archive);
-  assert.equal((await readdir(join(archive, 'metadata'))).length, 23);
+  assert.equal((await readdir(join(archive, 'metadata'))).length, 21);
   assert.equal((await readdir(join(archive, 'documents'))).length, 2);
   assert.equal(requests.filter(path => path.startsWith('/content/')).length, 2);
   for (const name of await readdir(join(archive, 'documents')))
@@ -342,7 +342,7 @@ try {
   assert.ok(yearRequests.some(path => path === '/oparl/agendaItems/1'), 'lowercase agendaitem followed');
   assert.ok(!yearRequests.some(path => path === '/oparl/papers/1'), '2024 reference excluded despite 2025 date');
   assert.ok(!yearRequests.some(path => /\/(?:content|download)\/99/.test(path)), 'unrelated meeting agenda files excluded');
-  assert.ok(!yearRequests.some(path => /\/bodies\/[13]\/(meeting|file|consultation)/.test(path)),
+  assert.ok(!yearRequests.some(path => /\/bodies\/[13]\/(file|consultation)/.test(path)),
     'year mode does not crawl global non-paper collections');
   start = requests.length;
   await run(year, ['--year', '2025']);

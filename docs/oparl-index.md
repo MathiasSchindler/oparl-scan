@@ -60,15 +60,20 @@ eine eigene `--year`-Option des Indexers.
 - Beziehungen zwischen Drucksachen und Dateien fuer kontextbezogene
   Suchfilter.
 
-Ungefilterte Suchlaufseiten in `index/`, HTTP-Pruefdaten in `cache/`
+Ungefilterte Suchlaufseiten in `index/`, historische Fassungen in `history/`,
+Laufprotokolle in `imports/`/`observations/`, HTTP-Pruefdaten in `cache/`
 und `.part`-Dateien sind keine Suchinhalte. Nicht jede beliebige
 JSON-Eigenschaft wird zu einem eigenen Suchfeld.
 
 Gleiche OParl-IDs aus verschiedenen Jahrgangsarchiven werden
-zusammengefuehrt. Vollstaendige Objektantworten haben Vorrang vor
-eingebetteten Kurzformen; bei gleichwertigen Antworten entscheidet
-`modified`, ersatzweise die lokale Metadaten-Aenderungszeit.
-Als geloescht markierte Objekte werden nicht als Treffer ausgegeben.
+zusammengefuehrt. Reine eingebettete ID-/Typ-Verweise verdraengen keine
+vorhandenen Inhalte. Bei inhaltlichen Antworten entscheidet zuerst der
+hashverifizierte Beobachtungszeitpunkt; bei gleichem Abrufstand haben
+Archivobjekte Vorrang vor eingebetteten Daten, danach entscheidet `modified`,
+ersatzweise die lokale Metadaten-Aenderungszeit. Eine solche Ersatzzeit
+begruendet weiterhin keinen RIS-Abrufstand.
+Als geloescht markierte Objekte und explizit nichtoeffentliche TOP werden
+nicht als Treffer ausgegeben.
 Auch die Binaerdateien geloeschter File-Objekte werden nicht als
 unzugeordnete Dokumente wieder eingefuehrt.
 
@@ -81,9 +86,9 @@ Originalmetadaten.
 die Urheberschaft. Strukturierte Urheberfelder fehlen im untersuchten
 Potsdamer Drucksachenbestand.
 
-## Kanonisches Datenmodell (Format 2)
+## Kanonisches Datenmodell (Format 3)
 
-**Bestehende Indexdateien neu bauen.** Format 1 wird mit einer ausdruecklichen
+**Bestehende Indexdateien neu bauen.** Format 1 und 2 werden mit einer ausdruecklichen
 Neuaufbau-Meldung abgewiesen; es gibt keinen parallelen Legacy-Lesepfad.
 Die Originalarchive bleiben unveraendert. Indexer und Suchprogramm muessen
 denselben Formatstand verwenden.
@@ -102,10 +107,13 @@ MCP-Werkzeug `get_object` als Feld `model` lesbar, auch ohne Originalarchiv.
 - `metadataOrigin` unterscheidet `archive-resource` (Archivobjekt oder
   Element einer archivierten Sammlung), `embedded` und `archive-file`
   (nur lokal identifizierte Datei). Eingebettete typisierte Objekte erhalten
-  eigene Datensaetze; vollstaendige Archivobjekte haben weiter Vorrang.
+  eigene Datensaetze. Neuere belegte Inhalte koennen auch aus einer
+  eingebetteten Antwort stammen; bei gleichem Stand hat das Archivobjekt Vorrang.
 - Dokumentfassungen bekommen eine `urn:oparl-search:document:...` aus
   Ressourcenidentitaet und SHA-256 der tatsaechlich gelesenen Dateibytes.
-  `documentVersion` nennt ID, Inhaltshash und Bytezahl. Eine unveraenderte
+  `documentVersion` nennt ID, Inhaltshash, Bytezahl sowie den belegten letzten
+  Beobachtungs- und Inhaltsabruf in Unix-Sekunden (`observedAtEpochSeconds`,
+  `fetchedAtEpochSeconds`, ohne Zeitbeleg `null`). Eine unveraenderte
   File-ID kann bei anderen Bytes daher nicht dieselbe Fassung vortaeuschen.
 - Seitenidentitaeten enthalten Fassung und 1-basierte Seitennummer.
   Jeder extrahierte Seitenkoerper hat vorerst genau einen Textabschnitt
@@ -122,7 +130,8 @@ Die Antwort behaelt die OParl-ID in `id`; `model.identity` bezeichnet die
 konkrete Einheit. Eine alte, im geladenen Snapshot nicht enthaltene Fassung
 wird nicht auf die aktuellen Bytes umgebogen, sondern als unbekannt abgewiesen.
 Der aktuelle Snapshot enthaelt je File die beim Bau ausgewaehlte Archivfassung.
-Eine historische Fassungsarchivierung beim Download ist erst Bestandteil von M2.
+Die unveraenderlichen Downloadfassungen bleiben im Archiv unter `history/`;
+dieser Index ist kein historischer Fassungsbrowser.
 
 Ein Paper ist weder automatisch eine Dokumentrolle (Anfrage, Antwort, Fassung)
 noch eine politische Initiative. `documentRole` und `initiative` bleiben ohne
@@ -176,18 +185,27 @@ Konfidenzprozente berechnet. Seitenwarnungen gelten weiterhin.
 `importedAt.epochSeconds` ist der eigene Zeitpunkt des lokalen Indeximports
 in Unix-Sekunden. Er beweist keinen aktuellen RIS-Abruf. `observedAt` bleibt
 ohne protokollierten Abruf unbekannt; Dateisystem-mtime ersetzt diesen
-Zeitpunkt nicht. Verlaessliche Abrufstaende und Kalenderabdeckung folgen in M2.
+Zeitpunkt nicht. Vorhandene Metadaten-Pruefdaten werden gegen Groesse und
+SHA-256 der Rohbytes geprueft. Ein ungueltiger vorhandener Beleg stoppt den
+Indexbau mit einer ausdruecklichen Aktualisierungsaufforderung.
+`observedAt` beschreibt den verifizierten lokalen Beobachtungsbeleg, bei
+eingebetteten Objekten den ihrer umschliessenden Metadatenantwort
+(`verified-archive-observation-v1`), nicht ein fachliches Ereignis.
+Dokumente werden anhand des sicheren `cache.currentPath` ausgewaehlt und
+ebenfalls gegen den Inhaltshash geprueft. Alte Dateinamen oder historische
+Fassungen duerfen nicht zufaellig die aktuelle Auswahl ersetzen.
+Archive ohne solche Belege bleiben lesbar, aber ohne behaupteten Abrufstand.
 Die bisherigen Suchfilter und die `date`-Sortierung werden erst in M3 auf
 getrennte Datumsrollen umgestellt; ein gespeicherter Sitzungsstart bedeutet
 noch keinen fertigen Sitzungszeitfilter.
 
 ### Binaerer Vertrag und Integritaet
 
-Format 2 verwendet einen 232-Byte-Header mit Magic `OPARLIDX`, Version,
+Format 3 verwendet einen 232-Byte-Header mit Magic `OPARLIDX`, Version,
 Endian-Kennung, 64-Bit-Abschnittsoffsets/-zaehlern, Importzeit und SHA-256.
 Alle zehn Abschnitte beginnen an 8-Byte-Grenzen:
 Zeichenketten, 88-Byte-Suchrecords, Begriffe, Positionen, direkte Suchbesitzer,
-typisierte Kanten, Datumsfakten, Herkunftsbelege, Dokumentfassungen und
+typisierte Kanten, Datumsfakten, Herkunftsbelege, 40-Byte-Dokumentfassungen und
 Textabschnitte. Zeichenketten-/Textreferenzen bleiben 32-Bit-Offsets;
 die gesamte Datei bleibt kleiner als 4 GiB.
 
@@ -324,3 +342,10 @@ System-/Koerperschaftskontext, belegte direkte und gemeinsame Anlagen,
 stabile bzw. bei Byteaenderung wechselnde Fassungszitate, Zugriff ohne
 Originalarchiv und strukturelle Fehler trotz neu berechnetem SHA-256.
 Die Suite ist Teil von `make test`.
+
+[archive.mjs](../tests/archive.mjs) prueft unabhaengige Kalender fuer mehrere
+Koerperschaften, Zeitfenster ohne historische PDF-/Paper-Rekursion, oeffentliche
+TOP, Aktualisierungen und Tombstones. Der lokale HTTP-Anbieter testet zudem
+304/HEAD, gleich grosse geaenderte PDF-Bytes, Namensaenderungen, unveraenderliche
+Fassungen, belegte Abrufzeiten, Auswahl ueber mehrere Archive, Beschaedigungen
+sowie unvollstaendige und begrenzte Importlaeufe.

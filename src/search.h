@@ -32,7 +32,10 @@ enum { SEARCH_AUTHORITY_UNKNOWN, SEARCH_PRELIMINARY, SEARCH_AUTHORITATIVE };
 typedef struct { uint32_t source, target, role, evidence, authority, reserved; } SearchRelation;
 typedef struct { uint32_t record, role, value, evidence; } SearchFact;
 typedef struct { uint32_t object, version, page, section, property, rule, certainty, reserved; } SearchEvidence;
-typedef struct { uint32_t record, id, hash, reserved; uint64_t bytes; } SearchVersion;
+typedef struct {
+    uint32_t record, id, hash, reserved;
+    uint64_t bytes, observed_at, fetched_at;
+} SearchVersion;
 typedef struct { uint32_t record, id, start, length, evidence, reserved; } SearchSection;
 
 typedef struct { uint32_t term, record, position, byte; } SearchOccurrence;

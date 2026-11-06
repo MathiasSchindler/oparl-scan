@@ -594,9 +594,9 @@ und die Qualitaet der Quellarchive bleiben relevant.
 
 ## Indexformat und Suchkern
 
-**Format 2 erfordert einen Neuaufbau alter Indizes.** Die Fehlermeldung
+**Format 3 erfordert einen Neuaufbau alter Indizes.** Die Fehlermeldung
 nennt dafuer `oparl-index`; es gibt keinen Legacy-Leser.
-Das [kanonische Datenmodell](oparl-index.md#kanonisches-datenmodell-format-2)
+Das [kanonische Datenmodell](oparl-index.md#kanonisches-datenmodell-format-3)
 beschreibt typisierte Kanten, Datumsrollen, Fassungsidentitaeten und Belege.
 Nur explizite Hauptdateien und Anlagen eines Papers gelten fuer Suchfilter
 und Gruppierung als dessen Dokumente. Erreichbare Eltern, TOP und
@@ -610,6 +610,9 @@ akzeptiert. Beispiel: die ID aus `model.documentVersion.id` statt einer
 moeglicherweise spaeter geaenderten File-ID zitieren, dazu Seite und
 `model.snapshotId`. Nur Fassungen im geladenen Snapshot sind abrufbar.
 Die Importzeit bezeichnet den lokalen Indeximport, keine neue RIS-Abfrage.
+`model.dates.observedAt` und die Abrufzeiten in `model.documentVersion`
+kommen dagegen aus hashverifizierten Archivbelegen. Ohne solchen Zeitbeleg
+bleiben sie `null`; eine Revalidierung aendert nicht den letzten Inhaltsabruf.
 Alle Angaben werden aus dem geladenen Index gelesen, nicht aus Quellpfaden
 nachgeladen. Das gilt auch, wenn das Originalarchiv nicht vorhanden ist.
 
