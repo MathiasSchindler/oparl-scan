@@ -72,8 +72,8 @@ endif
 
 OBJECTS := $(addprefix $(BUILD)/obj/,$(addsuffix .o,$(basename $(COMMON) $(PLATFORM) $(START))))
 APP_OBJECTS := $(addprefix $(BUILD)/obj/,$(APP:.c=.o))
-INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o search-model.o json.o pdf-text.o archive-version.o)
-SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-model.o search-web.o search-mcp.o json.o)
+INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o search-model.o search-date.o search-research.o json.o pdf-text.o archive-version.o)
+SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-model.o search-date.o search-research.o search-web.o search-mcp.o json.o)
 
 .DEFAULT_GOAL := all
 .PHONY: all test test-mcp-acceptance check-deps benchmark
@@ -88,7 +88,7 @@ $(INDEX_PROGRAM): $(INDEX_OBJECTS) $(INDEX_COMMON) $(OBJECTS) $(LINK_DEPS)
 $(SEARCH_PROGRAM): $(SEARCH_OBJECTS) $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(SEARCH_OBJECTS) $(OBJECTS))
 
-$(BUILD)/obj/src/search.o $(BUILD)/obj/src/search-model.o $(BUILD)/obj/src/oparl-index.o $(BUILD)/obj/src/oparl-search.o $(BUILD)/obj/src/search-web.o $(BUILD)/obj/src/search-mcp.o $(BUILD)/obj/src/pdf-text.o: CFLAGS += -O3
+$(BUILD)/obj/src/search.o $(BUILD)/obj/src/search-model.o $(BUILD)/obj/src/search-date.o $(BUILD)/obj/src/search-research.o $(BUILD)/obj/src/oparl-index.o $(BUILD)/obj/src/oparl-search.o $(BUILD)/obj/src/search-web.o $(BUILD)/obj/src/search-mcp.o $(BUILD)/obj/src/pdf-text.o: CFLAGS += -O3
 $(BUILD)/test-json$(EXE): $(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(BUILD)/obj/tests/test-json.o $(BUILD)/obj/src/json.o $(OBJECTS))
 
@@ -114,6 +114,8 @@ test: all $(BUILD)/test-json$(EXE) check-deps
 	node tests/concurrency.mjs "$(abspath $(PROGRAM))"
 	node tests/search.mjs "$(abspath $(INDEX_PROGRAM))" "$(abspath $(SEARCH_PROGRAM))"
 	node tests/search-model.mjs "$(abspath $(INDEX_PROGRAM))" "$(abspath $(SEARCH_PROGRAM))"
+	node tests/search-semantics.mjs "$(abspath $(INDEX_PROGRAM))" "$(abspath $(SEARCH_PROGRAM))"
+	node tests/search-research.mjs "$(abspath $(INDEX_PROGRAM))" "$(abspath $(SEARCH_PROGRAM))"
 
 check-deps: all
 	node tests/check-deps.mjs "$(abspath $(PROGRAM))"

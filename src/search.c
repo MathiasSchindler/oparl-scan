@@ -351,6 +351,8 @@ int search_write(SearchBuilder *builder, const char *path) {
 }
 
 void search_close(SearchIndex *index) {
+    search_research_free(index);
+    search_facets_free(index);
     rt_free(index->links);
     rt_free(index->allocation);
     rt_memset(index, 0, sizeof(*index));
@@ -523,6 +525,8 @@ int search_open(SearchIndex *index, const char *path) {
         SearchLinks *links = &index->links[owner->record];
         index->related_papers[links->start + links->count++] = owner->paper;
     }
+    if (search_facets_build(index) != 0) { search_close(index); return -1; }
+    if (search_research_build(index) != 0) { search_close(index); return -1; }
     return 0;
 invalid:
     if (fd >= 0) platform_close(fd);
@@ -687,6 +691,8 @@ static int metadata_matches(const SearchIndex *index, const SearchRecord *r, con
         rt_strlen(index->strings + r->paper_type), filter->paper_type, rt_strlen(filter->paper_type), 1)) return 0;
     if (filter->organization && !rt_unicode_normalized_contains(index->strings + r->organization,
         rt_strlen(index->strings + r->organization), filter->organization, rt_strlen(filter->organization), 1)) return 0;
+    if (!search_actor_matches(index, (uint32_t)(r-index->records), filter->organization_id, 1) ||
+        !search_actor_matches(index, (uint32_t)(r-index->records), filter->actor_id, 0)) return 0;
     return 1;
 }
 
@@ -815,24 +821,13 @@ void search_workspace_free(SearchWorkspace *workspace) {
     rt_memset(workspace, 0, sizeof(*workspace));
 }
 
-static const char *hit_date(const SearchIndex *index, const SearchHit *hit) {
-    const char *date = index->strings + index->records[hit->record].date;
-    size_t i;
-    if (hit->paper != NONE && index->records[hit->paper].date)
-        date = index->strings + index->records[hit->paper].date;
-    for (i = 0; i < 10; i++) {
-        if (i == 4 || i == 7) { if (date[i] != '-') return ""; }
-        else if (date[i] < '0' || date[i] > '9') return "";
-    }
-    return date;
-}
-
 static int hit_before(const SearchIndex *index, SearchSort sort, const SearchHit *a, const SearchHit *b) {
     if (sort != SEARCH_RELEVANCE) {
-        const char *x = hit_date(index, a), *y = hit_date(index, b);
-        int order;
-        if ((*x == '\0') != (*y == '\0')) return *x != '\0';
-        order = rt_strncmp(x, y, 10);
+        const SearchDate *x = search_hit_time(index, a), *y = search_hit_time(index, b);
+        int known_x = x && x->precision, known_y = y && y->precision, order = 0;
+        if (known_x != known_y) return known_x;
+        if (known_x) order = x->seconds < y->seconds ? -1 : x->seconds > y->seconds ? 1 :
+            x->nanos < y->nanos ? -1 : x->nanos > y->nanos;
         if (order) return sort == SEARCH_DATE_ASC ? order < 0 : order > 0;
     }
     return a->score > b->score || (a->score == b->score &&
@@ -864,9 +859,9 @@ static void retain_hit(const SearchIndex *index, SearchSort sort, SearchHit *hit
     }
 }
 
-static void group_hit(const SearchIndex *index, SearchHit *groups, uint32_t group, SearchHit hit) {
+static void group_hit(const SearchIndex *index, SearchSort sort, SearchHit *groups, uint32_t group, SearchHit hit) {
     uint32_t matches = groups[group].matches + 1;
-    if (!groups[group].matches || hit_before(index, SEARCH_RELEVANCE, &hit, &groups[group]))
+    if (!groups[group].matches || hit_before(index, sort, &hit, &groups[group]))
         groups[group] = hit;
     groups[group].matches = matches;
 }
@@ -882,24 +877,58 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
     size_t base_bytes = (size_t)aligned(count * (3 * sizeof(uint32_t) + 1)), capacity, needed;
     size_t retained = 0, keep = 0, hit_capacity, group_capacity;
     unsigned int limit = filter->limit ? filter->limit : 20;
-    int root;
+    SearchDate from, through;
+    int root, filter_only;
     rt_memset(result, 0, sizeof(*result));
     *error = "cannot allocate query workspace";
-    if (limit > 100 || filter->sort > SEARCH_DATE_ASC || filter->group > SEARCH_PAPERS || rt_strlen(text) > 16384) {
+    if (!text) text = "";
+    {
+        int checked = search_snapshot_check(index, filter->snapshot_id, filter->offset, error);
+        if (checked) return checked;
+    }
+    if ((filter->organization_id && !search_actor_known(index, filter->organization_id, 1)) ||
+        (filter->actor_id && !search_actor_known(index, filter->actor_id, 0))) {
+        *error = "unknown organizationId/actorId in this snapshot"; return SEARCH_QUERY_INVALID;
+    }
+    if (limit > 100 || filter->sort > SEARCH_DATE_ASC || filter->group > SEARCH_DOCUMENTS ||
+        filter->date_role >= SEARCH_REFERENCE_YEAR || rt_strlen(text) > 16384) {
         *error = "query/limit/sort/group exceeds supported bounds"; return -1;
     }
+    if ((filter->kind && (!*filter->kind || !search_kind_known(index, filter->kind))) ||
+        (filter->paper_type && !*filter->paper_type) || (filter->organization && !*filter->organization)) {
+        *error = "unknown kind or empty metadata filter"; return SEARCH_QUERY_INVALID;
+    }
+    if (filter->group == SEARCH_DOCUMENTS && filter->kind &&
+        rt_strcmp(filter->kind, "File") && rt_strcmp(filter->kind, "Page")) {
+        *error = "document grouping requires File/Page records"; return SEARCH_QUERY_INVALID;
+    }
+    if ((filter->date_from && (search_date_parse(filter->date_from, &from) || from.precision != 1)) ||
+        (filter->date_through && (search_date_parse(filter->date_through, &through) || through.precision != 1)) ||
+        (filter->date_from && filter->date_through && from.day > through.day)) {
+        *error = "expected ordered valid YYYY-MM-DD dateFrom/dateThrough"; return SEARCH_QUERY_INVALID;
+    }
     result->group = filter->group;
+    result->date_role = filter->date_role; result->sort = filter->sort;
+    result->date_from = filter->date_from; result->date_through = filter->date_through;
+    result->offset = filter->offset; result->limit = limit;
     if (!workspace->parser) workspace->parser = rt_malloc(sizeof(*parser));
     parser = (Parser *)workspace->parser;
     if (parser == 0) return SEARCH_QUERY_RESOURCE;
     rt_memset(parser, 0, sizeof(*parser));
     parser->query = text; parser->index = index;
-    root = parse_or(parser, 0); spaces(parser);
-    if (root < 0 || text[parser->p]) {
+    spaces(parser); filter_only = !text[parser->p]; result->filter_only = filter_only;
+    if (filter_only && !filter->kind && !filter->year && !filter->paper_type && !filter->organization &&
+        !filter->organization_id && !filter->actor_id &&
+        !filter->date_from && !filter->date_through && filter->group != SEARCH_DOCUMENTS) {
+        *error = "empty listing requires a kind, reference year, metadata/date filter or document group";
+        return SEARCH_QUERY_INVALID;
+    }
+    root = filter_only ? -1 : parse_or(parser, 0); spaces(parser);
+    if ((!filter_only && root < 0) || text[parser->p]) {
         *error = parser->error ? parser->error : "unexpected query operator"; return -1;
     }
     capacity = workspace->record_count == count && workspace->atom_capacity >= parser->atom_count ?
-               workspace->atom_capacity : (parser->atom_count + 3U) & ~(size_t)3;
+               workspace->atom_capacity : ((parser->atom_count ? parser->atom_count : 1) + 3U) & ~(size_t)3;
     if (filter->offset < count) {
         keep = (size_t)filter->offset + limit;
         if (keep > count) keep = count;
@@ -907,7 +936,7 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
     hit_capacity = workspace->record_count == count && workspace->hit_capacity >= keep ?
                    workspace->hit_capacity : keep;
     group_capacity = workspace->record_count == count ? workspace->group_capacity : 0;
-    if (filter->group == SEARCH_PAPERS) group_capacity = count;
+    if (filter->group != SEARCH_RECORDS) group_capacity = count;
     needed = base_bytes + (capacity + 1) * blocks * sizeof(uint64_t) +
              (hit_capacity + group_capacity) * sizeof(SearchHit);
     if (index->memory_bytes + needed + sizeof(*parser) > SEARCH_RAM_LIMIT) {
@@ -926,53 +955,90 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
     query.bytes = (uint32_t *)(void *)(query.scores + count);
     query.owners = query.bytes + count;
     query.states = (unsigned char *)(query.owners + count);
-    query.filtered = filter->year || filter->paper_type || filter->organization;
+    query.filtered = filter->year || filter->paper_type || filter->organization || filter->organization_id || filter->actor_id;
     atoms = (uint64_t *)(void *)((unsigned char *)workspace->allocation + base_bytes);
     query.seen = atoms + capacity * blocks;
     hits = (SearchHit *)(void *)(query.seen + blocks);
     groups = hits + hit_capacity;
-    if (filter->group == SEARCH_PAPERS) rt_memset(groups, 0, count * sizeof(*groups));
+    if (filter->group != SEARCH_RECORDS) rt_memset(groups, 0, count * sizeof(*groups));
     rt_memset(query.states, 0, count);
-    rt_memset(atoms, 0, parser->atom_count * blocks * sizeof(uint64_t));
+    rt_memset(atoms, 0, (parser->atom_count ? parser->atom_count : 1) * blocks * sizeof(uint64_t));
     rt_memset(query.seen, 0, blocks * sizeof(uint64_t));
     rt_memset(positive, 0, sizeof(positive));
-    positive_atoms(parser, root, 1, positive);
+    if (!filter_only) positive_atoms(parser, root, 1, positive);
     for (i = 0; i < parser->atom_count; i++)
         atom_eval(parser, &parser->atoms[i], atoms + i * blocks, positive[i], &query);
+    if (filter_only && filter->kind) {
+        for (i = 0; i < index->kind_count; i++) if (!rt_strcmp(index->strings + index->kinds[i].name, filter->kind)) {
+            size_t j;
+            for (j = 0; j < index->kinds[i].count; j++) {
+                uint32_t record = index->kind_records[index->kinds[i].start + j];
+                atoms[record / 64] |= 1ULL << (record % 64);
+            }
+        }
+    }
     for (i = 0; i < blocks; i++) {
-        uint64_t candidates = evaluate(parser, root, atoms, i, blocks);
+        uint64_t candidates = filter_only ? (filter->kind ? atoms[i] : UINT64_MAX) :
+            evaluate(parser, root, atoms, i, blocks);
         if (i == blocks - 1 && count % 64) candidates &= (1ULL << (count % 64)) - 1;
         while (candidates) {
             unsigned int bit = (unsigned int)__builtin_ctzll(candidates);
             uint32_t record = (uint32_t)(i * 64 + bit), source = index->records[record].parent;
             int seen = (query.seen[i] & (1ULL << bit)) != 0;
-            SearchHit hit;
+            SearchHit hit, best;
+            size_t j, contexts;
+            int accepted = 0, unknown = 0, invalid_date = 0;
             candidates &= candidates - 1;
             if (!record_eligible(&query, record)) continue;
             hit.record = record; hit.byte = seen && query.bytes[record] != NONE ? query.bytes[record] : 0;
             hit.paper = query.owners[source == NONE ? record : source];
             hit.matches = 1;
             hit.score = seen ? query.scores[record] : 0;
-            if (filter->group == SEARCH_PAPERS) {
-                size_t j;
-                int owned = 0;
-                if (source == NONE) source = record;
-                if (index->links[source].paper) {
-                    hit.paper = source; group_hit(index, groups, source, hit); continue;
+            if (source == NONE) source = record;
+            if (filter->group == SEARCH_DOCUMENTS &&
+                (rt_strcmp(index->strings + index->records[source].kind, "File") ||
+                 index->version_lookup[source] == NONE)) {
+                if (!rt_strcmp(index->strings + index->records[source].kind, "File")) result->excluded_unversioned++;
+                continue;
+            }
+            contexts = index->links[source].count;
+            for (j = 0; j < (contexts ? contexts : 1); j++) {
+                const SearchDate *date;
+                if (j < contexts) {
+                    hit.paper = index->related_papers[index->links[source].start + j];
+                    if (!paper_matches(&query, hit.paper)) continue;
+                } else {
+                    if (query.filtered && !metadata_matches(index, &index->records[source], filter)) continue;
+                    hit.paper = index->links[source].paper ? source : NONE;
                 }
-                for (j = index->links[source].start; j < (size_t)index->links[source].start + index->links[source].count; j++) {
-                    uint32_t paper = index->related_papers[j];
-                    if (!paper_matches(&query, paper)) continue;
-                    hit.paper = paper; group_hit(index, groups, paper, hit); owned = 1;
+                search_hit_date(index, &hit, filter->date_role);
+                date = search_hit_time(index, &hit);
+                if (filter->date_from || filter->date_through) {
+                    if (!date) { unknown = 1; continue; }
+                    if (!date->precision) { invalid_date = 1; continue; }
+                    if ((filter->date_from && date->day < from.day) ||
+                        (filter->date_through && date->day > through.day)) continue;
                 }
-                if (!owned) { hit.paper = NONE; group_hit(index, groups, source, hit); }
-            } else {
+                if (filter->group == SEARCH_PAPERS)
+                    group_hit(index, filter->sort, groups, hit.paper != NONE ? hit.paper : source, hit);
+                if (!accepted || hit_before(index, filter->sort, &hit, &best)) best = hit;
+                accepted = 1;
+            }
+            if (!accepted) {
+                if (unknown) result->excluded_unknown_dates++;
+                if (invalid_date) result->excluded_invalid_dates++;
+                continue;
+            }
+            result->matched_records++;
+            if (filter->group == SEARCH_DOCUMENTS)
+                group_hit(index, filter->sort, groups, source, best);
+            else if (filter->group == SEARCH_RECORDS) {
                 result->total++;
-                retain_hit(index, filter->sort, hits, &retained, keep, hit);
+                retain_hit(index, filter->sort, hits, &retained, keep, best);
             }
         }
     }
-    if (filter->group == SEARCH_PAPERS) for (i = 0; i < count; i++) if (groups[i].matches) {
+    if (filter->group != SEARCH_RECORDS) for (i = 0; i < count; i++) if (groups[i].matches) {
         result->total++;
         retain_hit(index, filter->sort, hits, &retained, keep, groups[i]);
     }
@@ -1080,7 +1146,21 @@ static int print_results(SearchOutput *out, const SearchIndex *index, const Sear
     unsigned int i;
     if (json && (out_text(out, "{\"total\":") != 0 || out_uint(out, result->total) != 0 ||
         out_field_bool(out, "incomplete", index->incomplete != 0) != 0 ||
-        out_field_string(out, "group", result->group == SEARCH_PAPERS ? "paper" : "record") != 0 ||
+        out_field_string(out, "group", result->group == SEARCH_PAPERS ? "paper" :
+                         result->group == SEARCH_DOCUMENTS ? "document" : "record") != 0 ||
+        out_field_string(out, "countUnit", result->group == SEARCH_PAPERS ? "paper-or-standalone-object" :
+                         result->group == SEARCH_DOCUMENTS ? "document-version" : "record") != 0 ||
+        out_field_uint(out, "matchedRecords", result->matched_records) != 0 ||
+        out_field_uint(out, "excludedUnknownDateRecords", result->excluded_unknown_dates) != 0 ||
+        out_field_uint(out, "excludedInvalidDateRecords", result->excluded_invalid_dates) != 0 ||
+        out_field_uint(out, "excludedUnversionedRecords", result->excluded_unversioned) != 0 ||
+        out_field_bool(out, "filterOnly", result->filter_only) != 0 ||
+        out_field_string(out, "dateRole", search_date_role_name(result->date_role)) != 0 ||
+        out_field_string(out, "dateFrom", result->date_from ? result->date_from : "") != 0 ||
+        out_field_string(out, "dateThrough", result->date_through ? result->date_through : "") != 0 ||
+        out_field_string(out, "sort", result->sort == SEARCH_DATE_ASC ? "date-asc" :
+                         result->sort == SEARCH_DATE_DESC ? "date-desc" : "relevance") != 0 ||
+        out_field_string(out, "snapshotId", index->snapshot_id) != 0 ||
         out_text(out, ",\"hits\":[") != 0)) return -1;
     for (i = 0; i < result->count; i++) {
         const SearchHit *hit = &result->hits[i];
@@ -1104,12 +1184,25 @@ static int print_results(SearchOutput *out, const SearchIndex *index, const Sear
             snippet[used] = '\0';
         }
         if (json) {
+            uint32_t source = r->parent == NONE ? hit->record : r->parent;
+            uint32_t group_identity = result->group == SEARCH_DOCUMENTS ?
+                index->versions[index->version_lookup[source]].id :
+                result->group == SEARCH_PAPERS ? index->records[hit->paper == NONE ? source : hit->paper].identity :
+                r->identity;
             if ((i && out_text(out, ",") != 0) ||
                 out_text(out, "{\"id\":") != 0 || out_string(out, index->strings + r->id) != 0 ||
                 out_field_string(out, "kind", index->strings + r->kind) != 0 ||
                 out_field_string(out, "name", index->strings + r->name) != 0 ||
                 out_field_string(out, "reference", index->strings + r->reference) != 0 ||
-                out_field_string(out, "date", index->strings + r->date) != 0 ||
+                out_field_string(out, "date", search_hit_date_text(index, hit)) != 0 ||
+                out_field_string(out, "rawDate", index->strings + r->date) != 0 ||
+                out_field_string(out, "dateRole", search_date_role_name(hit->date_role)) != 0 ||
+                out_field_string(out, "identity", index->strings + r->identity) != 0 ||
+                out_field_string(out, "groupIdentity", index->strings + group_identity) != 0 ||
+                out_field_string(out, "unit", result->group == SEARCH_DOCUMENTS ? "document-version" :
+                    result->group == SEARCH_PAPERS ? (hit->paper == NONE ? "standalone-object" : "paper") :
+                    !rt_strcmp(index->strings + r->kind, "Page") ? "page" :
+                    !rt_strcmp(index->strings + r->kind, "Consultation") ? "consultation" : "object") != 0 ||
                 out_field_string(out, "paperType", index->strings + r->paper_type) != 0 ||
                 out_field_string(out, "organization", index->strings + r->organization) != 0 ||
                 out_field_string(out, "source", index->strings + r->source) != 0 ||
@@ -1118,6 +1211,28 @@ static int print_results(SearchOutput *out, const SearchIndex *index, const Sear
                 out_field_uint(out, "matchCount", hit->matches) != 0 ||
                 out_field_string(out, "snippet", snippet) != 0 ||
                 out_document_url(out, index, r) != 0) return -1;
+            {
+                ToolByteBuffer date;
+                int status;
+                tool_byte_buffer_init(&date);
+                status = search_hit_date_json(&date, index, hit);
+                if (!status) status = out_text(out, ",\"sortDate\":") ||
+                    out_write(out, (const char *)date.data, date.size) || out_text(out, ",\"filterDate\":") ||
+                    (result->date_from || result->date_through ?
+                        out_write(out, (const char *)date.data, date.size) : out_text(out, "null"));
+                tool_byte_buffer_free(&date);
+                if (status) return -1;
+            }
+            {
+                ToolByteBuffer proof;
+                int status;
+                tool_byte_buffer_init(&proof);
+                status = search_hit_source_json(&proof, index, hit);
+                if (!status) status = out_text(out, ",\"evidence\":") ||
+                    out_write(out, (const char *)proof.data, proof.size);
+                tool_byte_buffer_free(&proof);
+                if (status) return -1;
+            }
             if (hit->paper != NONE && out_field_string(out, "relatedPaper",
                 index->strings + index->records[hit->paper].id) != 0) return -1;
             if (hit->paper != NONE && out_field_string(out, "relatedName",
@@ -1137,14 +1252,37 @@ static int print_results(SearchOutput *out, const SearchIndex *index, const Sear
                 out_line(out, index->strings + r->id) != 0 ||
                 out_text(out, index->strings + r->source) != 0 ||
                 out_text(out, " page=") != 0 || out_uint(out, r->page) != 0 ||
+                out_text(out, "\nsortDate=") != 0 || out_text(out, search_hit_date_text(index, hit)) != 0 ||
+                out_text(out, " role=") != 0 || out_text(out, search_date_role_name(hit->date_role)) != 0 ||
+                out_text(out, " source=") != 0 ||
+                out_text(out, hit->date_role == SEARCH_IMPORTED ? index->snapshot_id :
+                    index->strings + index->records[hit->date_source].id) != 0 ||
                 out_text(out, "\n") != 0 || out_line(out, snippet) != 0) return -1;
         }
     }
-    return json ? out_text(out, "]}\n") : 0;
+    if (!json && (out_text(out, "Total=") || out_uint(out, result->total) ||
+        out_text(out, " unit=") || out_text(out, result->group == SEARCH_PAPERS ? "paper-or-standalone-object" :
+        result->group == SEARCH_DOCUMENTS ? "document-version" : "record") ||
+        out_text(out, " matchedRecords=") || out_uint(out, result->matched_records) ||
+        out_text(out, " excludedUnknownDateRecords=") || out_uint(out, result->excluded_unknown_dates) ||
+        out_text(out, " excludedInvalidDateRecords=") || out_uint(out, result->excluded_invalid_dates) ||
+        out_text(out, " excludedUnversionedRecords=") || out_uint(out, result->excluded_unversioned) ||
+        out_text(out, "\n"))) return -1;
+    if (json) {
+        if (out_text(out, "],\"next\":")) return -1;
+        if ((size_t)result->offset + result->count < result->total) {
+            if (out_text(out, "{\"snapshotId\":") || out_string(out, index->snapshot_id) ||
+                out_field_uint(out, "offset", (size_t)result->offset + result->count) ||
+                out_field_uint(out, "limit", result->limit) || out_text(out, "}")) return -1;
+        } else if (out_text(out, "null")) return -1;
+        return out_text(out, "}\n");
+    }
+    return 0;
 }
 
 const SearchRecord *search_find(const SearchIndex *index, const char *id, unsigned int page) {
     size_t i;
+    if (index->identities) return search_identity_find(index, id, page);
     for (i = 0; i < index->record_count; i++) {
         const SearchRecord *r = &index->records[i];
         if (rt_strcmp(index->strings + r->id, id) == 0 && r->page == page) return r;
@@ -1237,6 +1375,7 @@ int search_status_json(ToolByteBuffer *buffer, const SearchIndex *index) {
         out_field_uint(&out, "indexMemoryBytes", index->memory_bytes) != 0 ||
         out_field_uint(&out, "pages", pages) != 0 || out_field_uint(&out, "warningPages", warnings) != 0 ||
         out_field_uint(&out, "ocrPages", ocr) != 0 || out_field_bool(&out, "incomplete", index->incomplete != 0) != 0 ||
+        out_text(&out, ",\"coverage\":") != 0 || search_coverage_json(buffer, index) != 0 ||
         out_text(&out, "}\n") != 0 ? -1 : 0;
 }
 

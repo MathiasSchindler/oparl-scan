@@ -42,15 +42,27 @@ build/macos-aarch64/oparl-search --kind Paper --organization Fraktion \
 | `--year YYYY` | Referenzjahr einer Drucksache, 2000 bis 2099, nicht das Datum der PDF |
 | `--paper-type TYP` | Exakter Drucksachentyp, ohne Gross-/Kleinschreibung |
 | `--organization TEXT` | Teilstring der zustaendigen Organisation, ohne Gross-/Kleinschreibung |
+| `--organization-id ID` | Exakte Quellen-ID einer Zustaendigkeit |
+| `--actor-id ID` | Exakte ID in expliziten Akteursbeziehungen; keine abgeleitete Urheberschaft |
+| `--snapshot-id ID` | Indexstand aus der ersten Antwort; bei `offset > 0` erforderlich |
 | `--kind TYP` | Objekttyp, z. B. `Paper`, `File`, `Page`, `Meeting` oder `Organization` |
-| `--limit N` | Zahl der besten Treffer, 1 bis 100; Standard 20 |
+| `--limit N` | Maximale Zahl je Seite, 1 bis 100; Suche 20, Recherchelisten 10; nicht mit `--show` |
 | `--offset N` | Die ersten N sortierten Treffer ueberspringen, 0 bis 4294967295; Standard 0 |
 | `--sort REIHENFOLGE` | `relevance` (Standard), `date-desc` oder `date-asc` |
-| `--group MODUS` | `record` (CLI/API-Standard) oder `paper`: ein Treffer pro Vorgang |
+| `--date-role ROLLE` | Datumsrolle fuer Filter und Sortierung; Standard `auto` |
+| `--date-from YYYY-MM-DD` | Erster eingeschlossener Quell-Kalendertag |
+| `--date-through YYYY-MM-DD` | Letzter eingeschlossener Quell-Kalendertag |
+| `--group MODUS` | `record` (CLI/API-Standard), `paper` oder `document` |
 | `--json` | Strukturierte Ausgabe statt lesbarer Textausgabe |
 | `--batch` | Eine Suchanfrage je stdin-Zeile bei einmal geladenem Index |
 | `--benchmark N` | 20 bis 100000 warme Wiederholungen einer Anfrage |
-| `--show ID` | Vollstaendige archivierte Metadaten anhand einer ID abrufen |
+| `--show ID` | Kompakte Metadaten anhand einer OParl-/Fassungs-/Seiten-/Abschnitts-ID abrufen |
+| `--paper ID`, `--meeting ID`, `--agenda ID` | Kompakter Vorgang, Sitzung oder separat paginierte Tagesordnung |
+| `--object ID` | Gebuendelte Metadaten; bis zu 20 wiederholte IDs |
+| `--options` | Typen, Datumsrollen, Projektionen und ID-Katalog; optional `--kind` |
+| `--status` | Importzeit, Snapshot und Abdeckung je Objekttyp |
+| `--fields FELDER` | Kommagetrennte skalare Metadatenfelder bei Rechercheabrufen |
+| `--raw` | Mit `--show`/`--paper` vollstaendige archivierte Metadaten explizit laden |
 | `--page N` | Zusammen mit `--show`: extrahierten PDF-Seitentext abrufen; Seiten ab 1 |
 | `--serve` | Lokale Weboberflaeche und JSON-API auf `127.0.0.1` starten |
 | `--port N` | Mit `--serve`: TCP-Port, 1 bis 65535; Standard 8080 |
@@ -107,7 +119,13 @@ schraenkt die Ausgabe auf Seiten ein, ohne diesen Kontext zu verlieren.
 `underDirectionOf` bezeichnet eine Zustaendigkeit. Eine verlaessliche
 personenbezogene Urhebersuche laesst sich daraus nicht ableiten;
 entsprechende strukturierte Urheberfelder fehlen im untersuchten
-Potsdamer Drucksachenbestand.
+Potsdamer Drucksachenbestand. `organizationId` sucht exakte
+`underDirectionOf`-/`organization`-IDs; `actorId` sucht zusaetzlich
+`originatorPerson`, `originatorOrganization` und `person`. Diese
+Rohbeziehungen sind keine normalisierte Rollen- oder Namenssuche.
+Unbekannte IDs erzeugen Fehler, bekannte IDs ohne passende Datensaetze
+eine leere Liste. Der Katalog aus `--options` enthaelt indexierte Objekte;
+nur referenzierte, nicht indexierte Akteure bleiben in `actors` sichtbar.
 
 ## Treffer und JSON-Ausgabe
 
@@ -125,36 +143,116 @@ Mit `--group paper` werden passende Metadaten und PDF-Seiten **vor**
 Sortierung, Gesamtzahl und Seiteneinteilung nach Vorgang zusammengefasst.
 Eine gemeinsam verwendete Datei erscheint in jedem passenden Paper-Kontext;
 alle Metadatenfilter muessen weiterhin denselben Kontext erfuellen.
-Die relevanteste passende Fundstelle liefert Ausschnitt, Quelle und PDF-Seite.
+Die nach der gewaehlten Sortierung beste passende Fundstelle liefert
+Ausschnitt, Quelle und PDF-Seite.
 Der Gruppenwert ist der beste Einzelwert, keine Summe mit einem Bonus fuer
 lange PDFs. `matchCount` zaehlt passende Datensaetze, nicht einzelne
 Wortvorkommen. Nicht zuordenbare Dateien werden pro Datei, andere Objekte
 weiter einzeln ausgegeben. AND/Phrasen werden weiterhin innerhalb eines
 Datensatzes ausgewertet, nicht ueber mehrere Seiten verteilt.
 
-`--sort date-desc` zeigt neueste, `--sort date-asc` aelteste Datensaetze
-zuerst. Massgeblich ist der Kalendertag in `relatedDate`, sonst `date`:
-bei PDF-Seiten also normalerweise das Datum der passenden Vorlage,
-nicht Download-, Aenderungs- oder PDF-Erstellungszeit. Bei mehreren
-Vorlagen gilt der ausgegebene, zu den Filtern passende Kontext.
-Fehlende Datumsangaben stehen in beiden Richtungen zuletzt;
-bei gleichem Datum entscheidet die Relevanz.
+`--group document` zaehlt konkrete archivierte Dokumentfassungen:
+File-Metadaten und passende Seiten derselben Fassung bilden eine Gruppe,
+auch bei mehreren direkten Paper-Besitzern. File-Objekte ohne im Index
+belegte archivierte Fassung werden als `excludedUnversionedRecords` ausgewiesen, nicht als
+Dokumentfassungen gezaehlt. Andere Objekttypen gehoeren nicht zu dieser
+Grundmenge. `groupIdentity` benennt die Gruppe stabil; `identity` bleibt
+die Identitaet der ausgewaehlten Fundstelle.
+
+### Datumsrollen, Zeitbereiche und Auflistungen
+
+`--year` filtert **nur das Referenzjahr eines Papers**, nicht Sitzungsjahr,
+Dokumentjahr oder Entscheidungsjahr. Datumsrolle und Datumsbereich sind
+davon unabhaengig. `--date-role` steuert Filter und chronologische Sortierung:
+
+- `auto`: Paper und direkt zugeordnete Dateien/Seiten verwenden `paper.date`;
+  Meetings, Beratungen und TOP verwenden `meeting.start`; andere Objekte
+  verwenden ein belegtes `document.date`.
+- Explizite Rollen: `paper.date`, `document.date`, `meeting.start`,
+  `meeting.end`, `submittedAt`, `decidedAt`, `publishedAt`, `effectiveAt`,
+  `created`, `modified`, `observedAt`, `importedAt`.
+- Seiten verwenden Fakten ihrer File-Metadaten. `paper.date` darf nur vom
+  passenden direkten Paper-Besitzer stammen. Bei Beratungen/TOP wird eine
+  Sitzungszeit nur bei eindeutig belegter typisierter Meeting-Beziehung
+  uebernommen; mehrere oder nicht aufloesbare Sitzungen bleiben unbekannt.
+- Generische Rollen wie `created` beziehen sich auf das Trefferobjekt bzw.
+  den File-Elternsatz einer Seite, nicht automatisch auf das zugehoerige Paper.
+  `importedAt` bezeichnet ausschliesslich den lokalen Indeximport.
+  `referenceYear` ist keine zulaessige Datumsrolle.
+
+`--date-from` und `--date-through` sind inklusive Grenzen in der **lokalen
+Kalenderdatumsangabe der Quelle**, nicht des Browsers oder Servers. Eine
+einseitige Grenze ist erlaubt. Gueltig sind gregorianische Tage der Jahre
+0001 bis 9999; ungueltige oder umgekehrte Grenzen werden abgelehnt.
+Zeiten benoetigen Sekunden und `Z` oder einen Offset wie `+01:00`;
+bis zu neun Nachkommastellen bleiben erhalten. Fuer `Meeting.start/end`
+reicht ein Tagesdatum ohne belegte Uhrzeit/Zeitzone nicht aus.
+
+`--sort date-desc` und `date-asc` vergleichen echte Zeitpunkte nach UTC,
+einschliesslich Offset und Nachkommastellen, auch bei Zeitumstellung.
+Reine Tagesdaten behaupten keine Uhrzeit; ihre Sortiergrenze ist 00:00 UTC.
+Fehlende und ungueltige Werte stehen ohne Zeitfilter in beiden Richtungen
+zuletzt. Gleichstaende werden durch Relevanz und stabile Datensatzreihenfolge
+aufgeloest. Bei mehreren passenden Besitzern folgt auch die Auswahl des
+ausgegebenen Kontexts dieser Sortierung.
+
+Mit Zeitfilter werden unbekannte/ungueltige Werte nach dem vollstaendigen
+Text- und Metadatenabgleich separat als ausgeschlossene **Datensaetze**
+gezaehlt (`excludedUnknownDateRecords`, `excludedInvalidDateRecords`).
+Diese Zahlen sind keine Paper-Zahlen und keine Negativauskunft zum RIS.
+Bei mehreren unklaren Besitzerkontexten koennen beide Gruende denselben
+ausgeschlossenen Datensatz betreffen.
+
+Ohne Suchwort ist eine Auflistung mit einschraenkendem Typ-, Referenzjahr-,
+Metadaten- oder Zeitbereichsfilter moeglich. Auch `--group document`
+definiert eine eigene Grundmenge. Leeres/fehlendes `q` nur mit Sortierung,
+Datumsrolle oder Limit ist zu breit und wird abgelehnt. Bekannte Typen ohne
+Bestand liefern null Treffer; unbekannte Typen und Rollen liefern Fehler.
+`*` ist weiterhin ungueltige Suchsyntax, kein Listing-Workaround.
+
+```sh
+# Sitzungen im November ohne kuenstliches Suchwort, nach echtem Beginn.
+build/macos-aarch64/oparl-search --kind Meeting --date-role meeting.start \
+  --date-from 2026-11-01 --date-through 2026-11-30 --sort date-asc --json
+```
 
 ```sh
 # Zweite Seite mit 50 Treffern, nach Datum absteigend.
 build/macos-aarch64/oparl-search --year 2024 --sort date-desc \
-  --limit 50 --offset 50 'Schule OR wohn*'
+  --limit 50 --offset 50 --snapshot-id "$SNAPSHOT_ID" 'Schule OR wohn*'
 ```
+
+`SNAPSHOT_ID` aus der ersten JSON-Antwort uebernehmen. Fortsetzungen
+behalten alle urspruenglichen Filter, Sortierung und Gruppierung.
+`next` liefert Offset, Limit und Snapshot; `null` bedeutet das Listenende.
+Ein fehlender oder abweichender Snapshot erzeugt einen Fehler, keine
+moeglicherweise verschobene zweite Seite. Der Webclient uebernimmt den
+Snapshot automatisch; Filteraenderungen starten ohne alten Snapshot neu.
 
 `--json` liefert ein Objekt mit:
 
-- `total`: exakte Zahl passender Datensaetze beziehungsweise Vorgangsgruppen.
-- `group`: `record` oder `paper`.
+- `total`: exakte Zahl passender Einheiten vor Seiteneinteilung.
+- `group`: `record`, `paper` oder `document`.
+- `countUnit`: `record`, `paper-or-standalone-object` oder `document-version`;
+  `matchedRecords` nennt die passende Datensatz-Grundmenge vor Gruppierung.
+- `filterOnly`, `dateRole`, `dateFrom`, `dateThrough`, `sort`, `snapshotId`
+  und die genannten Ausschlusszaehler machen die Abfrage nachvollziehbar.
 - `incomplete`: bekannte Archiv- oder Extraktionsluecken.
 - `hits`: die besten Treffer bis zum gewaehlten Limit.
 
 Jeder Treffer enthaelt `id`, `kind`, `name`, `reference`, `date`,
 `paperType`, `organization`, `source`, `page`, `warnings`, `matchCount` und `snippet`.
+`date` ist jetzt das gewaehlte Filter-/Sortierdatum; `rawDate` erhaelt
+die alte, teilweise vom ersten Besitzer abgeleitete Datensatzspalte und
+ist **kein Beleg fuer ein Dokumentdatum**. `sortDate` und bei Zeitfilter
+`filterDate` enthalten Rohwert, Rolle, Praezision, Quellobjekt, Eigenschaft,
+Regel, Belegsicherheit und Uebernahmepfad; unbekannte Fakten bleiben `null`.
+Lokale Importzeiten verweisen mit `sourceIndex`/`via: index` auf den Snapshot,
+nicht auf eine behauptete OParl-Eigenschaft des Trefferobjekts.
+`unit`, `identity` und `groupIdentity` unterscheiden Paper, eigenstaendiges
+Objekt, Seite, Beratung und Dokumentfassung. Politische Initiativen,
+Wortvorkommen oder zusammengefasste Entscheidungsereignisse werden nicht
+aus Paper-/Seitenzahlen erfunden; entsprechende Gruppen sind nicht etabliert.
 Datei-/PDF-Seitentreffer enthalten ausserdem `documentUrl`, sofern
 die archivierten File-Metadaten eine nicht leere `downloadUrl` oder
 ersatzweise `accessUrl` nennen. Die URL wird nicht aus der OParl-ID
@@ -172,6 +270,11 @@ ist keine vollstaendige Liste aller dieser Beziehungen.
 
 Ein lokales, nicht zuordenbares Dokument hat eine
 `urn:oparl-search:archive-file:...` statt einer erfundenen OParl-URL.
+`evidence.citation` bindet die Fundstelle an `snapshotId`, stabile
+Identitaet, Dokumentfassungs-ID, SHA-256 und PDF-Seite.
+`evidence.relationshipPath` liefert die expliziten strukturellen
+Quellenkanten, etwa `paper.mainFile` oder `meeting.auxiliaryFile`.
+Eine fehlende Kante macht ein eigenstaendiges Dokument nicht zum Paper-Inhalt.
 Die Antwort liefert keine PDF-Binaerdaten; `source` verweist auf
 die lokal archivierte Quelle, `documentUrl` auf das Originaldokument.
 
@@ -183,15 +286,32 @@ build/macos-aarch64/oparl-search --show "$OPARL_ID" --json
 build/macos-aarch64/oparl-search --show "$FILE_ID" --page 2 --json
 ```
 
-Ohne `--page` liefert `--show` das archivierte JSON-Objekt.
-Mit `--page` wird der extrahierte Seitentext des File-Objekts
-abgerufen, nicht die visuelle PDF-Seite.
-
-Die strukturierte Antwort enthaelt `id`, `page`, `warnings`,
-`incomplete`, `source`, `text` und `metadata`. Fuer unzugeordnete
-lokale Dokumente ist `metadata: null`. Ohne `--json` erscheinen
-das rohe Metadaten-JSON beziehungsweise der Seitentext.
+Rechercheabrufe liefern immer JSON, auch ohne `--json`. `--show` liefert
+standardmaessig kompakte skalare `metadata` samt `citation`, Quellenrolle,
+Warnungen und explizitem `omittedFields`/`rawAvailable`. Lange Werte und
+eingebettete Arrays/Objekte werden nicht still abgeschnitten.
+Mit `--raw --show` bleiben die vollstaendigen Rohmetadaten und das
+kanonische `model` abrufbar. `--page` bzw. eine Seiten-/Abschnitts-ID liefert
+den vollstaendigen extrahierten Seitentext, nicht die visuelle PDF-Seite.
 Nicht vorhandene IDs oder Seiten fuehren zu einem Fehler.
+
+```sh
+build/macos-aarch64/oparl-search --paper "$PAPER_ID"
+build/macos-aarch64/oparl-search --meeting "$MEETING_ID"
+build/macos-aarch64/oparl-search --agenda "$MEETING_ID"
+build/macos-aarch64/oparl-search --show "$OPARL_ID" --raw
+build/macos-aarch64/oparl-search --object "$ID_A" --object "$ID_B" \
+  --fields name,reference,paperType,downloadUrl
+build/macos-aarch64/oparl-search --options --kind Organization --fields name
+```
+
+Feldprojektionen verwenden eine kommagetrennte Zeichenkette, kein Array.
+`get_search_options`/`--options` liefert `projectionFields`, `paperTypes`,
+`dateRoles`, `kinds` und einen paginierten ID-Katalog.
+`--raw` mit Bulk-/TOP-Projektionen erlaubt lange ausgewaehlte skalare
+Werte; fuer komplette Rohobjekte `--raw --show` verwenden. Vollstaendige
+Einzel-/Vorgangsrohdaten und `--page` lassen sich nicht mit `fields`
+kombinieren; Einzelobjekte akzeptieren kein Limit/positives Offset.
 
 ## Batchbetrieb
 
@@ -255,8 +375,9 @@ eingebettet; ein zusaetzliches Webverzeichnis ist nicht erforderlich.
 - Ueber-, untergeordnete und verwandte Vorlagen, mit Links zu deren
   eigenen lokalen Vorgangsseiten.
 - Beratungsfolge mit Gremien, Sitzung, Tagesordnungspunkt und Ergebnis,
-  soweit diese Daten im Index vorhanden sind. Beschlussdateien,
-  Einladungen und Protokolle werden ebenfalls verlinkt.
+  soweit diese Daten im Index vorhanden sind. Beschlussdateien sind an
+  ihre konkrete Beratung und ihren TOP gebunden. Einladungen und Protokolle
+  sind separat auf der lokalen Sitzungsseite erreichbar.
 - Originalvorgang im RIS ueber dessen archiviertes `web`-Feld,
   Metadatendetails und die entsprechende JSON-Ausgabe.
 
@@ -268,24 +389,45 @@ curl --get http://127.0.0.1:8080/api/paper \
   --data-urlencode 'id=https://www.potsdam.sitzung-online.de/oparl/papers/2002374'
 ```
 
-Die Antwort hat `id` fuer den angefragten Vorgang, `incomplete` und
-eine nach ID deduplizierte Liste `objects`. Jedes Objekt enthaelt
-`id`, `kind`, `scope`, `indexed`, `source`, `warnings` und `metadata`.
+Die Standardantwort hat `id`, `snapshotId`, globale `incomplete`,
+`localCoverage`, `total`, `returned`, `offset`, `next` und eine
+nach ID deduplizierte Liste `objects`. Das Limit ist eine Obergrenze:
+das kompakte Bytebudget kann eine Seite schon vorher beenden.
+Der Button "Weitere verknuepfte Objekte laden" erschliesst explizit alle
+Fortsetzungen. Jedes Objekt enthaelt `id`, `kind`, `scope`, `indexed`,
+`sourceRole`, `relationshipPath` und kompakte `metadata`; indexierte
+Objekte zusaetzlich `source`, `warnings`, `citation`, `omittedFields`
+und `rawAvailable`.
 `scope` unterscheidet Wurzel-Paper (`paper`), direkte Dokumente (`directSource`),
 andere Kontextdateien (`contextSource`), verwandte Papers (`relatedPaper`) und
 sonstigen Kontext (`context`). Sitzungskontext ist keine direkte Paper-Quelle.
-`metadata` sind die unveraenderten OParl-Metadaten; die Beziehungen
-bleiben dort erhalten. `indexed: true` bedeutet, dass ein eigener
+Die ausgewaehlten skalaren Werte bleiben unveraendert; Beziehungen werden
+als typisierte Pfade geliefert. Pfadkanten behalten Originalrichtung und
+markieren die Traversierung als `incoming` oder `outgoing`.
+`indexed: true` bedeutet, dass ein eigener
 Datensatz im geladenen Index gefunden wurde, nicht dass die PDF
 vollstaendig archiviert oder fehlerfrei als Text erkannt wurde.
 
-Eigene Indexdatensaetze haben Vorrang vor moeglicherweise veralteten
-eingebetteten Angaben. Fehlt ein eigener Datensatz, bleiben eingebettete
-Angaben als solche sichtbar (`indexed: false`); bei einer blossen
-unaufgeloesten ID ist `metadata: null`. Solche Luecken setzen
-`incomplete: true`. Geloeschte eingebettete Objekte werden gekennzeichnet,
-nicht als aktive Dokumente verlinkt. Es gibt keine erfundenen
-PDF-URLs und keine Live-Nachladeanfragen an das RIS.
+Eigene Indexdatensaetze haben Vorrang. Ohne eigenen Datensatz ist im
+kompakten Graphen `indexed: false` und `metadata: null`; diese lokalen
+Beziehungsluecken stehen unter `localCoverage.unindexedObjects`, getrennt
+von globalen Archivluecken. `warningObjects` zaehlt Warnungen an den
+verknuepften Datensaetzen, nicht saemtliche Seitenwarnungen einer PDF.
+Der explizite Rohabruf `raw=true` bewahrt auch nicht indexierte
+eingebettete Quellangaben und geloeschte Markierungen. Es gibt keine
+erfundenen PDF-URLs und keine Live-Nachladeanfragen an das RIS.
+
+Beratungsobjekte buendeln `consultation.authority`, Gremium, Sitzungsbeginn,
+TOP-Ergebnis und `decisionSources` mit Beschlussdatei/Fassungsbeleg.
+Verbindlichkeit stammt ausschliesslich aus dem Quellenfeld `authoritative`:
+`true` ist `authoritative`, `false` ist `preliminary`, sonst `unknown`.
+Das kennzeichnet die Entscheidungsrolle, beweist allein aber weder ein
+vorliegendes Ergebnis noch eine durchgefuehrte Beratung.
+Gremien aus einer Sitzung werden mit `meeting.organization` und `via`
+belegt, nicht als direkte Beratungsangabe ausgegeben.
+Mehr als drei Kontext-/Beschlussbelege oder fuenf Akteursreferenzen werden
+mit Gesamtzahl und expliziten Mehr-Indikatoren kenntlich gemacht.
+Die betroffenen Quellobjekte sind per `get_object raw:true` nachladbar.
 
 Aufgeloest werden die expliziten Verknuepfungen des angefragten Papers
 sowie dessen Beratungen, Tagesordnungspunkte, Sitzungen, Gremien und
@@ -296,18 +438,41 @@ derselben Sitzung werden nicht als Teil dieses Vorgangs ausgegeben.
 Die rohen Sitzungsmetadaten bleiben dabei unveraendert. Es werden keine
 fehlenden Gegenbeziehungen oder Beratungen hinzuerfunden.
 Zyklen und mehrfach verwendete Dateien erzeugen keine doppelten Objekte.
-Bei mehr als 4096 aufgeloesten Objekten wird die Anfrage mit Fehler
-abgelehnt statt still gekuerzt.
+Die kompakte Nachbarschaft ist vollstaendig paginierbar. Nur der explizite
+vollstaendige Vorgangsrohabruf bleibt auf 4096 Objekte begrenzt und
+liefert oberhalb der Grenze einen Fehler. Rohantworten sind auf 16 MiB
+begrenzt; grosse Bulk-Projektionen ueber Limit/Felder aufteilen.
 
-Die Vorgangsansicht verwendet wie die Suche Indexformat 2.
-Alte Indexdateien muessen mit dem aktuellen Indexer neu gebaut werden.
+`/meeting?id=OPARL_ID` zeigt Sitzung und Dokumente. Die Tagesordnung wird
+erst mit "Tagesordnung laden" separat angefordert und explizit fortgesetzt.
+`lifecycle` unterscheidet `planned`, `held`, `cancelled`, `unknown`.
+`eingeladen`/`geplant` bleiben auch bei vergangener Uhrzeit geplant;
+`durchgefuehrt` (auch mit Umlaut) bzw. `abgeschlossen` belegen
+Durchfuehrung laut Quelle. `cancelled: true` oder `abgesagt` bezeichnet
+Absage. Eine geplante Tagesordnung hat `agendaStatus: provisional`,
+andere bleiben ohne zusaetzlichen Beleg `unknown`.
+Ausdruecklich nichtoeffentliche TOP werden nicht ausgegeben.
+`nonPublicReferences`, `unresolvedAgendaReferences` und
+`publicStatusUnspecified` trennen Nichtoeffentlichkeit, fehlende Aufloesung
+und fehlende Quellflags; `total` umfasst verfuegbare sowie unaufgeloeste
+TOP-Referenzen. Sortiert wird nach dem Quellfeld `order`, bei unbekannten
+Werten mit stabiler interner Reihenfolge, nicht nach einer erfundenen Nummer.
+
+Die Vorgangsansicht verwendet wie die Suche Indexformat 3.
+M4 nutzt vorhandene Format-3-Indizes unveraendert; aeltere Formate
+muessen mit dem aktuellen Indexer neu gebaut werden.
 
 ### Indexstatus
 
 Die verlinkte Unterseite <http://127.0.0.1:8080/health> zeigt die
 Groesse der geladenen Indexdatei in MiB und Bytes, Indexspeicher,
 Datensatz-/Begriffszahlen, PDF-Seiten sowie Seiten mit Extraktionswarnungen
-und OCR-Bedarf. Der Indexspeicher umfasst Indexdaten und Beziehungstabellen,
+und OCR-Bedarf sowie Snapshot, lokale Importzeit und Abdeckung je Typ:
+Datensaetze, lokale Warnungen, nicht aufgeloeste Relationsziele und Files
+ohne indexierte Dokumentfassung. Fehlende Relationsziele koennen auch
+absichtlich nichtoeffentliche/geloeschte Ressourcen betreffen und sind
+kein Nachweis fehlender oeffentlicher Inhalte.
+Der Indexspeicher umfasst Indexdaten und Beziehungstabellen,
 nicht den gesamten Prozess oder wechselnde Anfragepuffer.
 
 Hinweise auf bekannte Archiv-/Texterkennungsluecken stehen hier statt
@@ -334,9 +499,13 @@ Antworten sind UTF-8-JSON; `HEAD` liefert keinen Antwortkoerper.
 | Endpunkt | Parameter | Antwort |
 | --- | --- | --- |
 | `/api/status` | Keine | Zaehler und Abdeckung, `formatVersion`, `snapshotId`, `importedAtEpochSeconds`, `relations`, `documentVersions`, `textSections` des geladenen Indexes |
-| `/api/search` | `q` erforderlich; optional `year`, `paperType`, `organization`, `kind`, `limit`, `offset`, `sort`, `group` | Dieselbe JSON-Struktur wie die CLI-Suche |
-| `/api/object` | `id` erforderlich; optional `page` ab 1 | Dieselbe JSON-Struktur wie `--show ID --json`, mit `page` wie `--show ID --page N --json` |
-| `/api/paper` | Nur `id` erforderlich, muss ein indexiertes Paper sein | Aufgeloester Vorgang mit `id`, `incomplete`, `objects` |
+| `/api/search` | `q` oder einschraenkende Auflistung; `year`, `paperType`, `organization`, `organizationId`, `actorId`, `kind`, `limit`, `offset`, `sort`, `group`, `dateRole`, `dateFrom`, `dateThrough`, `snapshotId` | CLI-Suchstruktur |
+| `/api/object` | `id`; optional `page`, `fields`, `raw`, `snapshotId` | Kompaktes Einzelobjekt oder explizite Rohdaten/Seitentext |
+| `/api/paper` | Paper-`id`; `fields`, `limit`, `offset`, `snapshotId`, `raw` | Kompakter Vorgang mit Fortsetzung; Rohdaten explizit |
+| `/api/meeting` | Meeting-`id`; gleiche Rechercheparameter | Sitzung und Dokumente ohne komplette Tagesordnung |
+| `/api/agenda` | Meeting-`id`; gleiche Rechercheparameter | Separat paginierte TOP-Referenzen und Sitzungskontext |
+| `/api/objects` | `ids` als URL-kodiertes JSON-Array von 1 bis 20 IDs; Rechercheparameter | Gebuendelte Metadatenprojektion |
+| `/api/options` | Optional `kind`, `fields`, `limit`, `offset`, `snapshotId` | Typen, Rollen, Felder und ID-Katalog; Standard Organization |
 
 Werte werden als URL-kodierte Queryparameter uebergeben. `+` wird zu
 einem Leerzeichen, Prozentkodierung muss gueltiges UTF-8 ergeben.
@@ -344,11 +513,12 @@ Doppelte, unbekannte oder ungueltige Parameter werden abgelehnt,
 nicht stillschweigend ignoriert. Grenzen und Bedeutung der Suchfilter
 entsprechen der CLI; `paperType` entspricht `--paper-type`.
 Ohne `limit` gilt fuer direkte API-Anfragen wie bei der CLI weiterhin
-20; die Weboberflaeche fordert standardmaessig 50 an.
+20 fuer Suchanfragen; Recherchelisten verwenden 10 als Obergrenze.
+Die Websuche fordert standardmaessig 50 an.
 `offset` zaehlt ab 0; auch jenseits des letzten Treffers bleibt
 `total` exakt und `hits` ist leer. `sort` akzeptiert `relevance`,
 `date-desc` und `date-asc`.
-`group` akzeptiert `record` und `paper`. CLI und direkte JSON-API bleiben
+`group` akzeptiert `record`, `paper` und `document`. CLI und direkte JSON-API bleiben
 standardmaessig bei einzelnen Datensaetzen; Weboberflaeche und MCP suchen
 standardmaessig Vorgangsgruppen.
 
@@ -381,6 +551,7 @@ Fehlerantworten haben die Form `{"error":"Beschreibung"}`:
 | `404` | Unbekannter Endpunkt oder nicht vorhandene ID/Seite |
 | `405` | Nicht erlaubte Methode; nur `/mcp` erlaubt POST |
 | `408` | Zeitlimit fuer die vollstaendige Anfrage ueberschritten |
+| `409` | Snapshot stimmt nicht mit dem geladenen Index ueberein; Recherche neu beginnen |
 | `431` | Anfrageheader einschliesslich URL groesser als 64 KiB |
 | `500` | Interner Fehler, etwa fehlender Anfragespeicher |
 | `503` | Alle Verbindungsplaetze belegt |
@@ -392,16 +563,20 @@ durchsuchbar und wird weiterhin mit `incomplete: true` gekennzeichnet.
 ### HTTP-MCP
 
 Der bestehende Dienst stellt unter `/mcp` einen **Streamable-HTTP**-Transport
-bereit, lokal beispielsweise `http://127.0.0.1:8080/mcp`, auf dem
-bereitgestellten Server `http://178.254.23.157:8080/mcp`.
+bereit, lokal beispielsweise `http://127.0.0.1:8080/mcp`.
+Die neuen M4-Werkzeuge sind noch nicht auf den oeffentlichen Server ausgerollt.
 Es gibt keinen zusaetzlichen Port oder Prozess und keine MCP-SDK-
 Laufzeitabhaengigkeit.
 
 | Werkzeug | Argumente | Ergebnis |
 | --- | --- | --- |
-| `search` | `q`; optional dieselben Filter wie `/api/search`, einschliesslich `group` | Suchantwort; Standard 20 Treffer und `group=paper` |
-| `get_object` | `id`; optional `page` ab 1 | Originalmetadaten oder extrahierter PDF-Seitentext |
-| `get_paper` | `id` eines Papers | Aufgeloester Vorgang wie `/api/paper` |
+| `search` | Optional `q` bei einschraenkender Auflistung; dieselben Filter wie `/api/search`, einschliesslich `group` und Datumsrollen/-grenzen | Suchantwort; Standard 20 Treffer und `group=paper` |
+| `get_object` | `id`; `page`, `fields`, `raw`, `snapshotId` | Kompakte Metadaten; Rohmodell/Seitentext explizit |
+| `get_paper` | Paper-`id`; Rechercheparameter | Kompakter Vorgang wie `/api/paper` |
+| `get_meeting` | Meeting-`id`; Rechercheparameter | Sitzung und Dokumente |
+| `get_agenda` | Meeting-`id`; Rechercheparameter | Separate paginierte TOP |
+| `get_objects` | `ids` mit 1 bis 20 IDs; Rechercheparameter | Gebuendelte skalare Projektionen |
+| `get_search_options` | Optional `kind`; Rechercheparameter ohne `raw` | Rollen, Typen, Felder und ID-Katalog |
 | `get_index_status` | Keine | Indexgroesse, Zaehler und Abdeckung wie `/api/status` |
 
 Alle Werkzeuge sind nur lesend und greifen ausschliesslich auf den geladenen
@@ -410,6 +585,19 @@ dieselben Daten in `structuredContent` und als JSON im Textinhalt.
 Unbekannte Werkzeuge und fehlerhafte RPC-Nachrichten erzeugen JSON-RPC-Fehler;
 ungueltige Werkzeugargumente, Suchsyntax und fehlende Objekte liefern
 `isError: true` mit Beschreibung statt erfundener Ergebnisse.
+
+Rechercheparameter sind `fields` (CSV), `limit`, `offset`, `snapshotId`
+und gegebenenfalls `raw`. Standard-Vorgangsantworten halten ein kompaktes
+Bytebudget ein, einschliesslich Text-/Strukturkopie und JSON-RPC-Huelle
+in den Abnahmetests unter 20.000 HTTP-Body-Bytes.
+Rohdaten, explizit grosse Suchlisten und komplette Seitentexte sind keine
+kompakten Standard-Vorgangsantworten.
+Bei `next != null` die urspruenglichen Argumente beibehalten und
+Offset/Limit/Snapshot aus `next` uebernehmen. Insbesondere Bulk-IDs
+bleiben beim Client; `retainArguments: ["ids"]` macht das ausdruecklich.
+Kein Client darf eine erste Teilseite als vollstaendiges Negativergebnis
+interpretieren. Zitieren ueber Fassungs-ID, SHA-256, Seite und Snapshot;
+Original-URLs koennen spaeter andere Bytes liefern.
 
 Unterstuetzt werden:
 
@@ -601,6 +789,11 @@ beschreibt typisierte Kanten, Datumsrollen, Fassungsidentitaeten und Belege.
 Nur explizite Hauptdateien und Anlagen eines Papers gelten fuer Suchfilter
 und Gruppierung als dessen Dokumente. Erreichbare Eltern, TOP und
 Sitzungspakete sind dagegen Kontext, keine vererbten Paper-Inhalte.
+M3 benoetigt keine neue Diskformatversion: Format 3 enthaelt bereits die
+belegten Rohfakten. Beim validierten Laden werden UTC-/Tages-Schluessel,
+Typ-Postings, direkte Besitzer-, eindeutige Sitzungskontext- und
+Dokumentfassungs-Lookups einmalig vorab aufgebaut. Suchanfragen parsen
+keine archivierten Datumstexte oder JSON-Metadaten erneut.
 
 `--show ID --json`, `/api/object` und MCP-`get_object` liefern dieses Modell
 gemeinsam mit Rohmetadaten und Text als `model`. Unbekannte Werte bleiben
@@ -775,8 +968,14 @@ Dokumentjahr, Sitzungsdaten und Zeitzonen einschliesslich Zeitumstellung,
 Antwortgroesse unter 20.000 HTTP-Body-Bytes, unpassende eingebettete
 Tagesordnungspunkte und unabhaengiger Kalenderimport. Gegenpruefungen erhalten
 widerspruechliche Datums-/Typangaben und explizit fehlende Beziehungen.
-Die Rollen-/Datumsbelege sind noch keine implementierte Normalisierung oder
-belastbare Bearbeitungszeitstatistik.
+Die gemeinsame M3-Semantik normalisiert belegte Zeiten fuer Filter und
+Sortierung; sie ist noch keine Dokumentrollenklassifikation oder belastbare
+Bearbeitungszeitstatistik. `tests/search-semantics.mjs` prueft zusaetzlich
+Nanosekunden, inklusive Quell-Lokaltage, Filter-only-Seitennavigation,
+ungueltige/unbekannte Zeiten, mehrdeutige Sitzungskontexte, Besitzer-Joins
+und Dokumentfassungsgruppen. Web-/MCP-Tests vergleichen die neuen
+Filterantworten mit der CLI. Die fachliche M3-Abnahme steht bei 13/15;
+Antwortbudget und fremde eingebettete TOP bleiben M4-Baustellen.
 
 Stichtag, Zeitzone, Datumsrollen, Zaehleinheiten und unbekannte Werte stehen
 in der Fixture. Bei einem Formatumbau darf der Runner angepasst werden;

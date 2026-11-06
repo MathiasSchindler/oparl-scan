@@ -83,7 +83,9 @@ try {
   await writeFile(join(archives, '2024', 'documents', `${hash(file(2).id)}-2.pdf`), unicode);
   const built = run(indexer, ['--input', archives, '--output', index]);
   assert.match(built.stderr, /pages=3,/);
-  const query = (text, args = []) => JSON.parse(run(searcher, ['--index', index, '--json', ...args, text]).stdout);
+  const snapshotId = JSON.parse(run(searcher, ['--index', index, '--status']).stdout).snapshotId;
+  const query = (text, args = []) => JSON.parse(run(searcher, ['--index', index, '--json', ...args,
+    ...(args.includes('--offset') ? ['--snapshot-id', snapshotId] : []), text]).stdout);
   const papers = text => query(text, ['--kind', 'Paper']).hits.map(hit => hit.id).sort();
   assert.equal(query('1099', ['--kind', 'Person']).hits[0].name, escapedName,
     'buffered JSON output must preserve quotes, backslashes, UTF-8 and control characters');
@@ -187,7 +189,10 @@ try {
   assert.equal(contextual.relatedDate, '2024-01-01');
   const datedPages = query('NOT nonexistenttoken', ['--kind', 'Page', '--sort', 'date-desc']).hits;
   assert.equal(datedPages[0].relatedDate, '2024-01-01', 'PDF dates come from related Papers');
-  assert.equal(datedPages.at(-1).relatedDate, '2023-01-01');
+  assert.ok(datedPages.every(hit => hit.relatedDate === '2024-01-01'),
+    'Every shared Page chooses its latest eligible owner for descending chronology');
+  assert.equal(query('NOT nonexistenttoken', ['--kind', 'Page', '--sort', 'date-asc']).hits[0].relatedDate, '2023-01-01',
+    'Ascending chronology chooses the earliest eligible owner consistently');
   assert.equal(query('Schulweg', ['--kind', 'Page', '--year', '2023', '--paper-type', 'Antwort']).total, 0,
     'combined filters must match the same related paper');
   for (const text of ['AND Schule', 'Schule OR', '(Schule', '"Schule', '*', 'schul*weg', 'schul**'])

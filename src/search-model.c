@@ -23,6 +23,10 @@ static const char *const certainty[SEARCH_CERTAINTY_END] = {
 };
 static const char *const authority[] = {"unknown", "preliminary", "authoritative"};
 
+const char *search_relation_role_name(unsigned int role) {
+    return role < SEARCH_RELATION_END ? roles[role] : "";
+}
+
 static int valid_text(const SearchIndex *index, uint32_t offset) {
     size_t i;
     for (i = offset; i < index->string_bytes; i++) if (!index->strings[i]) return 1;

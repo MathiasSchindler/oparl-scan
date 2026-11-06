@@ -26,6 +26,7 @@ export async function testSearchMcp(base, raw, cli, fileId, port) {
     params: current ? { ...params, _meta: metadata(modern) } : params,
   }, current ? { 'MCP-Protocol-Version': modern, 'Mcp-Method': method,
     ...(method === 'tools/call' ? { 'Mcp-Name': params.name } : {}), ...headers } : headers);
+  const snapshotId = (await (await fetch(base + '/api/status')).json()).snapshotId;
   for (const version of [legacy, '2025-06-18', '2025-03-26', '2099-01-01']) {
     const initialized = await rpc('initialize', { protocolVersion: version,
       capabilities: {}, clientInfo: { name: 'oparl-test', version: '1' } });
@@ -45,7 +46,7 @@ export async function testSearchMcp(base, raw, cli, fileId, port) {
     const list = await rpc('tools/list', {}, current);
     assert.equal(list.status, 200);
     assert.deepEqual(list.json.result.tools.map(tool => tool.name),
-      ['search', 'get_object', 'get_paper', 'get_index_status']);
+      ['search', 'get_object', 'get_paper', 'get_meeting', 'get_agenda', 'get_objects', 'get_search_options', 'get_index_status']);
     for (const tool of list.json.result.tools) {
       assert.equal(tool.annotations.readOnlyHint, true);
       assert.equal(tool.inputSchema.additionalProperties, false);
@@ -54,10 +55,17 @@ export async function testSearchMcp(base, raw, cli, fileId, port) {
     assert.equal(ping.status, 200);
     assert.ok(ping.json.result);
     for (const [name, args, expected] of [
-      ['search', { q: 'Schulweg', sort: 'date-desc', limit: 1, offset: 1 },
-        JSON.parse(cli(['--group', 'paper', '--sort', 'date-desc', '--limit', '1', '--offset', '1', 'Schulweg']))],
+      ['search', { q: 'Schulweg', sort: 'date-desc', limit: 1, offset: 1, snapshotId },
+        JSON.parse(cli(['--group', 'paper', '--sort', 'date-desc', '--limit', '1', '--offset', '1',
+          '--snapshot-id', snapshotId, 'Schulweg']))],
       ['search', { q: 'Schulweg', group: 'record', year: 2024, kind: 'Page' },
         JSON.parse(cli(['--year', '2024', '--kind', 'Page', 'Schulweg']))],
+      ['search', { group: 'record', kind: 'Paper', dateRole: 'paper.date', dateFrom: '2024-01-01',
+        dateThrough: '2024-12-31', sort: 'date-asc' },
+        JSON.parse(cli(['--kind', 'Paper', '--date-role', 'paper.date', '--date-from', '2024-01-01',
+          '--date-through', '2024-12-31', '--sort', 'date-asc']))],
+      ['search', { q: '', group: 'document', kind: 'Page', year: 2024 },
+        JSON.parse(cli(['--group', 'document', '--kind', 'Page', '--year', '2024']))],
       ['get_object', { id: fileId, page: 2 }, JSON.parse(cli(['--show', fileId, '--page', '2']))],
       ['get_object', { id: fileId }, JSON.parse(cli(['--show', fileId]))],
       ['get_paper', { id: fileId.replace('/files/1', '/papers/1') },
@@ -82,7 +90,10 @@ export async function testSearchMcp(base, raw, cli, fileId, port) {
     assert.ok(reply.json.error);
   }
   for (const args of [{ q: 'Schulweg', limit: 0 }, { q: 'Schulweg', year: '2024' },
-    { q: 'Schulweg', group: 'page' }, { q: 'Schulweg', unknown: true }, { q: 'AND' }]) {
+    { q: 'Schulweg', group: 'page' }, { q: 'Schulweg', unknown: true }, { q: 'AND' },
+    { q: null, kind: 'Meeting' }, { kind: 'UnknownKind' }, { kind: 'Meeting', dateRole: 'referenceYear' },
+    { kind: 'Meeting', dateFrom: '2026-02-30' }, { kind: 'Meeting', dateFrom: '2026-12-02', dateThrough: '2026-11-04' },
+    { dateRole: 'meeting.start', sort: 'date-desc' }]) {
     const reply = await rpc('tools/call', { name: 'search', arguments: args }, true);
     assert.equal(reply.json.result.isError, true);
     assert.ok(reply.json.result.content[0].text);
@@ -155,5 +166,5 @@ export async function testSearchMcp(base, raw, cli, fileId, port) {
   const full = body + ' '.repeat(65536 - Buffer.byteLength(body));
   assert.match(await raw(`POST /mcp HTTP/1.1\r\n${common}Content-Length: 65536\r\n\r\n${full}`), /^HTTP\/1.1 200 /);
   assert.equal((await rpc('ping')).status, 200, 'server survives rejected/fragmented/maximum-size bodies');
-  console.log('MCP tests passed: modern discovery/headers, legacy initialization, four read-only tools, JSON-RPC errors, framing, origin guards and body limits.');
+  console.log('MCP tests passed: modern discovery/headers, legacy initialization, eight read-only tools, JSON-RPC errors, framing, origin guards and body limits.');
 }

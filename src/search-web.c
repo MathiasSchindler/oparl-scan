@@ -306,10 +306,11 @@ static int decode(char *text) {
     return rt_utf8_validate(text, written);
 }
 
+static const char *const parameter_names[] = {"q", "year", "paperType", "organization", "kind", "limit",
+    "offset", "sort", "id", "page", "group", "dateRole", "dateFrom", "dateThrough",
+    "organizationId", "actorId", "snapshotId", "fields", "raw", "ids"};
 static int parameters(char *text, char **values, int object) {
-    static const char *names[] = {"q", "year", "paperType", "organization", "kind", "limit",
-                                 "offset", "sort", "id", "page", "group"};
-    rt_memset(values, 0, 11 * sizeof(*values));
+    rt_memset(values, 0, 20 * sizeof(*values));
     while (text && *text) {
         char *next = find_char(text, '&'), *value;
         size_t i;
@@ -318,8 +319,11 @@ static int parameters(char *text, char **values, int object) {
         if (!value) return -1;
         *value++ = '\0';
         if (decode(text) != 0 || decode(value) != 0) return -1;
-        for (i = 0; i < 11 && rt_strcmp(text, names[i]); i++) {}
-        if (i == 11 || values[i] || (object ? (i != 8 && i != 9) : (i == 8 || i == 9))) return -1;
+        for (i = 0; i < 20 && rt_strcmp(text, parameter_names[i]); i++) {}
+        if (i == 20 || values[i] ||
+            (object == 1 && i != 8 && i != 9) ||
+            (object == 2 && i != 4 && i != 5 && i != 6 && i != 8 && i != 9 && i < 16) ||
+            (!object && (i == 8 || i == 9 || i >= 17))) return -1;
         values[i] = value; text = next;
     }
     return 0;
@@ -332,13 +336,63 @@ static int number(const char *text, unsigned int min, unsigned int max, unsigned
     return 0;
 }
 
+static int research_response(int fd, const WebRequest *request, const SearchIndex *index, const char *operation) {
+    char *values[20], storage[16385];
+    ToolByteBuffer arguments, result;
+    SearchRead read;
+    Json json;
+    const char *error = "invalid research parameters";
+    size_t i;
+    int status = 0, comma = 0, parsed = 0;
+    if (parameters(request->parameters, values, 2)) return web_error(fd, 400, request->head, error);
+    tool_byte_buffer_init(&arguments); tool_byte_buffer_init(&result);
+    if (tool_byte_buffer_append_cstr(&arguments, "{")) { status = SEARCH_QUERY_RESOURCE; goto done; }
+    for (i = 0; i < 20; i++) if (values[i]) {
+        if ((comma && tool_byte_buffer_append_cstr(&arguments, ",")) ||
+            search_json_quote(&arguments, parameter_names[i]) || tool_byte_buffer_append_cstr(&arguments, ":")) {
+            status = SEARCH_QUERY_RESOURCE; goto done;
+        }
+        if (i == 5 || i == 6 || i == 9) {
+            unsigned int value;
+            char text[32];
+            if (number(values[i], i == 6 ? 0 : 1, i == 5 ? 100 : i == 6 ? UINT32_MAX : 1000000, &value)) {
+                status = SEARCH_QUERY_INVALID; goto done;
+            }
+            rt_unsigned_to_string(value, text, sizeof(text));
+            if (tool_byte_buffer_append_cstr(&arguments, text)) { status = SEARCH_QUERY_RESOURCE; goto done; }
+        } else if (i == 18 || i == 19) {
+            Json value;
+            if (json_parse(&value, values[i], rt_strlen(values[i]))) { status = SEARCH_QUERY_INVALID; goto done; }
+            if (json_token(&value, 0)->kind != (i == 18 ? JSON_BOOL : JSON_ARRAY)) status = SEARCH_QUERY_INVALID;
+            json_free(&value);
+            if (status) goto done;
+            if (tool_byte_buffer_append_cstr(&arguments, values[i])) { status = SEARCH_QUERY_RESOURCE; goto done; }
+        } else if (search_json_quote(&arguments, values[i])) { status = SEARCH_QUERY_RESOURCE; goto done; }
+        comma = 1;
+    }
+    if (tool_byte_buffer_append_cstr(&arguments, "}")) { status = SEARCH_QUERY_RESOURCE; goto done; }
+    if (json_parse(&json, (const char *)arguments.data, arguments.size)) { status = SEARCH_QUERY_INVALID; goto done; }
+    parsed = 1;
+    status = search_read_arguments(&json, 0, &read, storage, sizeof(storage), &error);
+    if (!status) status = search_read_json(&result, index, operation, &read, &error);
+done:
+    if (parsed) json_free(&json);
+    if (status) status = web_error(fd, status == SEARCH_READ_NOT_FOUND ? 404 : status == SEARCH_QUERY_SNAPSHOT ? 409 :
+        status == SEARCH_QUERY_RESOURCE ? 500 : 400, request->head, error);
+    else {
+        status = headers(fd, 200, "application/json; charset=utf-8", (long long)result.size);
+        if (!status && !request->head) status = rt_write_all(fd, result.data, result.size);
+    }
+    tool_byte_buffer_free(&arguments); tool_byte_buffer_free(&result); return status;
+}
+
 static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, SearchWorkspace *workspace) {
     WebRequest request = *parsed;
     SearchFilter filter;
     SearchResult result;
     const char *error, *type = 0;
     const char *const *asset = 0;
-    char *values[11];
+    char *values[20];
     int status;
     if (!rt_strcmp(request.path, "/mcp")) {
         ToolByteBuffer reply;
@@ -355,22 +409,19 @@ static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, Se
         tool_byte_buffer_free(&reply);
         return status;
     }
-    if (!rt_strcmp(request.path, "/paper") || !rt_strcmp(request.path, "/api/paper")) {
+    if (!rt_strcmp(request.path, "/api/paper")) return research_response(fd, &request, index, "get_paper");
+    if (!rt_strcmp(request.path, "/api/object")) return research_response(fd, &request, index, "get_object");
+    if (!rt_strcmp(request.path, "/api/objects")) return research_response(fd, &request, index, "get_objects");
+    if (!rt_strcmp(request.path, "/api/meeting")) return research_response(fd, &request, index, "get_meeting");
+    if (!rt_strcmp(request.path, "/api/agenda")) return research_response(fd, &request, index, "get_agenda");
+    if (!rt_strcmp(request.path, "/api/options")) return research_response(fd, &request, index, "get_search_options");
+    if (!rt_strcmp(request.path, "/paper") || !rt_strcmp(request.path, "/meeting")) {
         const SearchRecord *paper;
         if (parameters(request.parameters, values, 1) != 0 || !values[8] || !*values[8] || values[9])
             return web_error(fd, 400, request.head, "expected only a Paper id");
         paper = search_find(index, values[8], 0);
-        if (!paper || rt_strcmp(index->strings + paper->kind, "Paper"))
-            return web_error(fd, 404, request.head, "Paper is not in this index");
-        if (!rt_strcmp(request.path, "/api/paper")) {
-            SearchCase context;
-            if (search_case_open(&context, index, paper, &error) != 0)
-                return web_error(fd, 500, request.head, error);
-            status = headers(fd, 200, "application/json; charset=utf-8", -1);
-            if (!status && !request.head) status = search_case_print(fd, index, &context);
-            search_case_close(&context);
-            return status;
-        }
+        if (!paper || rt_strcmp(index->strings + paper->kind, !rt_strcmp(request.path, "/meeting") ? "Meeting" : "Paper"))
+            return web_error(fd, 404, request.head, "Paper/Meeting is not in this index");
         asset = search_case_page; type = "text/html; charset=utf-8";
     }
     if (!rt_strcmp(request.path, "/")) { asset = search_web_page; type = "text/html; charset=utf-8"; }
@@ -398,21 +449,10 @@ static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, Se
         tool_byte_buffer_free(&json);
         return status;
     }
-    if (!rt_strcmp(request.path, "/api/object")) {
-        unsigned int page = 0;
-        const SearchRecord *record;
-        if (parameters(request.parameters, values, 1) != 0 || !values[8] || !*values[8] ||
-            (values[9] && number(values[9], 1, 1000000, &page) != 0))
-            return web_error(fd, 400, request.head, "expected id and optional page (1..1000000)");
-        record = search_find(index, values[8], page);
-        if (!record) return web_error(fd, 404, request.head, "resource/page is not in this index");
-        if (headers(fd, 200, "application/json; charset=utf-8", -1) != 0) return -1;
-        return request.head ? 0 : search_show(fd, index, record, 1);
-    }
     if (rt_strcmp(request.path, "/api/search"))
         return web_error(fd, 404, request.head, "route not found");
     rt_memset(&filter, 0, sizeof(filter)); filter.limit = 20;
-    if (parameters(request.parameters, values, 0) != 0 || !values[0] || !*values[0] ||
+    if (parameters(request.parameters, values, 0) != 0 ||
         (values[1] && number(values[1], 2000, 2099, &filter.year) != 0) ||
         (values[5] && number(values[5], 1, 100, &filter.limit) != 0) ||
         (values[6] && number(values[6], 0, UINT32_MAX, &filter.offset) != 0) ||
@@ -426,13 +466,19 @@ static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, Se
         else return web_error(fd, 400, request.head, "sort must be relevance, date-desc or date-asc");
     }
     filter.paper_type = values[2]; filter.organization = values[3]; filter.kind = values[4];
+    filter.date_from = values[12]; filter.date_through = values[13];
+    filter.organization_id = values[14]; filter.actor_id = values[15]; filter.snapshot_id = values[16];
+    if (values[11] && search_date_role(values[11], &filter.date_role))
+        return web_error(fd, 400, request.head, "unknown temporal dateRole; reference year uses year");
     if (values[10]) {
         if (!rt_strcmp(values[10], "paper")) filter.group = SEARCH_PAPERS;
         else if (!rt_strcmp(values[10], "record")) filter.group = SEARCH_RECORDS;
-        else return web_error(fd, 400, request.head, "group must be record or paper");
+        else if (!rt_strcmp(values[10], "document")) filter.group = SEARCH_DOCUMENTS;
+        else return web_error(fd, 400, request.head, "group must be record, paper or document");
     }
     status = search_query(index, workspace, values[0], &filter, &result, &error);
-    if (status) return web_error(fd, status == SEARCH_QUERY_RESOURCE ? 500 : 400, request.head, error);
+    if (status) return web_error(fd, status == SEARCH_QUERY_SNAPSHOT ? 409 :
+        status == SEARCH_QUERY_RESOURCE ? 500 : 400, request.head, error);
     if (headers(fd, 200, "application/json; charset=utf-8", -1) != 0) return -1;
     return request.head ? 0 : search_print(fd, index, &result, 1);
 }

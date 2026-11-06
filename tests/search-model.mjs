@@ -14,7 +14,7 @@ function run(binary, args, expected = 0) {
   assert.equal(result.status, expected, `${result.error ?? ''}\n${result.stderr}\n${result.stdout}`);
   return result;
 }
-const show = (object, page) => JSON.parse(run(searcher, ['--index', index, '--json', '--show', object,
+const show = (object, page) => JSON.parse(run(searcher, ['--index', index, '--json', '--raw', '--show', object,
   ...(page ? ['--page', String(page)] : [])]).stdout);
 const query = text => JSON.parse(run(searcher, ['--index', index, '--json', '--group', 'paper', text]).stdout);
 

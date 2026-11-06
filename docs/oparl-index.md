@@ -259,6 +259,16 @@ build/search/index.ops.coverage.jsonl  # lesbarer Abdeckungsbericht
 
 Der Index enthaelt Woerterbuch, invertierte Positionslisten mit
 Byteoffsets, Metadatensaetze, gespeicherte Texte und Drucksachenbeziehungen.
+Die belegten Datumsrollen und typisierten Beziehungen des Formats 3
+reichen auch fuer die gemeinsame M3-Suchsemantik. UTC-/Quelltag-Schluessel,
+Typ-Postings und eindeutige Sitzungskontexte werden beim Laden einmalig
+abgeleitet; es gibt keinen neuen Formatwechsel.
+M4 ergaenzt beim Laden ID-Aliase, exakte rohe Akteursbeziehungen,
+eingehende Relationspostings, TOP-Reihenfolge und Abdeckung je Typ.
+Kompakte Ansichten, Feldprojektionen und Snapshot-Pagination benoetigen
+keinen erneuten Bau vorhandener Format-3-Indizes.
+Ein Neubau aktualisiert
+die lokale Importzeit, nicht automatisch das Quellarchiv.
 Er hat eine Formatgrenze unter 4 GiB. Details zum Laden, zur
 Integritaetspruefung und zur Suchgeschwindigkeit stehen bei
 [oparl-search](oparl-search.md#indexformat-und-suchkern).

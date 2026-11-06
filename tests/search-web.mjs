@@ -41,6 +41,7 @@ export async function testSearchWeb(binary, index, fileId) {
     socket.once('end', () => resolve(response));
     socket.once('connect', () => socket.write(request));
   });
+  let snapshotId;
   try {
     const deadline = Date.now() + 8000;
     for (;;) {
@@ -50,6 +51,7 @@ export async function testSearchWeb(binary, index, fileId) {
         const response = await get('/api/status');
         assert.equal(response.status, 200);
         const status = await response.json();
+        snapshotId = status.snapshotId;
         assert.ok(status.records > 1100 && status.terms > 0);
         assert.equal(status.incomplete, true);
         assert.equal(status.indexBytes, (await stat(index)).size, 'health reports the loaded index file size in bytes');
@@ -88,6 +90,12 @@ export async function testSearchWeb(binary, index, fileId) {
     const caseResponse = await get('/api/paper?' + caseParameters);
     assert.equal(caseResponse.status, 200);
     const context = await caseResponse.json();
+    let next = context.next;
+    while (next) {
+      const part = await (await get('/api/paper?' + new URLSearchParams({ id: paperId,
+        offset: String(next.offset), limit: String(next.limit), snapshotId: next.snapshotId }))).json();
+      context.objects.push(...part.objects); next = part.next;
+    }
     assert.equal(context.id, paperId);
     assert.equal(context.incomplete, true);
     const caseObjects = new Map(context.objects.map(object => [object.id, object]));
@@ -102,7 +110,9 @@ export async function testSearchWeb(binary, index, fileId) {
     const embedded = caseObjects.get(objectId('consultations/missing'));
     assert.equal(embedded.indexed, true, 'canonical snapshots also index typed embedded objects');
     assert.equal(embedded.metadata.role, 'Nur eingebettet', 'retain inline details when a standalone resource is unavailable');
-    assert.equal(caseObjects.get(objectId('files/103')).metadata.deleted, true, 'deleted inline files remain marked deleted');
+    const rawContext = await (await get('/api/paper?' + new URLSearchParams({ id: paperId, raw: 'true' }))).json();
+    assert.equal(rawContext.objects.find(o => o.id === objectId('files/103')).metadata.deleted, true,
+      'explicit raw context retains deleted inline source metadata');
     for (const route of ['/paper', '/api/paper']) {
       const response = await get(route + '?' + caseParameters, { method: 'HEAD' });
       assert.equal(response.status, 200);
@@ -128,17 +138,24 @@ export async function testSearchWeb(binary, index, fileId) {
       ['NOT nonexistenttoken', { kind: 'Person', offset: '4294967295' }],
       ['Schulweg', { kind: 'Page', year: '2024', sort: 'date-desc' }],
       ['Schulweg', { group: 'paper', sort: 'date-desc', limit: '1', offset: '1' }],
+      ['', { kind: 'Paper', dateRole: 'paper.date', dateFrom: '2024-01-01', dateThrough: '2024-12-31', sort: 'date-asc' }],
+      ['', { group: 'document', kind: 'Page', year: '2024' }],
       ['nonexistenttoken', {}],
     ];
     const flags = { kind: '--kind', year: '--year', paperType: '--paper-type',
-      organization: '--organization', limit: '--limit', offset: '--offset', sort: '--sort', group: '--group' };
+      organization: '--organization', limit: '--limit', offset: '--offset', sort: '--sort', group: '--group',
+      dateRole: '--date-role', dateFrom: '--date-from', dateThrough: '--date-through', snapshotId: '--snapshot-id' };
     for (const [q, filters] of cases) {
+      if (filters.offset && filters.offset !== '0') filters.snapshotId = snapshotId;
       const response = await get('/api/search?' + new URLSearchParams({ q, ...filters }));
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('cache-control'), 'no-store');
       assert.equal(await response.text(), cli([...Object.entries(filters).flatMap(([key, value]) => [flags[key], value]), q]),
         'web JSON must be byte-identical to CLI, including filters, scores/order, snippets, context and totals');
     }
+    const listing = await get('/api/search?kind=Paper&dateRole=paper.date&dateFrom=2024-01-01');
+    assert.equal(listing.status, 200);
+    assert.equal(await listing.text(), cli(['--kind', 'Paper', '--date-role', 'paper.date', '--date-from', '2024-01-01']));
     idle.destroy(); idle = null;
     for (const args of [
       { id: fileId, page: '2' },
@@ -164,6 +181,11 @@ export async function testSearchWeb(binary, index, fileId) {
       ['/api/search?q=Schulweg&sort=relevance&sort=date-asc', 400],
       ['/api/search?q=Schulweg&group=page', 400],
       ['/api/search?q=Schulweg&group=paper&group=record', 400],
+      ['/api/search?kind=UnknownKind', 400],
+      ['/api/search?kind=Meeting&dateRole=referenceYear', 400],
+      ['/api/search?kind=Meeting&dateFrom=2026-02-30', 400],
+      ['/api/search?kind=Meeting&dateFrom=2026-12-02&dateThrough=2026-11-04', 400],
+      ['/api/search?dateRole=meeting.start&sort=date-desc', 400],
       ['/api/object?id=missing&group=paper', 400],
       ['/api/object', 400], ['/api/object?id=missing', 404], ['/api/object?id=missing&page=0', 400],
       ['/api/object?id=missing&q=foo', 400], ['/api/object?id=missing&sort=relevance', 400],

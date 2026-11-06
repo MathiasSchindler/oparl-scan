@@ -113,7 +113,7 @@ function run(binary, args, expected = 0) {
 }
 const build = (input = archive, expected = 0) =>
   run(indexer, ['--input', input, '--output', index], expected);
-const show = object => JSON.parse(run(searcher, ['--index', index, '--json', '--show', object]).stdout);
+const show = object => JSON.parse(run(searcher, ['--index', index, '--json', '--raw', '--show', object]).stdout);
 const cachePath = (kind, key) => join(archive, 'cache', `${kind}-${hash(key)}.json`);
 const metadataPath = key => join(archive, 'metadata', `${hash(key)}.json`);
 const revisions = (kind, key) => readdir(join(archive, 'history', kind, hash(key)));
