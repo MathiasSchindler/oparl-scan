@@ -20,6 +20,8 @@ function cli(args, expected = 0) {
 try {
   const fixture = await createCitizenFixture(root);
   const store = object => writeFile(join(fixture.archive, 'metadata', hash(object.id) + '.json'), JSON.stringify(object));
+  await store({ ...fixture.objects.find(o => o.id === id('files/packet')),
+    created: '2026-07-07T07:42:51+02:00', modified: '2026-07-10T12:06:45+02:00' });
   const person = id('people/author'), council = id('organizations/council');
   await store({ id: person, type: schema + 'Person', name: 'Fixture author' });
   const schoolAgenda = fixture.objects.find(o => o.id === id('agendaItems/school'));
@@ -91,6 +93,21 @@ try {
   const status = await api('/api/status'), snapshotId = status.snapshotId;
   assert.deepEqual(status, cli(['--status']));
   assert.ok(status.coverage.perType.find(t => t.kind === 'Paper').unresolvedRelationTargets > 0);
+  const packetHit = cli(['--kind', 'Page', '--group', 'paper', 'Schulwegsicher*']).hits.find(h => h.id === id('files/packet'));
+  assert.equal(packetHit.relatedPaper, undefined, 'a meeting package must not acquire a Paper owner for presentation');
+  assert.equal(packetHit.name, 'Alle Anlagen oeffentlich');
+  assert.equal(packetHit.fileName, 'packet.pdf');
+  assert.equal(packetHit.evidence.relationshipPath[0].sourceName, 'Stadtverordnetenversammlung');
+  assert.equal(packetHit.evidence.relationshipPath[0].sourceKind, 'Meeting');
+  assert.equal(packetHit.evidence.relationshipPath[0].sourceDate.value, fixture.starts.late);
+  assert.equal(packetHit.evidence.relationshipPath[0].sourceDate.sourceObject, id('meetings/late'));
+  assert.equal(packetHit.evidence.relationshipPath[0].sourceDate.role, 'meeting.start');
+  assert.equal(packetHit.evidence.documentDates.created.value, '2026-07-07T07:42:51+02:00');
+  assert.equal(packetHit.evidence.documentDates.created.sourceObject, packetHit.id);
+  assert.equal(packetHit.evidence.documentDates.created.role, 'created');
+  assert.equal(packetHit.evidence.documentDates.modified.value, '2026-07-10T12:06:45+02:00');
+  assert.equal(packetHit.sortDate, null, 'supplemental metadata dates do not become a claimed document date');
+  assert.equal(packetHit.date, '');
   const bodySizes = [];
   for (const modern of [false, true]) {
     for (const paper of [id('papers/school'), id('papers/request'), id('papers/large')]) {

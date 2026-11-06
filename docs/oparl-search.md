@@ -247,6 +247,11 @@ die alte, teilweise vom ersten Besitzer abgeleitete Datensatzspalte und
 ist **kein Beleg fuer ein Dokumentdatum**. `sortDate` und bei Zeitfilter
 `filterDate` enthalten Rohwert, Rolle, Praezision, Quellobjekt, Eigenschaft,
 Regel, Belegsicherheit und Uebernahmepfad; unbekannte Fakten bleiben `null`.
+Bei Datei-/Seitentreffern enthalten `evidence.documentDates.created` und
+`modified` die Zeitstempel des File-Eintrags mit denselben Belegangaben.
+Meeting-Quellenkanten nennen mit `sourceDate` den belegten Sitzungsbeginn.
+Diese Zusatzangaben ersetzen kein fehlendes Dokumentdatum und aendern
+weder Datumsfilter noch Sortierung.
 Lokale Importzeiten verweisen mit `sourceIndex`/`via: index` auf den Snapshot,
 nicht auf eine behauptete OParl-Eigenschaft des Trefferobjekts.
 `unit`, `identity` und `groupIdentity` unterscheiden Paper, eigenstaendiges
@@ -346,9 +351,20 @@ wechseln; ihre Bedeutung wird neben der Auswahl erklaert.
 Sortierungs- oder Seitengroessenwechsel beginnen wieder auf Seite 1.
 
 PDF-Treffer zeigen den Titel ihrer zugehoerigen Vorlage als Ueberschrift,
-sofern vorhanden. Dokumentnamen wie "Sammeldokument oeffentlich",
+sofern vorhanden. Bei generischen Dokumentnamen wie "Sammeldokument
+oeffentlich", "Protokoll oeffentlich" oder "Alle Anlagen oeffentlich"
+nutzt die Ansicht den Titel eines eindeutig verknuepften TOPs oder einer
+Sitzung. Mehrdeutiger oder fehlender Kontext faellt auf den archivierten
+Dateinamen zurueck, nicht auf eine erfundene Vorlagenzuordnung.
+Die JSON-Suche liefert dafuer `fileName` sowie `sourceName`/`sourceKind`
+an den belegten Quellenkanten; Rohname, Gruppierung und Besitzbeziehungen
+bleiben unveraendert. Dokumentnamen wie "Sammeldokument oeffentlich",
 PDF-Seitennummer, Drucksachenkennzeichen, Typ und Datum bleiben separat
-sichtbar. Titel und "Vorgang ansehen" fuehren zur lokalen Vorgangsseite.
+sichtbar. Alle Treffertitel sind Links: Vorlagen und direkt zugeordnete
+Dokumente fuehren zur lokalen Vorgangsseite, Sitzungen zur Sitzungsseite.
+Dokumente ohne direkten Vorlagenbesitzer verweisen auf die Original-PDF;
+fehlt eine nutzbare Dokument-URL, auf die lokal archivierten Metadaten
+beziehungsweise den Seitentext. "Vorgang ansehen" fuehrt zur lokalen Vorgangsseite.
 "PDF oeffnen" beziehungsweise "Originaldokument oeffnen" fuehrt
 direkt zur archivierten Original-URL, bei Potsdam normalerweise
 auf `egov.potsdam.de`, in einem neuen Tab/Fenster. OParl-JSON-Links
@@ -357,6 +373,15 @@ Lange lokale Quellenpfade und Extraktionswarnungen stehen
 in den aufklappbaren Details. Die Websuche verwendet standardmaessig
 `group=paper`: ein Treffer pro Vorgang mit Hinweis auf weitere passende
 Fundstellen. Ausschnitte fassen aufeinanderfolgende Leerraeume zusammen.
+Sie erscheinen in einem farblich abgesetzten Zitatfeld, beschriftet als
+PDF-Textauszug mit Seite oder als Metadatenauszug. Quellenrollen,
+SHA-256 und Fassungslinks stehen nur in den aufklappbaren Details;
+die strukturierten Belege in JSON/MCP bleiben erhalten.
+Ein fehlendes Dokumentdatum wird ausdruecklich als nicht angegeben
+bezeichnet. Zusaetzlich zeigt die Ansicht einen eindeutig belegten
+Sitzungstermin sowie Erstellungs-/Aenderungszeitstempel des Dateieintrags
+unter getrennten Beschriftungen. Ein Sitzungs- oder Metadatenzeitstempel
+wird nicht als Datum der PDF-Erstellung ausgegeben.
 Auf grossen Bildschirmen stehen Filter neben
 den Ergebnissen; auf kleinen darueber, mit ausklappbaren Filtern.
 

@@ -1138,6 +1138,13 @@ static int out_document_url(SearchOutput *out, const SearchIndex *index, const S
             status = out_key(out, "documentUrl") != 0 ||
                 out_write(out, json.text + token->start, token->end - token->start) != 0 ? -1 : 0;
     }
+    token = json_token(&json, json_get(&json, 0, "fileName"));
+    if (!status && token && token->kind != JSON_NULL) {
+        if (token->kind != JSON_STRING) status = search_error("fileName is not a string", index->strings + record->id);
+        else if (token->end - token->start > 2)
+            status = out_key(out, "fileName") != 0 ||
+                out_write(out, json.text + token->start, token->end - token->start) != 0 ? -1 : 0;
+    }
     json_free(&json);
     return status;
 }

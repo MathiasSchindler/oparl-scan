@@ -120,7 +120,82 @@ export async function testSearchWeb(binary, index, fileId) {
     }
     const script = await get('/app.js');
     assert.match(script.headers.get('content-type'), /text\/javascript/);
-    new Script(await script.text());
+    const scriptText = await script.text();
+    new Script(scriptText);
+    const presentation = new Script(scriptText.slice(0, scriptText.indexOf('async function health(')) +
+      scriptText.slice(scriptText.indexOf('function renderHit('), scriptText.indexOf('async function search(params)')) +
+      '\n({hitTitle,renderHit})').runInNewContext({
+      URLSearchParams,
+      document: { createElement: tag => ({ tagName: tag.toUpperCase(), children: [],
+        append(...items) { this.children.push(...items); }, addEventListener() {} }) },
+    });
+    const contextTitle = (name, sourceKind, sourceName) => presentation.hitTitle({ name, kind: 'Page',
+      fileName: 'Original filename.pdf', evidence: { relationshipPath: [{ source: 'context/1', sourceKind, sourceName }] } });
+    assert.equal(contextTitle('Sammeldokument \u00f6ffentlich', 'AgendaItem', 'Fazit zur Geothermie'), 'Fazit zur Geothermie');
+    assert.equal(contextTitle('Protokoll \u00f6ffentlich', 'Meeting', '32. Sitzung des Hauptausschusses'),
+      'Protokoll: 32. Sitzung des Hauptausschusses');
+    assert.equal(contextTitle('Alle Anlagen oeffentlich', 'Meeting', 'Stadtverordnetenversammlung'),
+      'Anlagen: Stadtverordnetenversammlung');
+    assert.equal(presentation.hitTitle({ name: 'Sammeldokument \u00f6ffentlich', fileName: 'Archive.pdf',
+      evidence: { relationshipPath: [{ source: 'a', sourceKind: 'AgendaItem', sourceName: 'First TOP' },
+        { source: 'b', sourceKind: 'AgendaItem', sourceName: 'Different TOP' }] } }), 'Archive.pdf',
+    'ambiguous context must not pick an arbitrary agenda title');
+    assert.equal(presentation.hitTitle({ name: 'Protokoll \u00f6ffentlich', fileName: 'Minutes.pdf' }), 'Minutes.pdf');
+    assert.equal(presentation.hitTitle({ name: 'Sammeldokument \u00f6ffentlich', relatedName: 'Actual paper title' }), 'Actual paper title');
+    const rendered = presentation.renderHit({ id: fileId, kind: 'Page', page: 2, name: 'Original PDF',
+      snippet: 'The matching document text.', dateRole: 'auto', evidence: { citation: {
+        documentVersion: { id: 'urn:test:version', sha256: 'fixture-hash' } },
+      relationshipPath: [{ role: 'paper.mainFile' }] } }, 1);
+    const excerpt = rendered.children.find(node => node.tagName === 'FIGURE');
+    assert.equal(excerpt.children[0].textContent, 'Textauszug aus der PDF \u00b7 Seite 2');
+    assert.equal(excerpt.children[1].tagName, 'BLOCKQUOTE');
+    assert.equal(excerpt.children[1].children[0].textContent, 'The matching document text.');
+    assert.ok(!rendered.children.some(node => /SHA-256|Quellenrolle/.test(node.textContent || '')));
+    assert.ok(rendered.children.find(node => node.tagName === 'DETAILS').children
+      .some(node => /SHA-256: fixture-hash/.test(node.textContent || '')), 'technical evidence remains inside collapsed details');
+    const render = hit => presentation.renderHit({ id: fileId, kind: 'Page', page: 20,
+      name: 'Protokoll \u00f6ffentlich', dateRole: 'document.date', ...hit }, 3);
+    const headingLink = hit => render(hit).children.find(node => node.tagName === 'H2').children[0];
+    const pdfLink = headingLink({ documentUrl: 'https://ris.test/protocol.pdf' });
+    assert.equal(pdfLink.href, 'https://ris.test/protocol.pdf');
+    assert.equal(pdfLink.target, '_blank');
+    assert.equal(pdfLink.rel, 'noopener noreferrer');
+    const metadataLink = headingLink({});
+    assert.equal(new URL(metadataLink.href, 'http://localhost').pathname, '/api/object');
+    assert.equal(new URL(metadataLink.href, 'http://localhost').searchParams.get('page'), '20');
+    assert.equal(new URL(headingLink({ documentUrl: 'data:invalid' }).href, 'http://localhost').pathname, '/api/object',
+      'an unusable document URL must still leave the title clickable');
+    assert.equal(new URL(headingLink({ relatedPaper: paperId, documentUrl: 'https://ris.test/protocol.pdf' }).href,
+      'http://localhost').pathname, '/paper', 'a direct Paper owner keeps its local case link');
+    assert.equal(new URL(headingLink({ id: objectId('meetings/1'), kind: 'Meeting', page: 0 }).href,
+      'http://localhost').pathname, '/meeting');
+    const dated = render({ evidence: { documentDates: {
+      created: { value: '2026-07-07T07:42:51+02:00', precision: 'instant' },
+      modified: { value: '2026-07-10T12:06:45+02:00', precision: 'instant' } },
+    relationshipPath: [{ source: 'meeting/1', sourceKind: 'Meeting', sourceDate: {
+      value: '2026-06-24T17:00:00+02:00', precision: 'instant' } }] } });
+    const visibleDates = dated.children.filter(node => node.className === 'meta muted')
+      .flatMap(node => node.children.map(child => child.textContent));
+    assert.deepEqual(Array.from(visibleDates), ['Dokumentdatum nicht angegeben', 'Sitzung: 24.06.2026',
+      'Dateieintrag erstellt: 07.07.2026', 'Dateieintrag ge\u00e4ndert: 10.07.2026']);
+    const ambiguous = render({ evidence: { relationshipPath: [
+      { source: 'meeting/1', sourceKind: 'Meeting', sourceDate: { value: '2026-06-24', precision: 'day' } },
+      { source: 'meeting/2', sourceKind: 'Meeting', sourceDate: { value: '2026-06-25', precision: 'day' } },
+    ] } });
+    assert.ok(!ambiguous.children.filter(node => node.className === 'meta muted')
+      .flatMap(node => Array.from(node.children)).some(node => /^Sitzung:/.test(node.textContent)),
+    'do not choose an arbitrary meeting date for a shared document');
+    const partlyDated = render({ evidence: { relationshipPath: [
+      { source: 'meeting/1', sourceKind: 'Meeting', sourceDate: { value: '2026-06-24', precision: 'day' } },
+      { source: 'meeting/2', sourceKind: 'Meeting', sourceDate: null },
+    ] } });
+    assert.ok(!partlyDated.children.filter(node => node.className === 'meta muted')
+      .flatMap(node => Array.from(node.children)).some(node => /^Sitzung:/.test(node.textContent)),
+    'a second meeting with no date still makes the context ambiguous');
+    const invalid = render({ evidence: { documentDates: {
+      created: { value: '2026-02-30', precision: 'invalid' } } } });
+    assert.ok(invalid.children.some(node => node.children.some(child =>
+      child.textContent === 'Dateieintrag erstellt: Ung\u00fcltiges Datum: 2026-02-30')));
 
     idle = connect(port, '127.0.0.1');
     await once(idle, 'connect');

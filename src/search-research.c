@@ -760,12 +760,24 @@ resource:
 done:
     tool_array_free(&entries); return status;
 }
+static int record_date_json(ToolByteBuffer *out, const SearchIndex *index, uint32_t record, SearchDateRole role) {
+    SearchHit date = {0};
+    date.record = record; date.paper = NONE;
+    search_hit_date(index, &date, role);
+    return search_hit_date_json(out, index, &date);
+}
 int search_hit_source_json(ToolByteBuffer *out, const SearchIndex *index, const SearchHit *hit) {
     uint32_t source = index->records[hit->record].parent;
     size_t i;
+    int document;
     if (source == NONE) source = hit->record;
-    if (put(out, "{\"citation\":") || citation(out, index, hit->record) ||
-        put(out, ",\"relationshipPath\":[")) return -1;
+    document = !rt_strcmp(index->strings + index->records[source].kind, "File");
+    if (put(out, "{\"citation\":") || citation(out, index, hit->record)) return -1;
+    if (document &&
+        (put(out, ",\"documentDates\":{\"created\":") ||
+         record_date_json(out, index, source, SEARCH_CREATED) || put(out, ",\"modified\":") ||
+         record_date_json(out, index, source, SEARCH_MODIFIED) || put(out, "}"))) return -1;
+    if (put(out, ",\"relationshipPath\":[")) return -1;
     {
         int comma = 0;
         for (i = index->incoming_start[source]; i < index->incoming_start[source+1]; i++) {
@@ -773,6 +785,10 @@ int search_hit_source_json(ToolByteBuffer *out, const SearchIndex *index, const 
             if (hit->paper != NONE && r->source != hit->paper) continue;
             if ((comma && put(out, ",")) || put(out, "{\"source\":") ||
                 search_json_quote(out, index->strings + index->records[r->source].id) ||
+                string(out, "sourceName", index->strings + index->records[r->source].name) ||
+                string(out, "sourceKind", index->strings + index->records[r->source].kind) ||
+                (document && !rt_strcmp(index->strings + index->records[r->source].kind, "Meeting") &&
+                 (key(out, "sourceDate") || record_date_json(out, index, r->source, SEARCH_MEETING_START))) ||
                 string(out, "role", search_relation_role_name(r->role)) ||
                 string(out, "target", index->strings + r->target) || put(out, "}")) return -1;
             comma = 1;
