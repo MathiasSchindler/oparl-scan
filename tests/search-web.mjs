@@ -100,7 +100,7 @@ export async function testSearchWeb(binary, index, fileId) {
     for (const path of ['papers/missing', 'papers/deleted'])
       assert.deepEqual([caseObjects.get(objectId(path)).indexed, caseObjects.get(objectId(path)).metadata], [false, null]);
     const embedded = caseObjects.get(objectId('consultations/missing'));
-    assert.equal(embedded.indexed, false);
+    assert.equal(embedded.indexed, true, 'canonical snapshots also index typed embedded objects');
     assert.equal(embedded.metadata.role, 'Nur eingebettet', 'retain inline details when a standalone resource is unavailable');
     assert.equal(caseObjects.get(objectId('files/103')).metadata.deleted, true, 'deleted inline files remain marked deleted');
     for (const route of ['/paper', '/api/paper']) {

@@ -270,7 +270,10 @@ curl --get http://127.0.0.1:8080/api/paper \
 
 Die Antwort hat `id` fuer den angefragten Vorgang, `incomplete` und
 eine nach ID deduplizierte Liste `objects`. Jedes Objekt enthaelt
-`id`, `kind`, `indexed`, `source`, `warnings` und `metadata`.
+`id`, `kind`, `scope`, `indexed`, `source`, `warnings` und `metadata`.
+`scope` unterscheidet Wurzel-Paper (`paper`), direkte Dokumente (`directSource`),
+andere Kontextdateien (`contextSource`), verwandte Papers (`relatedPaper`) und
+sonstigen Kontext (`context`). Sitzungskontext ist keine direkte Paper-Quelle.
 `metadata` sind die unveraenderten OParl-Metadaten; die Beziehungen
 bleiben dort erhalten. `indexed: true` bedeutet, dass ein eigener
 Datensatz im geladenen Index gefunden wurde, nicht dass die PDF
@@ -296,8 +299,8 @@ Zyklen und mehrfach verwendete Dateien erzeugen keine doppelten Objekte.
 Bei mehr als 4096 aufgeloesten Objekten wird die Anfrage mit Fehler
 abgelehnt statt still gekuerzt.
 
-Die Vorgangsansicht arbeitet mit vorhandenen Indizes; ein Neuaufbau
-ist fuer diese Funktion nicht erforderlich.
+Die Vorgangsansicht verwendet wie die Suche Indexformat 2.
+Alte Indexdateien muessen mit dem aktuellen Indexer neu gebaut werden.
 
 ### Indexstatus
 
@@ -330,7 +333,7 @@ Antworten sind UTF-8-JSON; `HEAD` liefert keinen Antwortkoerper.
 
 | Endpunkt | Parameter | Antwort |
 | --- | --- | --- |
-| `/api/status` | Keine | `records`, `terms`, `indexBytes`, `indexMemoryBytes`, `pages`, `warningPages`, `ocrPages`, `incomplete` des geladenen Indexes |
+| `/api/status` | Keine | Zaehler und Abdeckung, `formatVersion`, `snapshotId`, `importedAtEpochSeconds`, `relations`, `documentVersions`, `textSections` des geladenen Indexes |
 | `/api/search` | `q` erforderlich; optional `year`, `paperType`, `organization`, `kind`, `limit`, `offset`, `sort`, `group` | Dieselbe JSON-Struktur wie die CLI-Suche |
 | `/api/object` | `id` erforderlich; optional `page` ab 1 | Dieselbe JSON-Struktur wie `--show ID --json`, mit `page` wie `--show ID --page N --json` |
 | `/api/paper` | Nur `id` erforderlich, muss ein indexiertes Paper sein | Aufgeloester Vorgang mit `id`, `incomplete`, `objects` |
@@ -591,6 +594,25 @@ und die Qualitaet der Quellarchive bleiben relevant.
 
 ## Indexformat und Suchkern
 
+**Format 2 erfordert einen Neuaufbau alter Indizes.** Die Fehlermeldung
+nennt dafuer `oparl-index`; es gibt keinen Legacy-Leser.
+Das [kanonische Datenmodell](oparl-index.md#kanonisches-datenmodell-format-2)
+beschreibt typisierte Kanten, Datumsrollen, Fassungsidentitaeten und Belege.
+Nur explizite Hauptdateien und Anlagen eines Papers gelten fuer Suchfilter
+und Gruppierung als dessen Dokumente. Erreichbare Eltern, TOP und
+Sitzungspakete sind dagegen Kontext, keine vererbten Paper-Inhalte.
+
+`--show ID --json`, `/api/object` und MCP-`get_object` liefern dieses Modell
+gemeinsam mit Rohmetadaten und Text als `model`. Unbekannte Werte bleiben
+`null`; ein Paper ist nicht automatisch eine Initiative oder Sachantwort.
+Neben OParl-IDs werden konkrete Dokumentfassungs-, Seiten- und Abschnitts-IDs
+akzeptiert. Beispiel: die ID aus `model.documentVersion.id` statt einer
+moeglicherweise spaeter geaenderten File-ID zitieren, dazu Seite und
+`model.snapshotId`. Nur Fassungen im geladenen Snapshot sind abrufbar.
+Die Importzeit bezeichnet den lokalen Indeximport, keine neue RIS-Abfrage.
+Alle Angaben werden aus dem geladenen Index gelesen, nicht aus Quellpfaden
+nachgeladen. Das gilt auch, wenn das Originalarchiv nicht vorhanden ist.
+
 Der unveraenderliche Index enthaelt ein lexikalisch sortiertes
 Woerterbuch, invertierte Positionslisten mit Byteoffsets, Metadatensaetze,
 gespeicherte Texte und Drucksachenbeziehungen. Exakte Woerter und
@@ -725,3 +747,71 @@ Untervorgaenge, zyklische Beziehungen, beide Schreibweisen von
 `agendaItem`/`agendaitem`, Sitzungsdokumente, fehlende/geloeschte
 Objekte und nicht zum Vorgang gehoerende Tagesordnungspunkte ab.
 Der lokale Testdienst wird danach beendet.
+
+### Fachliche MCP-Abnahme (M0)
+
+Die [Abnahmetests](../tests/search-acceptance.mjs) verwenden ein kleines,
+synthetisches [Buergerfragen-Testarchiv](../tests/fixtures/citizen-questions.mjs).
+Sie testen die echten Programme ueber lokale Prozesse und Loopback-HTTP:
+
+```sh
+make test-mcp-acceptance
+```
+
+Diese bewusst separate Abnahme ist noch **rot**: Sie beschreibt fachliche
+Anforderungen, deren Umsetzung erst folgt. Exitcode 1 bedeutet fehlgeschlagene
+fachliche oder Leistungs-Abnahme; Exitcode 2 einen Infrastruktur-/Werkzeugfehler.
+Diese Codes gelten fuer den Node-Runner; GNU make meldet ein fehlgeschlagenes
+Target unabhaengig davon mit seinem eigenen Exitcode 2.
+Fehler werden nicht als erwartete Erfolge oder uebersprungene Tests maskiert.
+Die bisherige Regression unter `make test` bleibt davon getrennt.
+
+Geprueft werden falsche Paper-Zuordnungen ueber Sitzungspakete, legitime
+gemeinsame Direktanlagen, Filter im selben Paper, Referenzjahr gegenueber
+Dokumentjahr, Sitzungsdaten und Zeitzonen einschliesslich Zeitumstellung,
+Antwortgroesse unter 20.000 HTTP-Body-Bytes, unpassende eingebettete
+Tagesordnungspunkte und unabhaengiger Kalenderimport. Gegenpruefungen erhalten
+widerspruechliche Datums-/Typangaben und explizit fehlende Beziehungen.
+Die Rollen-/Datumsbelege sind noch keine implementierte Normalisierung oder
+belastbare Bearbeitungszeitstatistik.
+
+Stichtag, Zeitzone, Datumsrollen, Zaehleinheiten und unbekannte Werte stehen
+in der Fixture. Bei einem Formatumbau darf der Runner angepasst werden;
+fachliche Erwartungen sind kein Legacy-API-Vertrag. Der Testlauf beantwortet
+nicht automatisch alle 25 Fragen eines externen Fragenkatalogs.
+
+Der JSON-Bericht unter `build/acceptance/m0-baseline.json` enthaelt die einzelnen
+Abnahmen, Binary-/Fixture-Pruefsummen, MCP-Aufrufzahlen und empfangenen
+HTTP-Body-Bytes, Indexgroesse, gemessene Fixture-Bauzeit und warme CLI-Benchmarks.
+Unter macOS wird auch der maximale RSS der gemessenen Prozesse erfasst.
+Die Bytezahl umfasst JSON-RPC sowie Text- und Strukturausgabe, aber keine
+HTTP-Header. Der Suchbenchmark schliesst Ausgabe und Transport nicht ein.
+
+Optional laesst sich der vorhandene Gesamtindex nur lesend mitmessen:
+
+```sh
+node tests/search-acceptance.mjs \
+  build/macos-aarch64/oparl-index build/macos-aarch64/oparl-search \
+  build/macos-aarch64/oparl-scan \
+  --corpus-index build/search/index.ops \
+  --report build/acceptance/m0-baseline.json
+```
+
+Zusaetzlich misst `--corpus-archive downloads` einen vollstaendigen Neuaufbau
+in einer temporaeren Ausgabedatei, mit zehn Minuten Zeitlimit. Erfasst werden
+Bauzeit, maximaler RSS unter macOS, Coverage und Index-Pruefsumme. Ist auch
+`--corpus-index` angegeben, wird Bytegleichheit beider Indexstaende ausgewiesen.
+Der vorhandene Index wird nicht ersetzt; der temporaere Index wird entfernt.
+Waehrenddessen darf kein Downloader dasselbe Archiv aktualisieren.
+
+Mit `--citizen-report FILE` kann eine vorhandene Auswertung des urspruenglichen
+Recherchelaufs als getrennte historische Baseline beigefuegt werden. Sie wird
+nicht erneut ausgefuehrt und ist nicht mit der kleinen Fixture-Aufrufzahl
+vergleichbar. Ohne `--corpus-archive` wird der Gesamtindex nicht neu gebaut;
+seine Bauzeit wird dann ausdruecklich als ungemessen ausgewiesen.
+Plattenkaltstarts sind nicht kontrolliert.
+
+Alle Testdienste binden nur an `127.0.0.1` mit automatisch reservierten Ports
+und werden anschliessend beendet. Auch der Downloader benutzt ausschliesslich
+einen lokalen HTTP-Provider. Produktivarchive und oeffentliche Dienste werden
+nicht veraendert.

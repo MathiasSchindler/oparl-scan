@@ -17,10 +17,15 @@ typedef struct {
     uint64_t strings, records, terms, occurrences, owners, size;
     uint64_t string_bytes, record_count, term_count, occurrence_count, owner_count;
     unsigned char sha256[32];
+    uint64_t relations, facts, evidence, versions, sections;
+    uint64_t relation_count, fact_count, evidence_count, version_count, section_count, imported_at;
 } Header;
-_Static_assert(sizeof(Header) == 144, "fixed binary index header");
-_Static_assert(sizeof(SearchRecord) == 80 && sizeof(SearchTerm) == 24 &&
+_Static_assert(sizeof(Header) == 232, "fixed binary index header");
+_Static_assert(sizeof(SearchRecord) == 88 && sizeof(SearchTerm) == 24 &&
     sizeof(SearchOccurrence) == 16 && sizeof(SearchOwner) == 8, "fixed binary section layouts");
+_Static_assert(sizeof(SearchRelation) == 24 && sizeof(SearchFact) == 16 &&
+    sizeof(SearchEvidence) == 32 && sizeof(SearchVersion) == 24 &&
+    sizeof(SearchSection) == 24, "fixed canonical model layouts");
 
 int search_error(const char *message, const char *detail) {
     rt_write_cstr(2, "oparl: error: ");
@@ -37,6 +42,18 @@ void search_builder_init(SearchBuilder *builder) {
     tool_array_init(&builder->terms, sizeof(SearchTerm));
     tool_array_init(&builder->occurrences, sizeof(SearchOccurrence));
     tool_array_init(&builder->owners, sizeof(SearchOwner));
+    tool_array_init(&builder->relations, sizeof(SearchRelation));
+    tool_array_init(&builder->facts, sizeof(SearchFact));
+    tool_array_init(&builder->evidence, sizeof(SearchEvidence));
+    tool_array_init(&builder->versions, sizeof(SearchVersion));
+    tool_array_init(&builder->sections, sizeof(SearchSection));
+    {
+        long long now = platform_get_epoch_time();
+        if (now <= 0) {
+            search_error("cannot obtain index import time", 0);
+            builder->failed = 1;
+        } else builder->imported_at = (uint64_t)now;
+    }
     if (tool_byte_buffer_append(&builder->strings, "", 1) != 0) builder->failed = 1;
 }
 
@@ -46,6 +63,11 @@ void search_builder_free(SearchBuilder *builder) {
     tool_array_free(&builder->terms);
     tool_array_free(&builder->occurrences);
     tool_array_free(&builder->owners);
+    tool_array_free(&builder->relations);
+    tool_array_free(&builder->facts);
+    tool_array_free(&builder->evidence);
+    tool_array_free(&builder->versions);
+    tool_array_free(&builder->sections);
     rt_free(builder->table);
 }
 
@@ -265,9 +287,9 @@ int search_write(SearchBuilder *builder, const char *path) {
     CryptoSha256Context sha;
     SearchOccurrence *occurrences = (SearchOccurrence *)builder->occurrences.data;
     SearchTerm *terms = (SearchTerm *)builder->terms.data;
-    const void *parts[5];
-    size_t sizes[5], i;
-    uint64_t offsets[6];
+    const void *parts[10];
+    size_t sizes[10], i;
+    uint64_t offsets[11];
     char part[4096], scratch[4096];
     int fd, result = 0;
     if (builder->failed) return search_error("index allocation/token limit exceeded", 0);
@@ -287,20 +309,30 @@ int search_write(SearchBuilder *builder, const char *path) {
     parts[2] = builder->terms.data; sizes[2] = builder->terms.count * sizeof(SearchTerm);
     parts[3] = builder->occurrences.data; sizes[3] = builder->occurrences.count * sizeof(SearchOccurrence);
     parts[4] = builder->owners.data; sizes[4] = builder->owners.count * sizeof(SearchOwner);
+    parts[5] = builder->relations.data; sizes[5] = builder->relations.count * sizeof(SearchRelation);
+    parts[6] = builder->facts.data; sizes[6] = builder->facts.count * sizeof(SearchFact);
+    parts[7] = builder->evidence.data; sizes[7] = builder->evidence.count * sizeof(SearchEvidence);
+    parts[8] = builder->versions.data; sizes[8] = builder->versions.count * sizeof(SearchVersion);
+    parts[9] = builder->sections.data; sizes[9] = builder->sections.count * sizeof(SearchSection);
     rt_memset(&header, 0, sizeof(header));
     memcpy(header.magic, "OPARLIDX", 8);
-    header.version = 1; header.endian = 0x01020304U; header.incomplete = builder->incomplete;
+    header.version = 2; header.endian = 0x01020304U; header.incomplete = builder->incomplete;
     offsets[0] = aligned(sizeof(header));
-    for (i = 0; i < 5; i++) offsets[i + 1] = offsets[i] + aligned(sizes[i]);
+    for (i = 0; i < 10; i++) offsets[i + 1] = offsets[i] + aligned(sizes[i]);
     header.strings = offsets[0]; header.records = offsets[1]; header.terms = offsets[2];
-    header.occurrences = offsets[3]; header.owners = offsets[4]; header.size = offsets[5];
+    header.occurrences = offsets[3]; header.owners = offsets[4]; header.size = offsets[10];
+    header.relations = offsets[5]; header.facts = offsets[6]; header.evidence = offsets[7];
+    header.versions = offsets[8]; header.sections = offsets[9];
     header.string_bytes = builder->strings.size; header.record_count = builder->records.count;
     header.term_count = builder->terms.count; header.occurrence_count = builder->occurrences.count;
     header.owner_count = builder->owners.count;
+    header.relation_count = builder->relations.count; header.fact_count = builder->facts.count;
+    header.evidence_count = builder->evidence.count; header.version_count = builder->versions.count;
+    header.section_count = builder->sections.count; header.imported_at = builder->imported_at;
     if (header.size > INDEX_LIMIT) return search_error("index exceeds the 4 GiB format limit", path);
     crypto_sha256_init(&sha);
     crypto_sha256_update(&sha, (const unsigned char *)&header, sizeof(header));
-    for (i = 0; i < 5; i++) section(&sha, parts[i], sizes[i], aligned(sizes[i]));
+    for (i = 0; i < 10; i++) section(&sha, parts[i], sizes[i], aligned(sizes[i]));
     crypto_sha256_final(&sha, header.sha256);
     if (tool_path_append_suffix(path, ".part", part, sizeof(part)) != 0 ||
         tool_ensure_parent_dirs(path, scratch, sizeof(scratch)) != 0)
@@ -308,7 +340,7 @@ int search_write(SearchBuilder *builder, const char *path) {
     fd = platform_open_write(part, 0644);
     if (fd < 0) return search_error("cannot create index", part);
     if (rt_write_all(fd, &header, sizeof(header)) != 0) result = -1;
-    for (i = 0; i < 5 && result == 0; i++) {
+    for (i = 0; i < 10 && result == 0; i++) {
         static const unsigned char zero[8] = {0};
         if (rt_write_all(fd, parts[i], sizes[i]) != 0 ||
             rt_write_all(fd, zero, (size_t)aligned(sizes[i]) - sizes[i]) != 0) result = -1;
@@ -348,17 +380,28 @@ int search_open(SearchIndex *index, const char *path) {
     int fd, closed;
     rt_memset(index, 0, sizeof(*index));
     if (platform_get_path_info(path, &info) != 0 || info.is_dir ||
-        info.size < sizeof(header) || info.size > INDEX_LIMIT)
+        info.size < 12 || info.size > INDEX_LIMIT)
         return search_error("invalid index size", path);
     fd = platform_open_read(path);
     if (fd < 0) return search_error("cannot open index", path);
+    while (p < 12) {
+        long got = platform_read(fd, (unsigned char *)&header + p, 12 - p);
+        if (got <= 0) goto invalid;
+        p += (size_t)got;
+    }
+    if (memcmp(header.magic, "OPARLIDX", 8) == 0 && header.version != 2) {
+        platform_close(fd);
+        return search_error("unsupported index format; rebuild with oparl-index --input ARCHIVE --output INDEX", path);
+    }
+    if (info.size < sizeof(header)) goto invalid;
     while (p < sizeof(header)) {
         long got = platform_read(fd, (unsigned char *)&header + p, sizeof(header) - p);
         if (got <= 0) goto invalid;
         p += (size_t)got;
     }
-    if (memcmp(header.magic, "OPARLIDX", 8) != 0 || header.version != 1 ||
-        header.endian != 0x01020304U || header.size != info.size ||
+    if (memcmp(header.magic, "OPARLIDX", 8) != 0 || header.version != 2 ||
+        header.endian != 0x01020304U || header.size != info.size || header.reserved ||
+        header.incomplete > 1 || !header.imported_at || header.imported_at > INT64_MAX ||
         header.strings != aligned(sizeof(header)) || header.string_bytes == 0) goto invalid;
     expected = header.strings;
 #define CHECK_SECTION(field, count, width) \
@@ -370,6 +413,11 @@ int search_open(SearchIndex *index, const char *path) {
     CHECK_SECTION(terms, term_count, sizeof(SearchTerm));
     CHECK_SECTION(occurrences, occurrence_count, sizeof(SearchOccurrence));
     CHECK_SECTION(owners, owner_count, sizeof(SearchOwner));
+    CHECK_SECTION(relations, relation_count, sizeof(SearchRelation));
+    CHECK_SECTION(facts, fact_count, sizeof(SearchFact));
+    CHECK_SECTION(evidence, evidence_count, sizeof(SearchEvidence));
+    CHECK_SECTION(versions, version_count, sizeof(SearchVersion));
+    CHECK_SECTION(sections, section_count, sizeof(SearchSection));
 #undef CHECK_SECTION
     if (expected != info.size || header.record_count > UINT32_MAX ||
         header.term_count > UINT32_MAX || header.occurrence_count > UINT32_MAX) goto invalid;
@@ -408,6 +456,15 @@ int search_open(SearchIndex *index, const char *path) {
     index->terms = (const SearchTerm *)(const void *)(data + header.terms);
     index->occurrences = (const SearchOccurrence *)(const void *)(data + header.occurrences);
     index->owners = (const SearchOwner *)(const void *)(data + header.owners);
+    index->relations = (const SearchRelation *)(const void *)(data + header.relations);
+    index->facts = (const SearchFact *)(const void *)(data + header.facts);
+    index->evidence = (const SearchEvidence *)(const void *)(data + header.evidence);
+    index->versions = (const SearchVersion *)(const void *)(data + header.versions);
+    index->sections = (const SearchSection *)(const void *)(data + header.sections);
+    index->relation_count = (size_t)header.relation_count; index->fact_count = (size_t)header.fact_count;
+    index->evidence_count = (size_t)header.evidence_count; index->version_count = (size_t)header.version_count;
+    index->section_count = (size_t)header.section_count; index->imported_at = header.imported_at;
+    hash_to_hex(expected_digest, 32, index->snapshot_id);
     index->record_count = (size_t)header.record_count; index->term_count = (size_t)header.term_count;
     index->occurrence_count = (size_t)header.occurrence_count; index->owner_count = (size_t)header.owner_count;
     index->file_bytes = (size_t)info.size;
@@ -418,12 +475,14 @@ int search_open(SearchIndex *index, const char *path) {
         for (i = 0; i < index->record_count; i++) {
             const SearchRecord *r = &index->records[i];
             const uint32_t offsets[] = {r->id,r->name,r->reference,r->date,r->paper_type,
-                                        r->organization,r->kind,r->source,r->text,r->payload};
+                                        r->organization,r->kind,r->source,r->text,r->payload,
+                                        r->identity,r->system,r->body};
             size_t j;
             for (j = 0; j < sizeof(offsets)/sizeof(offsets[0]); j++)
                 if (!valid_string(index, offsets[j])) goto invalid;
             if (r->text_length >= index->string_bytes - r->text ||
                 index->strings[r->text + r->text_length] != '\0' || r->body_start > r->text_length ||
+                r->metadata_origin > 2 || r->reserved ||
                 (r->parent != NONE && (r->parent >= index->record_count ||
                  index->records[r->parent].parent != NONE))) goto invalid;
             words += r->words;
@@ -445,6 +504,7 @@ int search_open(SearchIndex *index, const char *path) {
     for (i = 0; i < index->owner_count; i++)
         if (index->owners[i].record >= index->record_count || index->owners[i].paper >= index->record_count)
             goto invalid;
+    if (search_model_validate(index) != 0) goto invalid;
     index->links = (SearchLinks *)rt_malloc(lookup_bytes ? (size_t)lookup_bytes : 1);
     if (!index->links) {
         search_close(index);
@@ -1088,13 +1148,30 @@ const SearchRecord *search_find(const SearchIndex *index, const char *id, unsign
     for (i = 0; i < index->record_count; i++) {
         const SearchRecord *r = &index->records[i];
         if (rt_strcmp(index->strings + r->id, id) == 0 && r->page == page) return r;
+        if (rt_strcmp(index->strings + r->identity, id) == 0 && (!page || r->page == page)) return r;
     }
+    for (i = 0; i < index->version_count; i++) if (!rt_strcmp(index->strings + index->versions[i].id, id)) {
+        uint32_t file = index->versions[i].record;
+        size_t j;
+        if (!page) return &index->records[file];
+        for (j = 0; j < index->record_count; j++)
+            if (index->records[j].parent == file && index->records[j].page == page) return &index->records[j];
+        return 0;
+    }
+    if (!page) for (i = 0; i < index->section_count; i++)
+        if (!rt_strcmp(index->strings + index->sections[i].id, id))
+            return &index->records[index->sections[i].record];
     return 0;
 }
 
 static int print_record(SearchOutput *out, const SearchIndex *index, const SearchRecord *r, int json) {
     const char *body = index->strings + r->text + r->body_start;
+    ToolByteBuffer model;
+    int status;
     if (!json) return out_line(out, r->page ? body : index->strings + r->payload);
+    tool_byte_buffer_init(&model);
+    status = search_model_json(&model, index, r);
+    if (status != 0) { tool_byte_buffer_free(&model); return -1; }
     if (out_text(out, "{\"id\":") != 0 || out_string(out, index->strings + r->id) != 0 ||
         out_field_uint(out, "page", r->page) != 0 ||
         out_field_uint(out, "warnings", r->warnings) != 0 ||
@@ -1103,8 +1180,10 @@ static int print_record(SearchOutput *out, const SearchIndex *index, const Searc
         out_field_string(out, "text", body) != 0 ||
         out_text(out, ",\"metadata\":") != 0 ||
         out_text(out, r->payload ? index->strings + r->payload : "null") != 0 ||
-        out_text(out, "}\n") != 0) return -1;
-    return 0;
+        out_key(out, "model") != 0 || out_write(out, (const char *)model.data, model.size) != 0 ||
+        out_text(out, "}\n") != 0) status = -1;
+    tool_byte_buffer_free(&model);
+    return status;
 }
 
 int search_print(int fd, const SearchIndex *index, const SearchResult *result, int json) {
@@ -1148,6 +1227,12 @@ int search_status_json(ToolByteBuffer *buffer, const SearchIndex *index) {
     }
     return out_text(&out, "{\"records\":") != 0 || out_uint(&out, index->record_count) != 0 ||
         out_field_uint(&out, "terms", index->term_count) != 0 ||
+        out_field_uint(&out, "formatVersion", 2) != 0 ||
+        out_field_string(&out, "snapshotId", index->snapshot_id) != 0 ||
+        out_field_uint(&out, "importedAtEpochSeconds", index->imported_at) != 0 ||
+        out_field_uint(&out, "relations", index->relation_count) != 0 ||
+        out_field_uint(&out, "documentVersions", index->version_count) != 0 ||
+        out_field_uint(&out, "textSections", index->section_count) != 0 ||
         out_field_uint(&out, "indexBytes", index->file_bytes) != 0 ||
         out_field_uint(&out, "indexMemoryBytes", index->memory_bytes) != 0 ||
         out_field_uint(&out, "pages", pages) != 0 || out_field_uint(&out, "warningPages", warnings) != 0 ||
@@ -1300,9 +1385,15 @@ static int print_case(SearchOutput *out, const SearchIndex *index, const SearchC
     for (i = 0; i < context->objects.count; i++) {
         const CaseObject *object = (const CaseObject *)tool_array_get_const(&context->objects, i);
         const SearchRecord *record = object->record;
+        const char *scope = i == 0 ? "paper" :
+            !rt_strcmp(object->kind, "Paper") ? "relatedPaper" :
+            !rt_strcmp(object->kind, "File") ?
+                (search_is_direct_source(index, (uint32_t)(root->record - index->records), object->id) ?
+                    "directSource" : "contextSource") : "context";
         if ((i && out_char(out, ',') != 0) || out_text(out, "{\"id\":") != 0 ||
             out_string(out, object->id) != 0 ||
             out_field_string(out, "kind", object->kind) != 0 ||
+            out_field_string(out, "scope", scope) != 0 ||
             out_field_bool(out, "indexed", record != 0) != 0 ||
             out_field_string(out, "source", record ? index->strings + record->source : "") != 0 ||
             out_field_uint(out, "warnings", record ? record->warnings : 0) != 0 ||

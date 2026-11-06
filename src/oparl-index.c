@@ -10,11 +10,13 @@
 
 typedef struct { uint32_t key, value; } MapEntry;
 typedef struct { MapEntry *entries; size_t capacity, count; } Map;
+typedef struct { uint32_t id, role, property; } EntityLink;
 typedef struct {
     SearchRecord record;
     uint32_t modified, archive, pdf, hash, search_record, detail;
     unsigned long long mtime, metadata_mtime;
     int rank, deleted;
+    uint32_t dates[SEARCH_DATE_END], authority, version;
     ToolArray links, organizations, owners;
 } Entity;
 typedef struct { uint32_t path; unsigned int year; int incomplete; } ArchiveRoot;
@@ -197,8 +199,8 @@ static uint32_t new_entity(Import *import, uint32_t id) {
     e = (Entity *)tool_array_append(&import->entities);
     if (!e) return NONE;
     rt_memset(e, 0, sizeof(*e));
-    e->record.id = id; e->record.parent = NONE; e->search_record = NONE;
-    tool_array_init(&e->links, sizeof(uint32_t));
+    e->record.id = e->record.identity = id; e->record.parent = NONE; e->search_record = NONE;
+    tool_array_init(&e->links, sizeof(EntityLink));
     tool_array_init(&e->organizations, sizeof(uint32_t));
     tool_array_init(&e->owners, sizeof(uint32_t));
     if (map_put(import, &import->ids, id, n) != 0) return NONE;
@@ -212,20 +214,22 @@ static int append_id(ToolArray *array, uint32_t id) {
 }
 
 static int ingest(Import *import, const Json *json, size_t object, int rank);
-static int link_value(Import *import, const Json *json, size_t value, uint32_t parent, int organization) {
+static int link_value(Import *import, const Json *json, size_t value, uint32_t parent,
+                      uint32_t role, uint32_t property) {
     const JsonToken *token = json_token(json, value);
     uint32_t id;
     size_t child;
     if (!token || token->kind == JSON_NULL) return 0;
     if (token->kind == JSON_ARRAY) {
+        if (role == SEARCH_BODY || role == SEARCH_SYSTEM)
+            return search_error("OParl context relationship must be singular", string(import, property));
         for (child = value + 1; child < token->next; child = json_token(json, child)->next)
-            if (link_value(import, json, child, parent, organization) != 0) return -1;
+            if (link_value(import, json, child, parent, role, property) != 0) return -1;
         return 0;
     }
     if (token->kind == JSON_OBJECT) {
         id = json_text(import, json, value, "id");
-        if (json_equals(json, json_get(json, value, "type"), "https://schema.oparl.org/1.1/File") &&
-            ingest(import, json, value, 1) != 0) return -1;
+        if (ingest(import, json, value, 1) != 0) return -1;
     } else if (token->kind == JSON_STRING) {
         char *value_text = (char *)rt_malloc(token->end - token->start + 1);
         if (!value_text) return -1;
@@ -234,18 +238,38 @@ static int link_value(Import *import, const Json *json, size_t value, uint32_t p
         }
         id = text(import, value_text); rt_free(value_text);
     } else return search_error("invalid OParl relationship", 0);
-    if (id && append_id(organization ? &entity(import, parent)->organizations :
-                       &entity(import, parent)->links, id) != 0) return -1;
+    if (id) {
+        EntityLink *link = (EntityLink *)tool_array_append(&entity(import, parent)->links);
+        if (!link) return search_error("cannot allocate typed relationship", 0);
+        link->id = id; link->role = role; link->property = property;
+        if ((role == SEARCH_DIRECTION || role == SEARCH_ORGANIZATION) &&
+            append_id(&entity(import, parent)->organizations, id) != 0) return -1;
+        if (role == SEARCH_BODY) entity(import, parent)->record.body = id;
+        if (role == SEARCH_SYSTEM) entity(import, parent)->record.system = id;
+    }
     return import->builder.failed ? -1 : 0;
 }
 
+typedef struct { const char *key; uint32_t role; } RelationKey;
 static int ingest(Import *import, const Json *json, size_t object, int rank) {
-    static const char *const paper[] = {"mainFile","auxiliaryFile","consultation",
-        "superordinatedPaper","subordinatedPaper","relatedPaper"};
-    static const char *const consultation[] = {"paper","agendaItem","agendaitem","meeting"};
-    static const char *const agenda[] = {"meeting","consultation","resolutionFile","auxiliaryFile"};
-    static const char *const meeting[] = {"invitation","resultsProtocol","verbatimProtocol","auxiliaryFile"};
-    const char *const *keys = 0;
+    static const RelationKey paper[] = {
+        {"mainFile",SEARCH_MAIN_FILE},{"auxiliaryFile",SEARCH_PAPER_ATTACHMENT},
+        {"consultation",SEARCH_CONSULTATION},{"superordinatedPaper",SEARCH_SUPERORDINATED},
+        {"subordinatedPaper",SEARCH_SUBORDINATED},{"relatedPaper",SEARCH_RELATED}};
+    static const RelationKey consultation[] = {
+        {"paper",SEARCH_CONSULTATION_PAPER},{"agendaItem",SEARCH_AGENDA_ITEM},
+        {"agendaitem",SEARCH_AGENDA_ITEM},{"meeting",SEARCH_MEETING}};
+    static const RelationKey agenda[] = {
+        {"meeting",SEARCH_AGENDA_MEETING},{"consultation",SEARCH_AGENDA_CONSULTATION},
+        {"resolutionFile",SEARCH_RESOLUTION_FILE},{"auxiliaryFile",SEARCH_AGENDA_ATTACHMENT}};
+    static const RelationKey meeting[] = {
+        {"invitation",SEARCH_INVITATION},{"resultsProtocol",SEARCH_RESULTS_PROTOCOL},
+        {"verbatimProtocol",SEARCH_VERBATIM_PROTOCOL},{"auxiliaryFile",SEARCH_MEETING_ATTACHMENT},
+        {"agendaItem",SEARCH_MEETING_AGENDA}};
+    static const RelationKey common[] = {
+        {"underDirectionOf",SEARCH_DIRECTION},{"organization",SEARCH_ORGANIZATION},
+        {"body",SEARCH_BODY},{"system",SEARCH_SYSTEM}};
+    const RelationKey *keys = 0;
     size_t count = 0, i, type = json_get(json, object, "type");
     uint32_t id, n, modified, kind;
     Entity *e;
@@ -267,6 +291,7 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
         if (compare < 0 || (compare == 0 && import->mtime < e->metadata_mtime)) return 0;
     }
     e->rank = rank; e->modified = modified; e->archive = import->archive;
+    e->record.metadata_origin = (uint32_t)rank;
     e->metadata_mtime = import->mtime;
     e->deleted = json_true(json, json_get(json, object, "deleted"));
     e->record.kind = kind; e->record.source = import->current_file;
@@ -274,6 +299,19 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
     if (!e->record.name) e->record.name = json_text(import, json, object, "fileName");
     e->record.reference = json_text(import, json, object, "reference");
     e->record.date = json_text(import, json, object, "date");
+    rt_memset(e->dates, 0, sizeof(e->dates));
+    e->dates[SEARCH_CREATED] = json_text(import, json, object, "created");
+    e->dates[SEARCH_MODIFIED] = modified;
+    e->record.system = e->record.body = 0;
+    e->authority = SEARCH_AUTHORITY_UNKNOWN;
+    if (!rt_strcmp(type_text + 29, "Consultation")) {
+        size_t authoritative = json_get(json, object, "authoritative");
+        const JsonToken *token = json_token(json, authoritative);
+        if (token && token->kind != JSON_NULL) {
+            if (token->kind != JSON_BOOL) return search_error("authoritative is not a boolean", string(import, id));
+            e->authority = json_true(json, authoritative) ? SEARCH_AUTHORITATIVE : SEARCH_PRELIMINARY;
+        }
+    }
     e->record.paper_type = json_text(import, json, object, "paperType");
     e->record.year = 0;
     {
@@ -303,6 +341,7 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
     }
     if (e->deleted) return 0;
     if (rt_strcmp(type_text + 29, "Paper") == 0) {
+        e->dates[SEARCH_PAPER_DATE] = e->record.date;
         const char *reference_text = string(import, e->record.reference);
         if (rt_strlen(reference_text) >= 3 && reference_text[0] >= '0' && reference_text[0] <= '9' &&
             reference_text[1] >= '0' && reference_text[1] <= '9' && reference_text[2] == '/')
@@ -313,12 +352,19 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
     } else if (rt_strcmp(type_text + 29, "AgendaItem") == 0) {
         keys = agenda; count = sizeof(agenda)/sizeof(agenda[0]);
     } else if (rt_strcmp(type_text + 29, "Meeting") == 0) {
+        e->dates[SEARCH_MEETING_START] = json_text(import, json, object, "start");
+        e->dates[SEARCH_MEETING_END] = json_text(import, json, object, "end");
         keys = meeting; count = sizeof(meeting)/sizeof(meeting[0]);
     }
     for (i = 0; i < count; i++)
-        if (link_value(import, json, json_get(json, object, keys[i]), n, 0) != 0) return -1;
-    if (link_value(import, json, json_get(json, object, "underDirectionOf"), n, 1) != 0 ||
-        link_value(import, json, json_get(json, object, "organization"), n, 1) != 0) return -1;
+        if (link_value(import, json, json_get(json, object, keys[i].key), n,
+                       keys[i].role, text(import, keys[i].key)) != 0) return -1;
+    for (i = 0; i < sizeof(common)/sizeof(common[0]); i++) {
+        uint32_t role = common[i].role;
+        if (role == SEARCH_BODY && !rt_strcmp(type_text + 29, "System")) role = SEARCH_BODY_COLLECTION;
+        if (link_value(import, json, json_get(json, object, common[i].key), n,
+                       role, text(import, common[i].key)) != 0) return -1;
+    }
     return import->builder.failed ? -1 : 0;
 }
 
@@ -428,40 +474,26 @@ static int document_file(const char *path, const PlatformDirEntry *entry, int de
 }
 
 static int ownership(Import *import) {
-    uint32_t *visited = (uint32_t *)rt_malloc_array(import->entities.count, sizeof(uint32_t));
-    ToolArray queue;
     size_t i, j;
-    if (!visited) return -1;
-    rt_memset(visited, 0, import->entities.count * sizeof(uint32_t));
-    tool_array_init(&queue, sizeof(uint32_t));
     for (i = 0; i < import->entities.count; i++) {
         Entity *paper = entity(import, (uint32_t)i);
-        uint32_t stamp = (uint32_t)i + 1;
         if (paper->deleted || rt_strcmp(string(import, paper->record.kind), "Paper")) continue;
-        queue.count = 0;
-        if (append_id(&queue, (uint32_t)i) != 0) goto fail;
-        visited[i] = stamp;
-        for (j = 0; j < queue.count; j++) {
-            uint32_t current = *(const uint32_t *)tool_array_get_const(&queue, j);
-            Entity *e = entity(import, current);
+        for (j = 0; j < paper->links.count; j++) {
+            const EntityLink *link = (const EntityLink *)tool_array_get_const(&paper->links, j);
+            uint32_t target;
+            Entity *file;
             size_t k;
-            if (e->deleted) continue;
-            if (rt_strcmp(string(import, e->record.kind), "File") == 0 &&
-                append_id(&e->owners, (uint32_t)i) != 0) goto fail;
-            for (k = 0; k < e->links.count; k++) {
-                uint32_t id = *(const uint32_t *)tool_array_get_const(&e->links, k);
-                uint32_t target = map_get(import, &import->ids, string(import, id));
-                if (target == NONE || visited[target] == stamp) continue;
-                visited[target] = stamp;
-                if (append_id(&queue, target) != 0) goto fail;
-            }
+            if (link->role != SEARCH_MAIN_FILE && link->role != SEARCH_PAPER_ATTACHMENT) continue;
+            target = map_get(import, &import->ids, string(import, link->id));
+            if (target == NONE) continue;
+            file = entity(import, target);
+            if (file->deleted || rt_strcmp(string(import, file->record.kind), "File")) continue;
+            for (k = 0; k < file->owners.count; k++)
+                if (*(const uint32_t *)tool_array_get_const(&file->owners, k) == i) break;
+            if (k == file->owners.count && append_id(&file->owners, (uint32_t)i) != 0) return -1;
         }
     }
-    tool_array_free(&queue); rt_free(visited);
     return 0;
-fail:
-    tool_array_free(&queue); rt_free(visited);
-    return -1;
 }
 
 static int record_text(Import *import, SearchRecord *record, const char *body, size_t length) {
@@ -485,6 +517,106 @@ fail:
     return -1;
 }
 
+static uint32_t identity(Import *import, uint32_t base, const char *suffix) {
+    ToolByteBuffer buffer;
+    uint32_t result = 0;
+    tool_byte_buffer_init(&buffer);
+    if (tool_byte_buffer_append_cstr(&buffer, string(import, base)) != 0 ||
+        tool_byte_buffer_append_cstr(&buffer, suffix) != 0) import->builder.failed = 1;
+    else result = search_string(&import->builder, (const char *)buffer.data, buffer.size);
+    tool_byte_buffer_free(&buffer);
+    return result;
+}
+
+static uint32_t evidence(Import *import, uint32_t object, uint32_t version, uint32_t page,
+                         uint32_t section_id, uint32_t property, const char *rule, uint32_t certainty) {
+    SearchEvidence *value;
+    uint32_t rule_id = text(import, rule), n = (uint32_t)import->builder.evidence.count;
+    if (import->builder.evidence.count >= UINT32_MAX ||
+        !(value = (SearchEvidence *)tool_array_append(&import->builder.evidence))) {
+        import->builder.failed = 1; return NONE;
+    }
+    rt_memset(value, 0, sizeof(*value));
+    value->object = object; value->version = version; value->page = page;
+    value->section = section_id; value->property = property;
+    value->rule = rule_id; value->certainty = certainty;
+    return n;
+}
+
+static int model_entity(Import *import, Entity *e) {
+    static const char *const date_properties[SEARCH_DATE_END] = {
+        "", "date", "", "start", "end", "", "", "", "", "created", "modified", "", "", "reference"
+    };
+    size_t i;
+    char year[32];
+    if (e->record.year) {
+        rt_unsigned_to_string(e->record.year, year, sizeof(year));
+        e->dates[SEARCH_REFERENCE_YEAR] = text(import, year);
+    }
+    for (i = 1; i < SEARCH_DATE_END; i++) if (e->dates[i]) {
+        SearchFact *fact = (SearchFact *)tool_array_append(&import->builder.facts);
+        uint32_t property = text(import, date_properties[i]);
+        if (!fact) return search_error("cannot allocate dated facts", 0);
+        fact->record = e->search_record; fact->role = (uint32_t)i; fact->value = e->dates[i];
+        fact->evidence = evidence(import, e->record.id, 0, 0, 0, property,
+            i == SEARCH_REFERENCE_YEAR ? "reference-prefix-YY-v1" : "oparl-property-v1",
+            i == SEARCH_REFERENCE_YEAR ? SEARCH_DERIVED : SEARCH_ASSERTED);
+    }
+    for (i = 0; i < e->links.count; i++) {
+        const EntityLink *link = (const EntityLink *)tool_array_get_const(&e->links, i);
+        SearchRelation *relation = (SearchRelation *)tool_array_append(&import->builder.relations);
+        if (!relation) return search_error("cannot allocate canonical relationships", 0);
+        rt_memset(relation, 0, sizeof(*relation));
+        relation->source = e->search_record; relation->target = link->id; relation->role = link->role;
+        relation->authority = !rt_strcmp(string(import, e->record.kind), "Consultation") ?
+            e->authority : SEARCH_AUTHORITY_UNKNOWN;
+        relation->evidence = evidence(import, e->record.id, 0, 0, 0, link->property,
+                                     "oparl-relationship-v1", SEARCH_ASSERTED);
+    }
+    if (e->record.body && e->record.system) {
+        int explicit_system = 0;
+        uint32_t target = map_get(import, &import->ids, string(import, e->record.body));
+        for (i = 0; i < e->links.count; i++)
+            if (((const EntityLink *)tool_array_get_const(&e->links, i))->role == SEARCH_SYSTEM) explicit_system = 1;
+        if (!explicit_system && target != NONE) {
+            SearchRelation *relation = (SearchRelation *)tool_array_append(&import->builder.relations);
+            if (!relation) return search_error("cannot allocate derived context", 0);
+            rt_memset(relation, 0, sizeof(*relation));
+            relation->source = e->search_record; relation->target = e->record.system;
+            relation->role = SEARCH_CONTEXT_SYSTEM;
+            relation->evidence = evidence(import, entity(import, target)->record.id, 0, 0, 0,
+                                          text(import, "system"), "body-system-context-v1", SEARCH_DERIVED);
+        }
+    }
+    return import->builder.failed ? -1 : 0;
+}
+
+static int document_version(Import *import, Entity *e, const unsigned char *bytes, size_t length) {
+    unsigned char digest[32];
+    char content[65];
+    SearchVersion *version;
+    ToolByteBuffer name;
+    uint32_t version_id, hash_id;
+    crypto_sha256_hash(bytes, length, digest);
+    hash_to_hex(digest, 32, content);
+    hash_id = text(import, content);
+    tool_byte_buffer_init(&name);
+    if (tool_byte_buffer_append_cstr(&name, "urn:oparl-search:document:") != 0 ||
+        tool_byte_buffer_append_cstr(&name, string(import, e->hash)) != 0 ||
+        tool_byte_buffer_append_cstr(&name, ":") != 0 ||
+        tool_byte_buffer_append_cstr(&name, content) != 0) {
+        tool_byte_buffer_free(&name); return search_error("cannot allocate document version ID", 0);
+    }
+    version_id = search_string(&import->builder, (const char *)name.data, name.size);
+    tool_byte_buffer_free(&name);
+    version = (SearchVersion *)tool_array_append(&import->builder.versions);
+    if (!version) return search_error("cannot allocate document versions", 0);
+    rt_memset(version, 0, sizeof(*version));
+    version->record = e->search_record; version->id = version_id; version->hash = hash_id;
+    version->bytes = length; e->version = version_id;
+    return import->builder.failed ? -1 : 0;
+}
+
 typedef struct { Import *import; uint32_t entity; } PageContext;
 static int extracted_page(unsigned int number, const char *body, size_t length,
                             unsigned int warnings, void *user) {
@@ -493,12 +625,31 @@ static int extracted_page(unsigned int number, const char *body, size_t length,
     Entity *e = entity(import, context->entity);
     SearchRecord record = e->record;
     uint32_t n;
+    char number_text[32], digest_text[65];
+    unsigned char digest[32];
+    SearchSection *section;
     record.kind = text(import, "Page"); record.page = number; record.warnings = warnings;
     record.parent = e->search_record;
     record.source = e->pdf;
+    rt_unsigned_to_string(number, number_text, sizeof(number_text));
+    record.identity = identity(import, e->version, ":page:");
+    record.identity = identity(import, record.identity, number_text);
     if (record_text(import, &record, body, length) != 0) return -1;
     n = search_add_record(&import->builder, &record);
     if (n == NONE) return -1;
+    crypto_sha256_hash((const unsigned char *)body, length, digest);
+    hash_to_hex(digest, 32, digest_text);
+    {
+        uint32_t section_id = identity(import, record.identity, ":body:");
+        section_id = identity(import, section_id, digest_text);
+        section = (SearchSection *)tool_array_append(&import->builder.sections);
+        if (!section) return search_error("cannot allocate text sections", 0);
+        rt_memset(section, 0, sizeof(*section));
+        section->record = n; section->id = section_id;
+        section->start = record.body_start; section->length = (uint32_t)length;
+        section->evidence = evidence(import, e->record.id, e->version, number, section_id,
+                                    text(import, "text"), "pdf-text-v1", SEARCH_DERIVED);
+    }
     import->pages++;
     if (warnings) {
         import->warning_pages++; import->builder.incomplete = 1;
@@ -551,8 +702,17 @@ static int emit(Import *import) {
             const char *detail = string(import, e->detail);
             if (record_text(import, &e->record, detail, rt_strlen(detail)) != 0) return -1;
         }
+        if (e->record.body && !e->record.system) {
+            uint32_t target = map_get(import, &import->ids, string(import, e->record.body));
+            if (target != NONE && !entity(import, target)->deleted) {
+                if (rt_strcmp(string(import, entity(import, target)->record.kind), "Body"))
+                    return search_error("body context does not reference a Body", string(import, e->record.id));
+                e->record.system = entity(import, target)->record.system;
+            }
+        }
         e->search_record = search_add_record(&import->builder, &e->record);
         if (e->search_record == NONE) return -1;
+        if (model_entity(import, e) != 0) return -1;
     }
     for (i = 0; i < import->entities.count; i++) {
         Entity *e = entity(import, (uint32_t)i);
@@ -573,6 +733,7 @@ static int emit(Import *import) {
         }
         if (tool_read_all_input(string(import, e->pdf), &bytes, &length) != 0)
             return search_error("cannot read archived document", string(import, e->pdf));
+        if (document_version(import, e, bytes, length) != 0) { rt_free(bytes); return -1; }
         context.import = import; context.entity = (uint32_t)i;
         if (length < 5 || memcmp(bytes, "%PDF-", 5) != 0 ||
             pdf_text_extract(bytes, length, extracted_page, &context, &error) != 0) {
@@ -636,11 +797,15 @@ int main(int argc, char **argv) {
         import.archive = archive->path;
         if (rt_join_path(string(&import, archive->path), "documents", path, sizeof(path)) != 0) goto done;
         if (platform_get_path_info(path, &info) != 0) continue;
-        if (walk_archive(path, document_file, &import, 0) != 0) goto done;
+        if (walk_archive(path, document_file, &import, 0) != 0) {
+            search_error("cannot discover archived documents", path); goto done;
+        }
     }
     if (tool_path_append_suffix(output, ".coverage.jsonl", report, sizeof(report)) != 0 ||
         tool_path_append_suffix(report, ".part", part, sizeof(part)) != 0 ||
-        tool_ensure_parent_dirs(part, scratch, sizeof(scratch)) != 0) goto done;
+        tool_ensure_parent_dirs(part, scratch, sizeof(scratch)) != 0) {
+        search_error("cannot prepare coverage report", output); goto done;
+    }
     import.report_fd = platform_open_write(part, 0644);
     if (import.report_fd < 0) { search_error("cannot create coverage report", part); goto done; }
     for (i = 0; i < import.archives.count; i++) {

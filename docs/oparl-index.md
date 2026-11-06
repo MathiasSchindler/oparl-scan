@@ -50,8 +50,8 @@ eine eigene `--year`-Option des Indexers.
 
 ## Welche Inhalte werden indexiert?
 
-- Archivierte Objekte aus `metadata/`, einschliesslich eingebetteter
-  File-Objekte.
+- Archivierte Objekte aus `metadata/`, einschliesslich typisierter
+  eingebetteter Objekte.
 - Lokale Dokumente aus `documents/`, soweit sie sich als unterstuetzte
   PDFs verarbeiten lassen.
 - Namen, Drucksachennummern, Typen, aufgeloeste Organisationen,
@@ -80,6 +80,125 @@ Originalmetadaten.
 `underDirectionOf` bezeichnet eine Zustaendigkeit, nicht verlaesslich
 die Urheberschaft. Strukturierte Urheberfelder fehlen im untersuchten
 Potsdamer Drucksachenbestand.
+
+## Kanonisches Datenmodell (Format 2)
+
+**Bestehende Indexdateien neu bauen.** Format 1 wird mit einer ausdruecklichen
+Neuaufbau-Meldung abgewiesen; es gibt keinen parallelen Legacy-Lesepfad.
+Die Originalarchive bleiben unveraendert. Indexer und Suchprogramm muessen
+denselben Formatstand verwenden.
+
+Der Index speichert neben den unveraenderten OParl-Metadaten ein kanonisches
+Modell. Es ist ueber `oparl-search --show ID --json`, `/api/object` und das
+MCP-Werkzeug `get_object` als Feld `model` lesbar, auch ohne Originalarchiv.
+
+### Identitaeten und Fassungen
+
+- OParl-Objekte, darunter System, Koerperschaft, Paper und Consultation,
+  behalten ihre vollstaendige OParl-ID. `context` erhaelt explizite
+  Koerperschafts-/Systembeziehungen; `Body.system` darf mit eigenem Beleg
+  als Systemkontext eines Objekts abgeleitet werden. `System.body` bezeichnet
+  dagegen eine Sammlung, keine einzelne Koerperschaft.
+- `metadataOrigin` unterscheidet `archive-resource` (Archivobjekt oder
+  Element einer archivierten Sammlung), `embedded` und `archive-file`
+  (nur lokal identifizierte Datei). Eingebettete typisierte Objekte erhalten
+  eigene Datensaetze; vollstaendige Archivobjekte haben weiter Vorrang.
+- Dokumentfassungen bekommen eine `urn:oparl-search:document:...` aus
+  Ressourcenidentitaet und SHA-256 der tatsaechlich gelesenen Dateibytes.
+  `documentVersion` nennt ID, Inhaltshash und Bytezahl. Eine unveraenderte
+  File-ID kann bei anderen Bytes daher nicht dieselbe Fassung vortaeuschen.
+- Seitenidentitaeten enthalten Fassung und 1-basierte Seitennummer.
+  Jeder extrahierte Seitenkoerper hat vorerst genau einen Textabschnitt
+  mit stabiler ID, Bytebereich und Extraktionsbeleg. Seine ID enthaelt
+  zusaetzlich den Hash des extrahierten Textes. Das sind noch keine
+  fachlich segmentierten TOP oder Absatz-Fundstellen.
+- Zeitereignisse, etwa ein angegebener Sitzungsstart, besitzen aus Objekt,
+  Datumsrolle und Rohwert abgeleitete stabile IDs. Ein Starttermin beweist
+  weder Durchfuehrung noch Entscheidung.
+
+Fassungs-, Seiten- und Abschnitts-IDs koennen direkt an `--show` bzw.
+`get_object` uebergeben werden. Mit einer Fassungs-ID ist auch `page` moeglich.
+Die Antwort behaelt die OParl-ID in `id`; `model.identity` bezeichnet die
+konkrete Einheit. Eine alte, im geladenen Snapshot nicht enthaltene Fassung
+wird nicht auf die aktuellen Bytes umgebogen, sondern als unbekannt abgewiesen.
+Der aktuelle Snapshot enthaelt je File die beim Bau ausgewaehlte Archivfassung.
+Eine historische Fassungsarchivierung beim Download ist erst Bestandteil von M2.
+
+Ein Paper ist weder automatisch eine Dokumentrolle (Anfrage, Antwort, Fassung)
+noch eine politische Initiative. `documentRole` und `initiative` bleiben ohne
+entsprechenden Nachweis `null`. Eltern, Kinder und verwandte Papers sind
+gerichtete Kanten: mehrere Eltern und Zyklen bleiben erhalten. Weder der erste
+Elternknoten noch ein Kennzeichen-Suffix begruendet eine Initiative.
+
+### Typisierte Beziehungen und Quellen
+
+`model.relations` trennt:
+
+| Gruppe | Bedeutung |
+| --- | --- |
+| `directSources` | Ausschliesslich explizite `Paper.mainFile` und `Paper.auxiliaryFile` |
+| `meetingContext` | Beratungen, TOP, TOP-Beschlussdateien/-Anlagen, Sitzungen, Einladungen und Protokolle |
+| `relatedPapers` | Ueber-, untergeordnete und verwandte Papers, jeweils mit eigener Rolle |
+| `structure` | Gremium, Zustaendigkeit, Koerperschaft, System und belegter Systemkontext |
+
+Die Kanten behalten Ziel-ID, Rolle, Beleg und gegebenenfalls Beratungsqualitaet
+`authoritative`, `preliminary` oder `unknown`. Diese Qualitaet stammt allein
+aus `Consultation.authoritative`, nicht aus vermeintlich eindeutigen
+Ergebniswoertern. Fehlende Zielobjekte bleiben als ID erhalten.
+
+**Graph-Erreichbarkeit ist keine Dokumentzugehoerigkeit.** Nur die beiden
+direkten Paper-Dateibeziehungen erzeugen Suchbesitzer. Der Weg ueber Eltern,
+Beratung und Sitzung zu einer Sammelanlage ist kein solcher Beleg. Sitzungspakete
+und deren Seiten bleiben eigenstaendig durchsuchbar. Direkt gemeinsam genutzte
+Dateien behalten alle belegten Paper-Besitzer. Eine spaetere Zuordnung einzelner
+TOP-Abschnitte erfolgt nicht durch ungepruefte transitive Vererbung.
+
+### Datumsrollen und Herkunft
+
+`model.dates` unterscheidet `paper.date`, `document.date`, `meeting.start`,
+`meeting.end`, `submittedAt`, `decidedAt`, `publishedAt`, `effectiveAt`, `created`,
+`modified`, `observedAt`, `importedAt` und `referenceYear`.
+
+Gespeicherte Rohwerte werden nicht zwischen Rollen verschoben. Insbesondere
+sind `Paper.date`, File-`created`, ein PDF-Dokumentdatum und der Einreichungs-
+oder Antwortzeitpunkt nicht gleichbedeutend. Sitzungszeiten behalten ihren
+Zeitzonenoffset. Referenzjahre werden ausdruecklich aus dem Kennzeichen abgeleitet.
+Noch nicht belegte Rollen sind `null`, nicht ein Ersatzdatum oder eine Nullzeit.
+PDF-Dokumentdaten und fachliche Dokumentrollen werden in M1 noch nicht erkannt.
+
+Werte und Kanten fuehren `evidence`: Quellobjekt, gegebenenfalls Dokumentfassung,
+Seite und Textabschnitt, Quellfeld, Ableitungsregel und `certainty`.
+`source-assertion` bedeutet eine Quellenangabe, keine nachgepruefte Tatsache;
+`derived` bezeichnet eine Ableitung oder Textextraktion; `exact` eine
+technisch exakt erfasste Groesse. Daraus werden keine erfundenen
+Konfidenzprozente berechnet. Seitenwarnungen gelten weiterhin.
+
+`importedAt.epochSeconds` ist der eigene Zeitpunkt des lokalen Indeximports
+in Unix-Sekunden. Er beweist keinen aktuellen RIS-Abruf. `observedAt` bleibt
+ohne protokollierten Abruf unbekannt; Dateisystem-mtime ersetzt diesen
+Zeitpunkt nicht. Verlaessliche Abrufstaende und Kalenderabdeckung folgen in M2.
+Die bisherigen Suchfilter und die `date`-Sortierung werden erst in M3 auf
+getrennte Datumsrollen umgestellt; ein gespeicherter Sitzungsstart bedeutet
+noch keinen fertigen Sitzungszeitfilter.
+
+### Binaerer Vertrag und Integritaet
+
+Format 2 verwendet einen 232-Byte-Header mit Magic `OPARLIDX`, Version,
+Endian-Kennung, 64-Bit-Abschnittsoffsets/-zaehlern, Importzeit und SHA-256.
+Alle zehn Abschnitte beginnen an 8-Byte-Grenzen:
+Zeichenketten, 88-Byte-Suchrecords, Begriffe, Positionen, direkte Suchbesitzer,
+typisierte Kanten, Datumsfakten, Herkunftsbelege, Dokumentfassungen und
+Textabschnitte. Zeichenketten-/Textreferenzen bleiben 32-Bit-Offsets;
+die gesamte Datei bleibt kleiner als 4 GiB.
+
+Der SHA-256 ueber Header mit auf null gesetztem Pruefsummenfeld und alle
+Abschnitte ist zugleich `snapshotId`. Er bindet Metadaten, Texte, Beziehungen
+und Importzeit an genau diesen Indexstand; identische Dokumentfassungen
+behalten unabhaengig davon ihre eigenen IDs. Der Leser prueft Abschnitte,
+Zeichenketten, Rollen, Quelltypen, Belegverweise, Textbereiche und
+Fassungsbeziehungen. Jeder Suchbesitzer muss durch eine typisierte direkte
+Paper-Dateikante belegt sein. Auch ein syntaktisch korrekter Graphpfad kann
+dadurch nicht als direkte Paper-Quelle eingeschleust werden.
 
 ## PDF-Textextraktion und ihre Grenzen
 
@@ -154,7 +273,7 @@ in Suchantworten und als CLI-Warnung sichtbar. Ein solcher Index darf
 durchsucht werden; keine Treffer bedeuten aber nicht zwingend, dass
 ein Sachverhalt im RIS nicht vorkommt.
 
-Im zuletzt vermessenen Bestand 2023 bis 2026 wurden 2.969 Seiten mit
+Im zuvor mit Format 1 vermessenen Bestand 2023 bis 2026 wurden 2.969 Seiten mit
 Warnungen erfasst, darunter 792 mit OCR-Bedarf. 22 Dateien waren nicht
 als unterstuetzte PDF verarbeitbar, drei referenzierte Dateien fehlten.
 Zwei Quellarchive waren bereits als unvollstaendig markiert.
@@ -162,6 +281,14 @@ Von 6.772 ausgewaehlten Drucksachen ist eine ausdruecklich als geloescht
 markiert und daher kein Suchtreffer; die uebrigen 6.771 sowie weitere
 Kontextdrucksachen sind enthalten. Diese Zahlen sind eine
 Bestandsaufnahme, kein Vollstaendigkeitsnachweis fuer das gesamte RIS.
+
+Der lokale Format-2-Neuaufbau hat weiterhin 96.136 PDF-Seiten, 2.969
+Warnungsseiten und 22 nicht verarbeitbare PDFs. Er macht aber auch
+zuvor nur eingebettete Kontextmetadaten zu eigenen Datensaetzen:
+insgesamt 160.157 Records und 13.991 File-Objekte ohne archivierte Binaerdatei.
+Das sind neu sichtbare Abdeckungsluecken im erweiterten Kontext, keine beim
+Neuaufbau geloeschten PDFs. Fehlende Kontextdateien werden nicht automatisch
+nachgeladen; Umfang und Aktualitaet der Beschaffung sind Teil von M2.
 
 ## Exitcodes
 
@@ -179,7 +306,8 @@ Abdeckungsbericht und den gewuenschten Umgang mit Luecken beachten.
 
 Der Importer liegt in [src/oparl-index.c](../src/oparl-index.c),
 die PDF-Textextraktion in [src/pdf-text.c](../src/pdf-text.c),
-das gemeinsame Indexformat in [src/search.c](../src/search.c).
+das gemeinsame Indexformat in [src/search.c](../src/search.c), Modellvalidierung
+und kanonische Ausgabe in [src/search-model.c](../src/search-model.c).
 
 Die [Such- und Indexertests](../tests/search.mjs) erzeugen temporaere
 Archive mit mehr als 1.024 Metadatendateien und synthetischen PDFs.
@@ -189,3 +317,10 @@ Deduplizierung, Loeschmarkierungen, nicht zugeordnete PDFs und
 OCR-/Extraktionsluecken. Ein fataler Neuaufbau darf einen vorhandenen
 Index nicht ersetzen. Produktivarchive werden dabei nicht beschrieben.
 Aufruf und Plattformhinweise stehen unter [Tests](../README.md#tests).
+
+[search-model.mjs](../tests/search-model.mjs) prueft darueber hinaus
+mehrere Eltern und Zyklen, unbekannte Initiativen/Datumsrollen,
+System-/Koerperschaftskontext, belegte direkte und gemeinsame Anlagen,
+stabile bzw. bei Byteaenderung wechselnde Fassungszitate, Zugriff ohne
+Originalarchiv und strukturelle Fehler trotz neu berechnetem SHA-256.
+Die Suite ist Teil von `make test`.
