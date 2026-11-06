@@ -294,6 +294,38 @@ Eine fehlende Kante macht ein eigenstaendiges Dokument nicht zum Paper-Inhalt.
 Die Antwort liefert keine PDF-Binaerdaten; `source` verweist auf
 die lokal archivierte Quelle, `documentUrl` auf das Originaldokument.
 
+## PDF-Befunde in Suchtreffern
+
+CLI-JSON, Websuche und MCP liefern je Treffer `preparation`, soweit ein
+vorbereiteter PDF-Beleg existiert, sonst `null`. Die kompakte Vorschau nennt
+Formularwerte, Dokumentrolle, Strukturzaehlungen, Feldprobleme und gegebenenfalls
+den passenden Protokoll-TOP oder die tatsaechlich getroffene Tabellenzeile.
+Ein Paper-Metadatentreffer erhaelt nur die Befunde einer eindeutig belegten
+Hauptdatei; Anlagen oder mehrere Hauptdateien werden nicht willkuerlich ersetzt.
+
+`selection: "matching-text"` kennzeichnet einen Kontext an der Textfundstelle.
+`"page"` ist lediglich Seitenkontext, `"document"` nur Dokumentkontext.
+Bei mehreren TOPs wird ohne passenden Textbeleg keiner herausgegriffen.
+Der Kontext ist auf 1.600 serialisierte Bytes begrenzt; ein zu grosser
+Kontext bleibt mit `contextOmitted: true` ausdruecklich nachladbar.
+Diskussionsvolltexte werden nicht in jeder Trefferkarte wiederholt.
+
+`preparation.available` enthaelt unmittelbar nutzbare Argumente fuer MCP-
+`get_object` oder `/api/object`: unveraenderliche Fassungs-ID, Snapshot und
+gegebenenfalls PDF-Seite. Der Abruf liefert alle Formularfelder samt
+Status, Regel und Quelltext; Seiten ergaenzen `preparation.pageData` mit
+vollstaendigen Tabellen, TOPs und vorhandenem `layout.text`.
+Die gespeicherten `layout.spans` werden nur mit `raw: true` geliefert;
+`layoutSpansAvailable` zeigt ihre Verfuegbarkeit an.
+Alle Zell-`sources` sind **UTF-8-Bytebereiche im Layouttext**.
+Sie duerfen weder als JavaScript-Zeichenindizes noch als Offsets im
+normalisierten Suchtext behandelt werden.
+
+Diese Befunde funktionieren ohne Originalarchiv oder Prepare-Cache.
+Leere Zellen, Unsicherheit und Extraktionsfehler bleiben sichtbar.
+Ein PDF-Ergebnistext begruendet weder automatisch einen verbindlichen
+SVV-Beschluss noch eine neue Graphbeziehung.
+
 ## Metadaten und Seitentexte abrufen
 
 ```sh
@@ -364,6 +396,14 @@ Angezeigt werden Trefferbereich, Gesamttrefferzahl und Seitennummer.
 Die Sortierung kann zwischen Relevanz, neuestem und aeltestem Datum
 wechseln; ihre Bedeutung wird neben der Auswahl erklaert.
 Sortierungs- oder Seitengroessenwechsel beginnen wieder auf Seite 1.
+
+Trefferkarten zeigen neben dem abgesetzten Auszug automatisch erschlossene
+PDF-Fakten, passende TOPs mit Ergebnistext oder Beratungs-/Tagesordnungszeilen.
+Ab 1.280 CSS-Pixeln stehen Auszug und Fakten nebeneinander; darunter
+werden sie gestapelt. Breite Anzeigen nutzen bis zu 1.920 Pixel.
+Die PDF-Details laden alle Seitenbefunde nach, einschliesslich unsicherer
+Formularfelder, Quellenzitaten, lokal scrollbaren Tabellen und Seitennavigation.
+Vollstaendige Layoutspannen bleiben der ausdruecklichen JSON-Rohsicht vorbehalten.
 
 PDF-Treffer zeigen den Titel ihrer zugehoerigen Vorlage als Ueberschrift,
 sofern vorhanden. Bei generischen Dokumentnamen wie "Sammeldokument
@@ -875,8 +915,10 @@ und die Qualitaet der Quellarchive bleiben relevant.
 
 ## Indexformat und Suchkern
 
-Die Suche liest **Format 3 und 4**; Format 4 ergaenzt die getrennten Befunde
-von `oparl-prepare`. Vorhandene Format-3-Indizes bleiben lesbar.
+Die Suche liest **Format 3, 4 und 5**. Format 4 ergaenzt die getrennten
+Dokumentbefunde von `oparl-prepare`; Format 5 bewahrt auch vollstaendige
+Seitenstrukturen und vorhandene Layoutdaten. Aeltere unterstuetzte Indizes
+bleiben lesbar, enthalten aber keine nachladbaren Seitenstrukturen.
 Format 1 und 2 erfordern weiterhin einen Neuaufbau; die Fehlermeldung
 nennt dafuer `oparl-index`.
 Das [kanonische Datenmodell](oparl-index.md#kanonisches-datenmodell-format-3)

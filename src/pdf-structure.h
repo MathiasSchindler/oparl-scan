@@ -16,4 +16,5 @@ typedef struct {
 
 int pdf_structure_page(ToolByteBuffer *out, const PdfTextLayout *layout, unsigned int warnings,
                        PdfStructureState *state, PdfStructureResult *result);
+int pdf_structure_validate_page(const Json *json, size_t page, unsigned long long counts[5]);
 #endif

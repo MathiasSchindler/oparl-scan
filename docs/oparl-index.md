@@ -96,11 +96,14 @@ Potsdamer Drucksachenbestand.
 
 ## Kanonisches Datenmodell (Format 3)
 
-Indizes mit Vorbereitungsbefunden verwenden **Format 4**. Die aktuelle Suche
-liest sowohl Format 3 als auch 4; der vorhandene Format-3-Bestand bleibt nutzbar.
-In Format 4 verweist das zuvor reservierte 32-Bit-Recordfeld auf getrennte
-`preparation`-Daten. Ohne Vorbereitungsbefunde schreibt der Indexer weiterhin
-Format 3. Alte Suchbinaries koennen Format 4 nicht lesen.
+Neu vorbereitete Indizes verwenden **Format 5**: Dokumente behalten ihre
+Formularzusammenfassung, Seiten speichern zusaetzlich die vollstaendigen
+Tabellen-/TOP-Strukturen und vorhandenen Layoutdaten. Die aktuelle Suche
+liest Format 3, 4 und 5. Format 4 enthaelt nur Dokumentzusammenfassungen;
+ein Neuaufbau mit `--prepared` macht die vollstaendigen Seitenbefunde nutzbar.
+In Format 4 und 5 verweist das zuvor reservierte 32-Bit-Recordfeld auf
+getrennte `preparation`-Daten. Ohne Vorbereitungsbefunde schreibt der Indexer
+weiterhin Format 3. Alte Suchbinaries koennen neuere Formate nicht lesen.
 
 **Indizes in Format 1 und 2 neu bauen.** Diese werden mit einer ausdruecklichen
 Neuaufbau-Meldung abgewiesen; es gibt keinen parallelen Legacy-Lesepfad.
@@ -227,8 +230,12 @@ Zeichenketten, 88-Byte-Suchrecords, Begriffe, Positionen, direkte Suchbesitzer,
 typisierte Kanten, Datumsfakten, Herkunftsbelege, 40-Byte-Dokumentfassungen und
 Textabschnitte. Zeichenketten-/Textreferenzen bleiben 32-Bit-Offsets;
 die gesamte Datei bleibt kleiner als 4 GiB.
-Format 4 verwendet dieselben Abschnittsbreiten; hinzu kommt der
+Format 4 und 5 verwenden dieselben Abschnittsbreiten; hinzu kommt der
 Zeichenkettenverweis auf selbststaendig gespeicherte Vorbereitungsbefunde.
+Ab Format 5 darf eine Seite ein eigenes, gegen Elternfassung, Inhalts-SHA,
+Seitennummer und Quellbereiche validiertes Paket besitzen.
+Die vollstaendigen Befunde vergroessern den Index; Suchtreffer verwenden
+kompakte Projektionen statt alle Layoutspannen zu wiederholen.
 
 Der SHA-256 ueber Header mit auf null gesetztem Pruefsummenfeld und alle
 Abschnitte ist zugleich `snapshotId`. Er bindet Metadaten, Texte, Beziehungen

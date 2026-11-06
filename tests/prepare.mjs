@@ -60,7 +60,7 @@ async function artifact(bytes, directory = cache) {
   assert.equal(data.data.key, manifest.key);
   return { path, data: data.data };
 }
-async function preparedApi(file, fields) {
+async function preparedApi(file, fields, preparedPage) {
   if (process.platform === 'win32') return;
   const reservation = createServer();
   await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
@@ -85,7 +85,7 @@ async function preparedApi(file, fields) {
         throw error;
       });
       if (response?.ok) {
-        assert.equal((await response.json()).formatVersion, 4);
+        assert.equal((await response.json()).formatVersion, 5);
         break;
       }
       assert.ok(Date.now() < deadline, `Prepared server did not become ready: ${log}`);
@@ -103,6 +103,26 @@ async function preparedApi(file, fields) {
     assert.equal(response.status, 200);
     assert.ok(Buffer.byteLength(body) < 20000, 'Prepared default MCP replies stay below 20,000 actual body bytes');
     assert.deepEqual(reply.result.structuredContent.preparation.fields, fields);
+    if (preparedPage) {
+      const parameters = new URLSearchParams({ id: file, page: preparedPage.page });
+      const page = await (await get('/api/object?' + parameters)).json();
+      assert.deepEqual(page.preparation.pageData.structure, preparedPage.structure);
+      assert.equal(page.preparation.pageData.layout.text, preparedPage.layout.text);
+      assert.equal(page.preparation.pageData.layout.spans, undefined,
+        'Ordinary page reads keep all semantic structures and source text without a glyph-position payload');
+      const raw = await (await get('/api/object?' + parameters + '&raw=true')).json();
+      assert.deepEqual(raw.preparation.pageData.layout, preparedPage.layout,
+        'Explicit raw page reads expose every extracted position without the cache or archive');
+      const mcpPage = await fetch(base + '/mcp', {
+        method: 'POST', signal: AbortSignal.timeout(3000),
+        headers: { 'Content-Type': 'application/json', 'MCP-Protocol-Version': '2025-11-25' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call',
+          params: { name: 'get_object', arguments: { id: file, page: preparedPage.page } } }),
+      });
+      assert.equal(mcpPage.status, 200);
+      assert.deepEqual((await mcpPage.json()).result.structuredContent.preparation.pageData.structure,
+        preparedPage.structure, 'MCP and Web expose the same complete PDF structures');
+    }
   } finally {
     child.kill('SIGTERM');
     const timeout = setTimeout(() => child.kill('SIGKILL'), 2000);
@@ -161,6 +181,36 @@ try {
   assert.equal(show(file, 1).text, show(file, 1, directIndex).text);
   assert.equal(show(file, 2).text, show(file, 2, directIndex).text);
   assert.deepEqual(show(file).metadata, show(file, undefined, directIndex).metadata, 'Original metadata is not rewritten');
+  const snapshot = await readFile(index), legacy = Buffer.from(snapshot);
+  const records = Number(snapshot.readBigUInt64LE(32)), recordCount = Number(snapshot.readBigUInt64LE(80));
+  const seal = bytes => {
+    bytes.fill(0, 112, 144);
+    Buffer.from(hash(bytes), 'hex').copy(bytes, 112);
+    return bytes;
+  };
+  legacy.writeUInt32LE(4, 8);
+  let firstPage;
+  for (let i = 0; i < recordCount; i++) {
+    const record = records + i * 88;
+    if (!snapshot.readUInt32LE(record + 52)) continue;
+    const parent = records + snapshot.readUInt32LE(record + 64) * 88;
+    legacy.writeUInt32LE(snapshot.readUInt32LE(parent + 84), record + 84);
+    firstPage ??= record;
+  }
+  const legacyIndex = join(root, 'format4.ops');
+  await writeFile(legacyIndex, seal(legacy));
+  const legacyPage = show(file, 1, legacyIndex).preparation;
+  assert.deepEqual(legacyPage.fields, initial.data.fields, 'Format-4 shared document summaries remain readable');
+  assert.equal(legacyPage.pageData, undefined, 'Legacy summaries are not presented as full page structures');
+  const invalidPage = Buffer.from(snapshot), strings = Number(snapshot.readBigUInt64LE(24));
+  const packet = strings + snapshot.readUInt32LE(firstPage + 84);
+  const pageNumber = invalidPage.indexOf('"page":1', packet);
+  assert.ok(pageNumber >= packet && pageNumber < invalidPage.indexOf(0, packet));
+  invalidPage[pageNumber + '"page":'.length] = '2'.charCodeAt(0);
+  const corruptIndex = join(root, 'wrong-prepared-page.ops');
+  await writeFile(corruptIndex, seal(invalidPage));
+  assert.match(run(searcher, ['--index', corruptIndex, '--json', 'Berechtigung'], 1).stderr, /prepar/i,
+    'A checksummed page package with the wrong page identity must be rejected');
   assert.equal(show(paper).metadata.paperType, 'Kleine Anfrage');
   assert.deepEqual(show(file).preparation.fields, initial.data.fields);
   const modelDate = show(file).model.dates['document.date'];
@@ -171,7 +221,7 @@ try {
   const filtered = JSON.parse(run(searcher, ['--index', index, '--json', '--group', 'document',
     '--date-role', 'document.date', '--date-from', '2026-07-16', '--date-through', '2026-07-16', 'Berechtigung']).stdout);
   assert.equal(filtered.total, 1, 'Prepared document date is available to normal date filters');
-  assert.equal(JSON.parse(run(searcher, ['--index', index, '--status']).stdout).formatVersion, 4);
+  assert.equal(JSON.parse(run(searcher, ['--index', index, '--status']).stdout).formatVersion, 5);
   assert.equal(JSON.parse(run(searcher, ['--index', directIndex, '--status']).stdout).formatVersion, 3);
   await rename(archive, join(root, 'hidden-archive'));
   await rename(cache, join(root, 'hidden-cache'));
@@ -409,7 +459,8 @@ try {
     [40, 700, 'Top 3.12'], [120, 700, 'Erhalt einer Straße'],
     [120, 686, 'mit Gehweg'],
     [40, 672, '23/SVV/0576'], [40, 658, 'ungeändert beschlossen'],
-    [40, 630, 'Beratung und Abstimmung zum Antrag.'],
+    [40, 630, 'Beratung und Abstimmung zum Antrag. Fernwaer-'],
+    [40, 616, 'me.'],
     [40, 610, 'Ein Verweis auf TOP 99 im Text ist keine weitere Überschrift.'],
     [40, 570, 'Top 3.13'], [120, 570, 'Zweiter Vorgang'],
     [40, 556, '23/SVV/0577'], [40, 542, 'vertagt'],
@@ -479,13 +530,6 @@ try {
       assert.equal(items[1].number, '3.13');
       assert.match(items[1].body.text, /Beratung des zweiten Vorgangs/);
       assert.doesNotMatch(items[0].body.text, /Zusammenstellung/);
-      await writeFile(sourcePath, bytes);
-      prepareRun();
-      run(indexer, ['--input', archive, '--output', index, '--prepared', cache]);
-      assert.deepEqual(show(file).preparation.structure, found.structure,
-        'The standalone index retains compact structure counts without copying unbounded table data');
-      await preparedApi(file, found.fields);
-      await writeFile(sourcePath, source);
     } else {
       assert.equal(found.structure.agendaItems, 4);
       assert.deepEqual(found.pages[0].structure.agendaItems.map(i => i.number), ['1', '5.1.1']);
@@ -508,6 +552,30 @@ try {
       run(prepare, ['--input', path, '--output', cache], 1);
       prepareRun(path, ['--force']);
     }
+    await writeFile(sourcePath, bytes);
+    prepareRun();
+    run(indexer, ['--input', archive, '--output', index, '--prepared', cache]);
+    assert.deepEqual(show(file).preparation.structure, found.structure);
+    for (const page of found.pages) {
+      const indexed = show(file, page.page).preparation.pageData;
+      assert.deepEqual(indexed.structure, page.structure, 'Every prepared table and TOP survives the standalone index');
+      assert.deepEqual(indexed.layout, page.layout);
+    }
+    const query = name === 'protocol' ? 'zweiten' : name === 'agenda' ? '"Weiterer Punkt"' :
+      name === 'consultation' ? 'Hauptausschuss' : 'Potsdam';
+    const hits = JSON.parse(run(searcher, ['--index', index, '--json', '--kind', 'Page', query]).stdout).hits;
+    assert.equal(hits[0].preparation.selection, 'matching-text');
+    if (name === 'protocol') assert.equal(hits[0].preparation.context.number, '3.13',
+      'A later TOP is selected by its actual source position, including after Unicode and removed line-break hyphens');
+    else assert.equal(hits[0].preparation.context.kind, name === 'agenda' ? 'agenda' : 'consultation');
+    if (name === 'consultation') assert.equal(hits[0].preparation.context.cells[2].text, '');
+    if (name === 'agenda') assert.equal(hits[0].preparation.context.cells[2].text, '24/SVV/0906');
+    await rename(archive, join(root, 'hidden-archive'));
+    await rename(cache, join(root, 'hidden-cache'));
+    await preparedApi(file, found.fields, found.pages.at(-1));
+    await rename(join(root, 'hidden-archive'), archive);
+    await rename(join(root, 'hidden-cache'), cache);
+    await writeFile(sourcePath, source);
   }
   const prose = textPdf(['Tagesordnung: Eine nummerierte Liste ist noch keine Tabelle.',
     '1. Erste Frage', '2. Zweite Frage', 'Der Ausschuss diskutiert TOP 3.12.']);
@@ -553,18 +621,42 @@ try {
   assert.equal(prepareRun(badPath, [], 3).warningOrFailedDocuments, 1);
   assert.equal((await artifact(Buffer.from('not a PDF'))).data.status, 'failed');
 
+  const failedFile = id('files/failed');
+  const failedSource = join(archive, 'documents', `${hash(failedFile)}-broken.pdf`);
+  const failedMetadata = join(archive, 'metadata', `${hash(failedFile)}.json`);
+  await writeFile(failedSource, 'not a PDF');
+  await writeFile(failedMetadata, JSON.stringify({ id: failedFile, type: schema + 'File', name: 'Broken PDF' }));
+  prepareRun(archive, [], 3);
+  run(indexer, ['--input', archive, '--output', index, '--prepared', cache], 3);
+  const failed = show(failedFile).preparation;
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.pageCount, 0);
+  assert.equal(failed.available.page, undefined, 'Do not advertise a page that extraction never produced');
+  assert.equal(show(failed.available.id).preparation.status, 'failed', 'The no-page descriptor still retrieves the file');
+  await rm(failedSource);
+  await rm(failedMetadata);
+
   const secondFile = id('files/independent'), secondPaper = id('papers/independent');
   await writeFile(join(archive, 'documents', `${hash(secondFile)}-same-bytes.sao`), source);
   for (const object of [
     { id: secondFile, type: schema + 'File', name: 'Same bytes, different resource' },
     { id: secondPaper, type: schema + 'Paper', name: 'Independent paper', reference: '26/SVV/0999', mainFile: secondFile },
+    { id: id('papers/multiple-main'), type: schema + 'Paper', name: 'AmbiguousMainProbe', mainFile: [file, secondFile] },
+    { id: id('papers/attachment-only'), type: schema + 'Paper', name: 'AttachmentOnlyProbe', auxiliaryFile: [secondFile] },
   ]) await writeFile(join(archive, 'metadata', `${hash(object.id)}.json`), JSON.stringify(object));
   prepareRun();
   run(indexer, ['--input', archive, '--output', index, '--prepared', cache]);
   assert.notEqual(show(file).model.documentVersion.id, show(secondFile).model.documentVersion.id);
   assert.equal(show(file).model.documentVersion.sha256, show(secondFile).model.documentVersion.sha256);
+  const paperPreview = text => JSON.parse(run(searcher, [
+    '--index', index, '--json', '--kind', 'Paper', text,
+  ]).stdout).hits[0].preparation;
+  assert.equal(paperPreview('Independent').fileId, secondFile, 'Paper metadata uses its proven unique main file');
+  assert.equal(paperPreview('AmbiguousMainProbe'), null, 'Do not choose arbitrarily between multiple main files');
+  assert.equal(paperPreview('AttachmentOnlyProbe'), null, 'An attachment is not a substitute for a missing main file');
   const papers = JSON.parse(run(searcher, ['--index', index, '--json', '--group', 'paper', 'Berechtigung']).stdout);
-  assert.deepEqual(papers.hits.map(h => h.relatedPaper).sort(), [paper, secondPaper].sort(),
+  assert.deepEqual(papers.hits.map(h => h.relatedPaper).sort(),
+    [paper, secondPaper, id('papers/multiple-main'), id('papers/attachment-only')].sort(),
     'Byte-sharing must preserve independent resource identities and direct Paper ownership');
   // Repeated bytes share extraction, but traversal must not stop at 1,024 entries.
   await Promise.all(Array.from({ length: 1030 }, (_, i) =>

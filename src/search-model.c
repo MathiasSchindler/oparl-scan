@@ -95,7 +95,8 @@ int search_model_validate(const SearchIndex *index) {
         const SearchRecord *r = &index->records[i];
         if (!index->records[i].identity || !index->strings[index->records[i].identity]) return -1;
         if (r->parent != NONE) {
-            if (r->preparation != index->records[r->parent].preparation) return -1;
+            if (r->preparation != index->records[r->parent].preparation &&
+                (index->format_version < 5 || search_preparation_validate(index, r))) return -1;
         } else if (r->preparation) {
             Json json;
             const SearchVersion *version = version_for(index, (uint32_t)i);

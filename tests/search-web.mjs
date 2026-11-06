@@ -124,11 +124,13 @@ export async function testSearchWeb(binary, index, fileId) {
     new Script(scriptText);
     const presentation = new Script(scriptText.slice(0, scriptText.indexOf('async function health(')) +
       scriptText.slice(scriptText.indexOf('function renderHit('), scriptText.indexOf('async function search(params)')) +
-      '\n({hitTitle,renderHit})').runInNewContext({
-      URLSearchParams,
-      document: { createElement: tag => ({ tagName: tag.toUpperCase(), children: [],
-        append(...items) { this.children.push(...items); }, addEventListener() {} }) },
+      '\n({hitTitle,renderHit,renderPdfPage})').runInNewContext({
+      URLSearchParams, TextEncoder, TextDecoder,
+      document: { createElement: tag => ({ tagName: tag.toUpperCase(), children: [], dataset: {}, listeners: {},
+        append(...items) { this.children.push(...items); },
+        addEventListener(name, listener) { this.listeners[name] = listener; } }) },
     });
+    const descendants = node => [node, ...node.children.flatMap(descendants)];
     const contextTitle = (name, sourceKind, sourceName) => presentation.hitTitle({ name, kind: 'Page',
       fileName: 'Original filename.pdf', evidence: { relationshipPath: [{ source: 'context/1', sourceKind, sourceName }] } });
     assert.equal(contextTitle('Sammeldokument \u00f6ffentlich', 'AgendaItem', 'Fazit zur Geothermie'), 'Fazit zur Geothermie');
@@ -154,7 +156,7 @@ export async function testSearchWeb(binary, index, fileId) {
       snippet: 'The matching document text.', dateRole: 'auto', evidence: { citation: {
         documentVersion: { id: 'urn:test:version', sha256: 'fixture-hash' } },
       relationshipPath: [{ role: 'paper.mainFile' }] } }, 1);
-    const excerpt = rendered.children.find(node => node.tagName === 'FIGURE');
+    const excerpt = descendants(rendered).find(node => node.tagName === 'FIGURE');
     assert.equal(excerpt.children[0].textContent, 'Textauszug aus der PDF \u00b7 Seite 2');
     assert.equal(excerpt.children[1].tagName, 'BLOCKQUOTE');
     assert.equal(excerpt.children[1].children[0].textContent, 'The matching document text.');
@@ -213,6 +215,50 @@ export async function testSearchWeb(binary, index, fileId) {
       created: { value: '2026-02-30', precision: 'invalid' } } } });
     assert.ok(invalid.children.some(node => node.children.some(child =>
       child.textContent === 'Dateieintrag erstellt: Ung\u00fcltiges Datum: 2026-02-30')));
+    const enriched = render({ snippet: 'Passender Protokolltext.', preparation: {
+      status: 'complete', selection: 'matching-text', fields: [
+        { field: 'document.date', value: '2026-07-16', status: 'rule-supported', page: 1 },
+        { field: 'originator.label', value: '<img src=x onerror=alert(1)>', status: 'rule-supported', page: 1 },
+        { field: 'answer.dueDate', value: '2026-08-01', status: 'rule-supported', page: 1 },
+      ], structure: { agendaItems: 2, tables: 1, uncertainRows: 1 }, fieldIssues: 1,
+      context: { kind: 'protocol-top', number: '3.12', status: 'rule-supported',
+        heading: { text: 'Top 3.12 Erhalt einer Stra\u00dfe' },
+        references: [{ text: '26/SVV/0123' }], outcome: { text: 'vertagt' } },
+    } });
+    const enrichedNodes = descendants(enriched);
+    assert.ok(enrichedNodes.some(n => n.textContent === '16.07.2026'));
+    assert.ok(enrichedNodes.some(n => n.textContent === '01.08.2026'));
+    assert.ok(enrichedNodes.some(n => n.textContent === 'Ergebnis laut PDF: vertagt'));
+    assert.ok(enrichedNodes.some(n => n.textContent === '<img src=x onerror=alert(1)>'));
+    assert.ok(!enrichedNodes.some(n => n.tagName === 'IMG'), 'Extracted source text is never interpreted as HTML');
+    assert.equal(enriched.children.find(n => n.tagName === 'H2').children[0].textContent,
+      'Top 3.12 Erhalt einer Stra\u00dfe', 'A source-supported TOP title improves a generic protocol title');
+    const structured = { tagName: 'DIV', children: [], append(...nodes) { this.children.push(...nodes); } };
+    presentation.renderPdfPage(structured, { pageData: { page: 1, layout: { text: '\u00c4\nGremium' },
+      structure: { status: 'ambiguous', agendaItems: [], diagnostics: [], tables: [{
+        kind: 'consultation', columns: ['date', 'committee', 'responsibility'],
+        rows: [{ status: 'ambiguous', cells: [
+          { text: '', sources: [] }, { text: 'Gremium', sources: [{ start: 3, length: 7 }] },
+          { text: '', sources: [] },
+        ] }],
+      }] } } });
+    const cells = descendants(structured).filter(n => n.tagName === 'TD');
+    assert.equal(cells[0].textContent, 'Nicht angegeben');
+    assert.equal(descendants(structured).find(n => n.tagName === 'TR' && n.dataset.uncertain).dataset.uncertain, 'true');
+    const proof = descendants(structured).find(n => n.className === 'cell-proof');
+    proof.open = true; proof.listeners.toggle();
+    assert.equal(descendants(proof).find(n => n.tagName === 'PRE').textContent, 'Gremium',
+      'Source quotes slice UTF-8 bytes, not JavaScript UTF-16 character offsets');
+    structured.children.length = 0;
+    presentation.renderPdfPage(structured, { status: 'failed', error: 'invalid PDF', fields: [
+      { field: 'document.date', status: 'ambiguous', page: 1, sourceLabel: 'Datum',
+        sourceText: '01.02.2026 oder 02.03.2026' },
+    ] });
+    const failedNodes = descendants(structured);
+    assert.ok(failedNodes.some(n => n.textContent === 'Mehrdeutig'), 'Unusable form fields remain inspectable');
+    assert.ok(failedNodes.some(n => n.tagName === 'PRE' && n.textContent === '01.02.2026 oder 02.03.2026'));
+    assert.ok(failedNodes.some(n => n.textContent === 'PDF-Textextraktion fehlgeschlagen: invalid PDF'));
+    assert.ok(!failedNodes.some(n => /Neuaufbau/.test(n.textContent)), 'Extraction failure is not an outdated-index warning');
 
     idle = connect(port, '127.0.0.1');
     await once(idle, 'connect');

@@ -167,6 +167,11 @@ void search_case_close(SearchCase *context);
 int search_case_print(int fd, const SearchIndex *index, const SearchCase *context);
 int search_results_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchResult *result);
 int search_record_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchRecord *record);
+int search_record_view_json(ToolByteBuffer *buffer, const SearchIndex *index,
+                           const SearchRecord *record, int raw);
+int search_preparation_json(ToolByteBuffer *out, const SearchIndex *index,
+                            const SearchRecord *record, uint32_t byte, int detail);
+int search_preparation_validate(const SearchIndex *index, const SearchRecord *record);
 int search_case_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchCase *context);
 int search_status_json(ToolByteBuffer *buffer, const SearchIndex *index);
 int search_model_validate(const SearchIndex *index);

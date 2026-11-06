@@ -784,6 +784,27 @@ static int prepared_pages(Import *import, Entity *e, PageContext *context, size_
         status = extracted_page((unsigned int)number, body, rt_strlen(body), (unsigned int)warnings, context);
         rt_free(body);
         if (status) goto done;
+        {
+            static const char *const names[] = {"page", "structure", "layout"};
+            ToolByteBuffer packet;
+            size_t k;
+            uint32_t stored;
+            tool_byte_buffer_init(&packet);
+            status = tool_byte_buffer_append_cstr(&packet, "{\"format\":1,\"sourceSha256\":") ||
+                json_quote(&packet, string(import, e->pdf_digest));
+            for (k = 0; !status && k < sizeof(names)/sizeof(names[0]); k++) {
+                const JsonToken *value = json_token(json, json_get(json, i, names[k]));
+                if (!value) continue;
+                status = tool_byte_buffer_append_cstr(&packet, ",") || json_quote(&packet, names[k]) ||
+                    tool_byte_buffer_append_cstr(&packet, ":") ||
+                    tool_byte_buffer_append(&packet, json->text + value->start, value->end - value->start);
+            }
+            if (!status) status = tool_byte_buffer_append_cstr(&packet, "}");
+            stored = status ? 0 : search_string(&import->builder, (const char *)packet.data, packet.size);
+            tool_byte_buffer_free(&packet);
+            if (status || import->builder.failed) { status = -1; goto done; }
+            ((SearchRecord *)import->builder.records.data)[import->builder.records.count-1].preparation = stored;
+        }
     }
     if (json_equals(json, json_get(json, doc.data, "status"), "failed")) {
         char error[256];

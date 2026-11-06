@@ -73,8 +73,8 @@ endif
 
 OBJECTS := $(addprefix $(BUILD)/obj/,$(addsuffix .o,$(basename $(COMMON) $(PLATFORM) $(START))))
 APP_OBJECTS := $(addprefix $(BUILD)/obj/,$(APP:.c=.o))
-INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o search-model.o search-date.o search-research.o json.o pdf-text.o pdf-structure.o archive-version.o archive-walk.o prepare.o)
-SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-model.o search-date.o search-research.o search-web.o search-mcp.o json.o)
+INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o search-model.o search-date.o search-research.o search-preparation.o json.o pdf-text.o pdf-structure.o archive-version.o archive-walk.o prepare.o)
+SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-model.o search-date.o search-research.o search-preparation.o pdf-structure.o search-web.o search-mcp.o json.o)
 PREPARE_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-prepare.o prepare.o pdf-text.o pdf-structure.o json.o archive-walk.o)
 PREPARE_SOURCES := src/prepare.c src/prepare.h src/pdf-text.c src/pdf-text.h src/pdf-structure.c src/pdf-structure.h src/json.c src/json.h \
 	$(NEWOS)/src/shared/pdf.c $(NEWOS)/src/shared/compression/zlib.c \

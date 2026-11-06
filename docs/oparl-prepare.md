@@ -308,11 +308,19 @@ Sie werden nicht in bestehende Such-Datumsrollen wie `submittedAt`
 umgedeutet; entsprechende fachliche Filter und Friststatistiken bleiben
 einem spaeteren M5-Ausbau vorbehalten.
 
-Der Index uebernimmt bewusst nur die kompakten `preparation.structure`-
-Zaehlungen, nicht saemtliche Tabellen-/TOP-Texte. Vollstaendige Strukturen
-stehen in den Prepare-Artefakten; die bestehende Volltextsuche und ihre
-Abschnittsidentitaeten bleiben unveraendert. Neue strukturbezogene Such-/
-Nachladefunktionen und automatische Graphverknuepfungen sind nicht enthalten.
+Ein neu vorbereiteter Index speichert neben `preparation.structure`-
+Zaehlungen die vollstaendigen Seitenstrukturen und vorhandenen Layoutdaten.
+Suchtreffer enthalten sichere Formularwerte und einen kompakten passenden
+TOP-/Tabellenzeilenkontext; die Quellen bleiben auch ohne Prepare-Cache
+abrufbar. `get_object(id, page)` beziehungsweise `/api/object` liefern unter
+`preparation.pageData` alle Seitenbefunde und `layout.text`.
+Die geometrischen `layout.spans` werden nur mit `raw: true` ausgegeben.
+Zellfundstellen sind UTF-8-Bytebereiche im Layouttext, keine Indizes in
+normalisiertem Suchtext. Details zum [Ausgabevertrag](oparl-search.md#pdf-befunde-in-suchtreffern)
+und [Indexformat 5](oparl-index.md#kanonisches-datenmodell-format-3).
+Die bestehende Volltextsuche, Abschnittsidentitaeten und Graphverknuepfungen
+bleiben unveraendert; automatisch erzeugte Beschluss- oder Personenbeziehungen
+kommen nicht hinzu.
 
 Dies ist die gemeinsame technische Grundlage fuer M5 und kleinere M6-Fundstellen,
 **nicht die vollstaendige Erledigung dieser Meilensteine**. Insbesondere fehlen

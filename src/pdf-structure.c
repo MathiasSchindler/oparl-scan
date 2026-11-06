@@ -1,6 +1,141 @@
 #include "pdf-structure.h"
 #include "runtime.h"
 
+static int array(const Json *j, size_t token) {
+    const JsonToken *t = json_token(j, token);
+    return t && t->kind == JSON_ARRAY;
+}
+static int cell_shape(const Json *j, size_t cell, size_t length) {
+    size_t sources = json_get(j, cell, "sources"), text = json_get(j, cell, "text"), i;
+    const JsonToken *t = json_token(j, text);
+    if (!t || t->kind != JSON_STRING || !array(j, sources))
+        return -1;
+    if (json_equals(j, text, "") != (json_token(j, sources)->next == sources + 1))
+        return -1;
+    for (i = sources + 1; i < json_token(j, sources)->next; i = json_token(j, i)->next) {
+        unsigned long long start, size;
+        if (json_uint(j, json_get(j, i, "start"), &start) ||
+            json_uint(j, json_get(j, i, "length"), &size) || !size || start > length ||
+            size > length - start)
+            return -1;
+    }
+    return 0;
+}
+int pdf_structure_validate_page(const Json *j, size_t page, unsigned long long counts[5]) {
+    size_t structure = json_get(j, page, "structure"), tables = json_get(j, structure, "tables");
+    size_t items = json_get(j, structure, "agendaItems"),
+           diagnostics = json_get(j, structure, "diagnostics");
+    size_t i, k, cell, table_count = 0, item_count = 0, length = 0;
+    unsigned long long format;
+    char *layout = 0;
+    int status = -1;
+    if (json_uint(j, json_get(j, structure, "format"), &format) || format != 1 ||
+        !array(j, tables) || !array(j, items) || !array(j, diagnostics))
+        return -1;
+    if (!json_equals(j, json_get(j, structure, "status"), "rule-supported") &&
+        !json_equals(j, json_get(j, structure, "status"), "unrecognized") &&
+        !json_equals(j, json_get(j, structure, "status"), "ambiguous") &&
+        !json_equals(j, json_get(j, structure, "status"), "pdf-warnings") &&
+        !json_equals(j, json_get(j, structure, "status"), "unsupported-layout"))
+        return -1;
+    if (json_token(j, tables)->next > tables + 1 || json_token(j, items)->next > items + 1) {
+        size_t text = json_get(j, json_get(j, page, "layout"), "text");
+        const JsonToken *t = json_token(j, text);
+        if (!t || t->kind != JSON_STRING)
+            return -1;
+        layout = (char *)rt_malloc(t->end - t->start + 1);
+        if (!layout || json_string(j, text, layout, t->end - t->start + 1))
+            goto done;
+        length = rt_strlen(layout);
+    }
+    for (i = tables + 1; i < json_token(j, tables)->next; i = json_token(j, i)->next) {
+        static const char *const consultation_columns[] = {"date", "committee", "responsibility"};
+        static const char *const agenda_columns[] = {"number", "text", "reference"};
+        size_t rows = json_get(j, i, "rows"), columns = json_get(j, i, "columns"), n = 0;
+        int consultation = json_equals(j, json_get(j, i, "kind"), "consultation");
+        if ((!consultation && !json_equals(j, json_get(j, i, "kind"), "agenda")) ||
+            !array(j, rows) || !array(j, columns) ||
+            (consultation && cell_shape(j, json_get(j, i, "header"), length)))
+            goto done;
+        for (k = columns + 1; k < json_token(j, columns)->next; k = json_token(j, k)->next) {
+            if (n >= 3 ||
+                !json_equals(j, k, consultation ? consultation_columns[n] : agenda_columns[n]))
+                goto done;
+            n++;
+        }
+        if (n != 3)
+            goto done;
+        for (k = rows + 1; k < json_token(j, rows)->next; k = json_token(j, k)->next) {
+            size_t cells = json_get(j, k, "cells"), n = 0;
+            int ambiguous = json_equals(j, json_get(j, k, "status"), "ambiguous");
+            if ((!ambiguous && !json_equals(j, json_get(j, k, "status"), "rule-supported")) ||
+                !array(j, cells))
+                goto done;
+            for (cell = cells + 1; cell < json_token(j, cells)->next;
+                 cell = json_token(j, cell)->next) {
+                if (cell_shape(j, cell, length))
+                    goto done;
+                n++;
+            }
+            if (n != 3)
+                goto done;
+            counts[2] += ambiguous;
+        }
+        table_count++;
+    }
+    for (i = items + 1; i < json_token(j, items)->next; i = json_token(j, i)->next) {
+        char number_value[32];
+        int protocol = json_equals(j, json_get(j, i, "kind"), "protocol-top");
+        if ((!protocol && !json_equals(j, json_get(j, i, "kind"), "agenda-top")) ||
+            json_string(j, json_get(j, i, "number"), number_value, sizeof(number_value)) ||
+            !number_value[0])
+            goto done;
+        if (protocol) {
+            size_t references = json_get(j, i, "references"), outcome = json_get(j, i, "outcome");
+            const JsonToken *t = json_token(j, outcome);
+            if (cell_shape(j, json_get(j, i, "heading"), length) ||
+                cell_shape(j, json_get(j, i, "body"), length) || !array(j, references) || !t ||
+                (t->kind != JSON_NULL && cell_shape(j, outcome, length)))
+                goto done;
+            for (k = references + 1; k < json_token(j, references)->next;
+                 k = json_token(j, k)->next)
+                if (cell_shape(j, k, length))
+                    goto done;
+        } else {
+            unsigned long long table, row;
+            size_t target = tables + 1, rows;
+            if (json_uint(j, json_get(j, i, "table"), &table) || table >= table_count ||
+                json_uint(j, json_get(j, i, "row"), &row) ||
+                (!json_equals(j, json_get(j, i, "section"), "public") &&
+                 !json_equals(j, json_get(j, i, "section"), "nonpublic") &&
+                 !json_equals(j, json_get(j, i, "section"), "unknown")))
+                goto done;
+            for (k = 0; k < table; k++)
+                target = json_token(j, target)->next;
+            rows = json_get(j, target, "rows");
+            k = rows + 1;
+            while (row && k < json_token(j, rows)->next) {
+                k = json_token(j, k)->next;
+                row--;
+            }
+            if (k >= json_token(j, rows)->next ||
+                !json_equals(j, json_get(j, target, "kind"), "agenda") ||
+                !json_equals(j, json_get(j, k, "status"), "rule-supported"))
+                goto done;
+        }
+        item_count++;
+    }
+    counts[0] += table_count;
+    counts[1] += item_count;
+    counts[3] += table_count || item_count;
+    counts[4] += json_equals(j, json_get(j, structure, "status"), "pdf-warnings") ||
+                 json_equals(j, json_get(j, structure, "status"), "unsupported-layout");
+    status = 0;
+done:
+    rt_free(layout);
+    return status;
+}
+
 typedef struct {
     size_t start, length;
 } Source;

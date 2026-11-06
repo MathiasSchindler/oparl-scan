@@ -323,8 +323,12 @@ int search_write(SearchBuilder *builder, const char *path) {
     rt_memset(&header, 0, sizeof(header));
     memcpy(header.magic, "OPARLIDX", 8);
     header.version = 3; header.endian = 0x01020304U; header.incomplete = builder->incomplete;
-    for (i = 0; i < builder->records.count; i++)
-        if (((const SearchRecord *)builder->records.data)[i].preparation) header.version = 4;
+    for (i = 0; i < builder->records.count; i++) {
+        const SearchRecord *r = &((const SearchRecord *)builder->records.data)[i];
+        if (r->preparation && header.version < 4) header.version = 4;
+        if (r->parent != NONE && r->preparation !=
+            ((const SearchRecord *)builder->records.data)[r->parent].preparation) header.version = 5;
+    }
     offsets[0] = aligned(sizeof(header));
     for (i = 0; i < 10; i++) offsets[i + 1] = offsets[i] + aligned(sizes[i]);
     header.strings = offsets[0]; header.records = offsets[1]; header.terms = offsets[2];
@@ -399,7 +403,7 @@ int search_open(SearchIndex *index, const char *path) {
         if (got <= 0) goto invalid;
         p += (size_t)got;
     }
-    if (memcmp(header.magic, "OPARLIDX", 8) == 0 && header.version != 3 && header.version != 4) {
+    if (memcmp(header.magic, "OPARLIDX", 8) == 0 && header.version != 3 && header.version != 4 && header.version != 5) {
         platform_close(fd);
         return search_error("unsupported index format; rebuild with oparl-index --input ARCHIVE --output INDEX", path);
     }
@@ -409,7 +413,7 @@ int search_open(SearchIndex *index, const char *path) {
         if (got <= 0) goto invalid;
         p += (size_t)got;
     }
-    if (memcmp(header.magic, "OPARLIDX", 8) != 0 || (header.version != 3 && header.version != 4) ||
+    if (memcmp(header.magic, "OPARLIDX", 8) != 0 || (header.version != 3 && header.version != 4 && header.version != 5) ||
         header.endian != 0x01020304U || header.size != info.size || header.reserved ||
         header.incomplete > 1 || !header.imported_at || header.imported_at > INT64_MAX ||
         header.strings != aligned(sizeof(header)) || header.string_bytes == 0) goto invalid;
@@ -1249,6 +1253,16 @@ static int print_results(SearchOutput *out, const SearchIndex *index, const Sear
                 tool_byte_buffer_free(&proof);
                 if (status) return -1;
             }
+            {
+                ToolByteBuffer preparation;
+                int status;
+                tool_byte_buffer_init(&preparation);
+                status = search_preparation_json(&preparation, index, r, hit->byte, 0);
+                if (!status) status = out_text(out, ",\"preparation\":") ||
+                    out_write(out, (const char *)preparation.data, preparation.size);
+                tool_byte_buffer_free(&preparation);
+                if (status) return -1;
+            }
             if (hit->paper != NONE && out_field_string(out, "relatedPaper",
                 index->strings + index->records[hit->paper].id) != 0) return -1;
             if (hit->paper != NONE && out_field_string(out, "relatedName",
@@ -1318,14 +1332,16 @@ const SearchRecord *search_find(const SearchIndex *index, const char *id, unsign
     return 0;
 }
 
-static int print_record(SearchOutput *out, const SearchIndex *index, const SearchRecord *r, int json) {
+static int print_record(SearchOutput *out, const SearchIndex *index, const SearchRecord *r, int json, int raw) {
     const char *body = index->strings + r->text + r->body_start;
-    ToolByteBuffer model;
+    ToolByteBuffer model, preparation;
     int status;
     if (!json) return out_line(out, r->page ? body : index->strings + r->payload);
     tool_byte_buffer_init(&model);
+    tool_byte_buffer_init(&preparation);
     status = search_model_json(&model, index, r);
-    if (status != 0) { tool_byte_buffer_free(&model); return -1; }
+    if (!status) status = search_preparation_json(&preparation, index, r, 0, raw ? 2 : 1);
+    if (status != 0) { tool_byte_buffer_free(&model); tool_byte_buffer_free(&preparation); return -1; }
     if (out_text(out, "{\"id\":") != 0 || out_string(out, index->strings + r->id) != 0 ||
         out_field_uint(out, "page", r->page) != 0 ||
         out_field_uint(out, "warnings", r->warnings) != 0 ||
@@ -1334,11 +1350,12 @@ static int print_record(SearchOutput *out, const SearchIndex *index, const Searc
         out_field_string(out, "text", body) != 0 ||
         out_text(out, ",\"metadata\":") != 0 ||
         out_text(out, r->payload ? index->strings + r->payload : "null") != 0 ||
-        (r->preparation && (out_key(out, "preparation") ||
-            out_text(out, index->strings + r->preparation))) ||
         out_key(out, "model") != 0 || out_write(out, (const char *)model.data, model.size) != 0 ||
+        out_key(out, "preparation") ||
+        out_write(out, (const char *)preparation.data, preparation.size) ||
         out_text(out, "}\n") != 0) status = -1;
     tool_byte_buffer_free(&model);
+    tool_byte_buffer_free(&preparation);
     return status;
 }
 
@@ -1351,7 +1368,7 @@ int search_print(int fd, const SearchIndex *index, const SearchResult *result, i
 int search_show(int fd, const SearchIndex *index, const SearchRecord *record, int json) {
     SearchOutput out;
     out.memory = 0; tool_output_buffer_init(&out.stream, fd);
-    return print_record(&out, index, record, json) != 0 || tool_output_buffer_flush(&out.stream) != 0 ? -1 : 0;
+    return print_record(&out, index, record, json, 1) != 0 || tool_output_buffer_flush(&out.stream) != 0 ? -1 : 0;
 }
 
 int search_results_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchResult *result) {
@@ -1365,9 +1382,12 @@ int search_json_quote(ToolByteBuffer *buffer, const char *text) {
 }
 
 int search_record_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchRecord *record) {
+    return search_record_view_json(buffer, index, record, 1);
+}
+int search_record_view_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchRecord *record, int raw) {
     SearchOutput out;
     out.memory = buffer;
-    return print_record(&out, index, record, 1);
+    return print_record(&out, index, record, 1, raw);
 }
 
 int search_status_json(ToolByteBuffer *buffer, const SearchIndex *index) {

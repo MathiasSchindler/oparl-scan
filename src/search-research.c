@@ -629,7 +629,8 @@ static int object_json(ToolByteBuffer *out, const SearchIndex *index, const Tool
             r->warnings & 8 ? "not-archived-at-index-build" : "missing-version-cause-unknown" :
             r->warnings & 8 ? "binary-present-extraction-failed" : "version-available");
     if (!status && r->preparation)
-        status = key(out, "preparation") || put(out, index->strings + r->preparation);
+        status = key(out, "preparation") ||
+            search_preparation_json(out, index, r, 0, collection ? 0 : 2);
     if (!status && !rt_strcmp(index->strings + r->kind, "Consultation")) status = consultation(out, index, entry->record, &json);
     if (!status && (!collection || index->actor_start[entry->record] != index->actor_start[entry->record+1])) {
         size_t i, count = 0;
@@ -816,7 +817,7 @@ int search_read_json(ToolByteBuffer *out, const SearchIndex *index, const char *
         return relations_json(out, index, (uint32_t)(root-index->records), request, error);
     if ((!rt_strcmp(operation, "get_object") || !rt_strcmp(operation, "get_meeting")) &&
         root && (request->raw || root->page || request->page))
-        return search_record_json(out, index, root) ? SEARCH_QUERY_RESOURCE : 0;
+        return search_record_view_json(out, index, root, request->raw) ? SEARCH_QUERY_RESOURCE : 0;
     if (request->raw && !rt_strcmp(operation, "get_paper") && root) {
         SearchCase context;
         if (search_case_open(&context, index, root, error)) return SEARCH_QUERY_RESOURCE;

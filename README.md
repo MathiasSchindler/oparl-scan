@@ -128,9 +128,12 @@ Die [Strukturstufe](docs/oparl-prepare.md#tabellen-und-top-bloecke) erschliesst
 Beratungstabellen, TOP-Bloecke in Protokollauszuegen und mehrseitige
 Tagesordnungen deterministisch aus Textpositionen. Jede Zelle behaelt
 Quelltextbereiche; Unsicherheiten und leere Zellen bleiben sichtbar.
-Vollstaendige Strukturen stehen zunaechst nur in den Prepare-Artefakten,
-im Index nur kompakte Zaehlungen. Keine allgemeine Tabellen-/Vollprotokoll-
-Erkennung und keine OCR.
+Ein vorbereiteter Index speichert auch die vollstaendigen Strukturen und
+Quelltexte. Web- und MCP-Suche zeigen Formularwerte sowie den passenden
+TOP oder die getroffene Tabellenzeile; Seitenabrufe liefern alle Befunde
+mit nachpruefbaren Quellen. Breite Bildschirme nutzen zweispaltige
+Trefferkarten, kleine Displays eine gestapelte Ansicht.
+Keine allgemeine Tabellen-/Vollprotokoll-Erkennung und keine OCR.
 
 `--year 2024` meint Drucksachenkennzeichen mit `24/`, nicht das Datum
 der Drucksache oder PDF. Verknuepfte spaetere Vorgaenge koennen ebenfalls
