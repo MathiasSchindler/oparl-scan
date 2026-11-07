@@ -103,8 +103,9 @@ build/macos-aarch64/oparl-search --serve --index build/search/index.ops \
 ```
 
 CLI, `/api/search?mode=semantic|hybrid`, Webformular und MCP-`search` verwenden
-denselben Suchkern. Im Webformular ist **Wortsuche** vorausgewaehlt; Thematisch
-und Hybrid werden erst bei eingerichtetem Companion freigeschaltet.
+denselben Suchkern. Im Webformular ist **Relevanz - Wortsuche** vorausgewaehlt; Thematisch
+und Kombiniert (API-Modus `hybrid`) werden erst bei eingerichtetem Companion
+freigeschaltet.
 `/api/semantic-status` meldet Titel/Abschnitte und eingeschlossene bzw.
 ausgeschlossene Hauptformulare. MCP-`get_index_status` enthaelt dieselbe Abdeckung.
 
@@ -360,6 +361,11 @@ Datei-/PDF-Seitentreffer enthalten ausserdem `documentUrl`, sofern
 die archivierten File-Metadaten eine nicht leere `downloadUrl` oder
 ersatzweise `accessUrl` nennen. Die URL wird nicht aus der OParl-ID
 oder dem lokalen Dateinamen erraten.
+Vorlagentreffer koennen `mainDocument` mit `fileId`, `documentUrl`, `fileName`
+und `documentVersion` des eindeutig verknuepften Hauptdokuments enthalten.
+Fehlende, nicht aufgeloeste oder mehrdeutige Hauptdokumentbeziehungen werden
+nicht durch beliebige Anlagen ersetzt. Der Metadatenbeleg bleibt unveraendert;
+die zugehoerige PDF-Fassung ist ein separater Dokumentverweis.
 Seitenzahlen beziehen sich auf die PDF-Seitenreihenfolge; Metadaten
 haben `page: 0`. Die Warnungsbits sind im
 [Abdeckungsbericht](oparl-index.md#abdeckungsbericht-und-vollstaendigkeit)
@@ -480,8 +486,21 @@ Metadaten und PDF-Seitentexte. Standard sind **50 Treffer pro Seite**;
 20 und 100 sind ebenfalls waehlbar. Vor-/Zurueck-Schaltflaechen oberhalb
 und unterhalb der Treffer erschliessen den gesamten Ergebnisbestand.
 Angezeigt werden Trefferbereich, Gesamttrefferzahl und Seitennummer.
-Die Sortierung kann zwischen Relevanz, neuestem und aeltestem Datum
-wechseln; ihre Bedeutung wird neben der Auswahl erklaert.
+Suchanfrage, Sortierung und Seitengroesse stehen in einem gemeinsamen
+Suchbereich oberhalb der Treffer. Ab 1.000 Pixel Ansichtsbreite stehen
+Suchanfrage, Sortierung, Seitengroesse und Suchschaltflaeche platzsparend
+in einer horizontalen Zeile. Auf Tablets und Handys bricht die Leiste um;
+Filter und Hilfe teilen sich eine kompakte Zeile und oeffnen sich bei Bedarf
+ueber die volle Breite.
+Die Auswahl bietet **Relevanz** mit den
+Varianten **Wortsuche**, **Thematisch** und **Kombiniert** sowie **Chronologisch**.
+Bei Chronologie kehrt der Pfeil die Richtung um: abwaerts bedeutet
+neueste zuerst, aufwaerts aelteste zuerst. Die Ausgangsrichtung ist abwaerts;
+spaetere Wechsel behalten die zuletzt gewaehlte Richtung.
+Chronologie behaelt die Suchart bei und zeigt sie als Kennzeichnung an.
+Eine Datumssortierung kann auch thematisch schwache Treffer nach vorne bringen;
+Suchlogik und Treffermenge werden dadurch nicht eingeschraenkt.
+Die Bedeutung der Verfahren steht unter "Hilfe zur Suche".
 Sortierungs- oder Seitengroessenwechsel beginnen wieder auf Seite 1.
 
 Trefferkarten zeigen Kennzeichen und Titel, eine kompakte Zeile mit Datum,
@@ -493,6 +512,9 @@ passende TOPs mit Ergebnistext, Beratungs-/Tagesordnungszeilen und
 die technischen Quellenangaben. Diese Bereiche sind standardmaessig geschlossen;
 Extraktionsfehler oder -warnungen bleiben an der Zusammenfassung erkennbar.
 Breite Anzeigen nutzen bis zu 1.920 Pixel.
+Auf Desktopansichten ab 1.000 Pixel werden Kopfbereich, Trefferabstaende,
+Textauszuege und Aktionszeilen kompakter dargestellt; auf kleinen Anzeigen
+bleiben die groesseren Abstaende erhalten.
 Die Details laden alle Seitenbefunde nach, einschliesslich unsicherer
 Formularfelder, Quellenzitaten, lokal scrollbaren Tabellen und Seitennavigation.
 Vollstaendige Layoutspannen bleiben der ausdruecklichen JSON-Rohsicht vorbehalten.
@@ -530,8 +552,8 @@ bezeichnet. In den Details stehen ein eindeutig belegter
 Sitzungstermin sowie Erstellungs-/Aenderungszeitstempel des Dateieintrags
 unter getrennten Beschriftungen. Ein Sitzungs- oder Metadatenzeitstempel
 wird nicht als Datum der PDF-Erstellung ausgegeben.
-Auf grossen Bildschirmen stehen Filter neben
-den Ergebnissen; auf kleinen darueber. "Suche eingrenzen" ist unabhaengig
+Filter stehen auf allen Bildschirmgroessen oberhalb der Ergebnisse.
+"Suche eingrenzen" und "Hilfe zur Suche" sind unabhaengig
 von der Bildschirmbreite standardmaessig geschlossen. Bei expliziten
 Suchfiltern in der URL wird der Filterbereich geoeffnet.
 
@@ -690,6 +712,9 @@ Ohne `--web-root` bleiben PDF-Links reine Verweise auf das RIS-Original.
 Mit dieser Option zeigt ein mindestens 250 Millisekunden langes
 Darueberfahren mit der Maus oder Tastaturfokus eine schwebende Canvas-Vorschau.
 Sie zeigt die Trefferseite, bei einem Dateitreffer die erste Seite.
+Auch Vorlagentreffer haben einen PDF-Link, wenn ihr Hauptdokument eindeutig
+im Index verknuepft ist. Dessen Vorschau zeigt die erste Seite der archivierten
+Fassung, nicht eine behauptete PDF-Fundstelle des Metadatentreffers.
 Der Klick, das Ziel und das Oeffnen im neuen Tab bleiben unveraendert.
 Die Vorschau schliesst nach Verlassen von Link und Vorschau, bei Escape,
 Fensterwechsel oder Entfernen des Treffers; sie bleibt innerhalb des Viewports.

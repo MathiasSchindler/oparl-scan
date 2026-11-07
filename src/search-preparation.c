@@ -16,7 +16,7 @@ static int property(ToolByteBuffer *out, const Json *json, size_t object, const 
     return put(out, ",") || json_quote(out, name) || put(out, ":") ||
            raw(out, json, json_get(json, object, name));
 }
-static uint32_t document_for(const SearchIndex *index, const SearchRecord *record) {
+uint32_t search_document_record(const SearchIndex *index, const SearchRecord *record) {
     uint32_t source = (uint32_t)(record - index->records), found = NONE;
     size_t low = 0, high = index->relation_count, i;
     if (record->parent != NONE)
@@ -219,7 +219,7 @@ int search_preparation_json(ToolByteBuffer *out, const SearchIndex *index,
                             const SearchRecord *record, uint32_t byte, int detail) {
     uint32_t file = detail && record->parent == NONE && !record->preparation
                         ? NONE
-                        : document_for(index, record);
+                        : search_document_record(index, record);
     const SearchRecord *document;
     const char *summary, *packet;
     Json json, page;

@@ -1171,15 +1171,21 @@ static int out_document_url(SearchOutput *out, const SearchIndex *index, const S
     const JsonToken *token;
     size_t value;
     int status = 0;
-    if (record->parent != NONE) record = &index->records[record->parent];
+    int main_document = !rt_strcmp(index->strings + record->kind, "Paper");
+    uint32_t file = search_document_record(index, record);
+    if (file == NONE) return 0;
+    record = &index->records[file];
     if (!record->payload || rt_strcmp(index->strings + record->kind, "File")) return 0;
     if (json_parse(&json, index->strings + record->payload, rt_strlen(index->strings + record->payload)) != 0)
         return search_error("cannot parse indexed File metadata", index->strings + record->id);
+    if (main_document)
+        status = out_key(out, "mainDocument") || out_text(out, "{\"fileId\":") ||
+            out_string(out, index->strings + record->id);
     value = json_get(&json, 0, "downloadUrl");
     token = json_token(&json, value);
     if (!token || token->kind == JSON_NULL || (token->kind == JSON_STRING && token->end - token->start == 2))
         token = json_token(&json, json_get(&json, 0, "accessUrl"));
-    if (token && token->kind != JSON_NULL) {
+    if (!status && token && token->kind != JSON_NULL) {
         if (token->kind != JSON_STRING) status = search_error("document URL is not a string", index->strings + record->id);
         else if (token->end - token->start > 2)
             status = out_key(out, "documentUrl") != 0 ||
@@ -1191,6 +1197,17 @@ static int out_document_url(SearchOutput *out, const SearchIndex *index, const S
         else if (token->end - token->start > 2)
             status = out_key(out, "fileName") != 0 ||
                 out_write(out, json.text + token->start, token->end - token->start) != 0 ? -1 : 0;
+    }
+    if (!status && main_document) {
+        uint32_t version = index->version_lookup[file];
+        status = out_key(out, "documentVersion");
+        if (!status && version != NONE) {
+            const SearchVersion *v = &index->versions[version];
+            status = out_text(out, "{\"id\":") || out_string(out, index->strings + v->id) ||
+                out_field_string(out, "sha256", index->strings + v->hash) ||
+                out_field_uint(out, "bytes", v->bytes) || out_text(out, "}");
+        } else if (!status) status = out_text(out, "null");
+        if (!status) status = out_text(out, "}");
     }
     json_free(&json);
     return status;

@@ -50,6 +50,8 @@ try {
   assert.equal(model.documentRole, null, 'An OParl Paper is not automatically a request or final answer');
   assert.equal(show(id('papers/suffix-only')).model.initiative, null);
   assert.deepEqual(show(id('papers/suffix-only')).model.relations.relatedPapers, []);
+  assert.equal(query('No inferred family').hits[0].mainDocument, undefined,
+    'do not invent a preview document when the Paper has no main-file relationship');
   assert.deepEqual(model.relations.directSources.map(r => [r.role, r.target]),
     [['paper.mainFile', id('files/school')]]);
   assert.deepEqual(model.relations.relatedPapers.map(r => r.target), [id('papers/tax-answer')]);

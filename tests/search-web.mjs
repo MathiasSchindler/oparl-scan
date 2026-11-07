@@ -94,6 +94,13 @@ export async function testSearchWeb(binary, index, fileId, archives) {
     const html = await page.text();
     assert.match(html, /<html lang="de">/);
     assert.match(html, /href="\/health"/);
+    const searchForm = html.match(/<form id="search"[^>]*>([\s\S]*?)<\/form>/)[1];
+    const detailsStart = searchForm.indexOf('<div class="search-details">');
+    assert.ok(detailsStart > 0);
+    const controls = searchForm.slice(0, detailsStart);
+    for (const control of ['id="q"', 'id="ordering"', 'id="chronology-direction"', 'name="limit"', 'class="search-submit"'])
+      assert.ok(controls.includes(control), 'all search controls share the responsive toolbar, separate from expanded details');
+    assert.doesNotMatch(html, /class="view-options"|Suchmodus/);
     assert.doesNotMatch(html, /id="coverage"|Index ist unvollstaendig/);
     assert.deepEqual(await (await get('/api/preview-status')).json(), { enabled: true });
     assert.deepEqual(await (await get('/api/semantic-status')).json(), { enabled: false });
@@ -230,19 +237,28 @@ export async function testSearchWeb(binary, index, fileId, archives) {
     assert.match(script.headers.get('content-type'), /text\/javascript/);
     const scriptText = await script.text();
     new Script(scriptText);
-    const filters = { open: false }, fields = new Map(), globalListeners = new Map();
+    const filters = { open: false }, fields = new Map(), globalListeners = new Map(), submissions = [];
     const initLocation = { search: '' };
     const initNodes = new Map([['#filters', filters]]);
     const initNode = selector => {
       if (!initNodes.has(selector)) initNodes.set(selector, {
-        dataset: {}, addEventListener() {}, replaceChildren() {}, setAttribute() {},
+        dataset: {}, listeners: new Map(), attributes: new Map(),
+        addEventListener(name, listener) { this.listeners.set(name, listener); },
+        replaceChildren() {},
+        setAttribute(name, value) { this.attributes.set(name, value); },
+        getAttribute(name) { return this.attributes.get(name); },
       });
       return initNodes.get(selector);
     };
     initNode('#search').elements = { namedItem(name) {
-      if (!fields.has(name)) fields.set(name, { addEventListener() {} });
+      if (!fields.has(name)) fields.set(name, { listeners: new Map(),
+        addEventListener(event, listener) { this.listeners.set(event, listener); } });
       return fields.get(name);
     } };
+    initNode('#search').requestSubmit = () => submissions.push(new URLSearchParams(
+      [...fields].filter(([, field]) => field.value).map(([name, field]) => [name, field.value])));
+    const ordering = initNode('#ordering'), direction = initNode('#chronology-direction'), method = initNode('#search-method');
+    ordering.options = ['lexical', 'semantic', 'hybrid', 'chronological'].map(value => ({ value }));
     new Script(scriptText.slice(0, scriptText.indexOf('async function health(')) +
       scriptText.slice(scriptText.indexOf('function initSearch('), scriptText.indexOf('async function showCase(')) +
       '\ninitSearch();').runInNewContext({
@@ -253,6 +269,28 @@ export async function testSearchWeb(binary, index, fileId, archives) {
       document: { querySelector: initNode, querySelectorAll: () => [] },
     });
     assert.equal(filters.open, false, 'ordinary searches keep filters collapsed, even on wide displays');
+    assert.equal(ordering.value, 'lexical');
+    assert.equal(direction.hidden, true);
+    assert.equal(method.hidden, true);
+    ordering.value = 'chronological';
+    ordering.listeners.get('change')();
+    assert.equal(submissions.at(-1).get('sort'), 'date-desc', 'chronology starts with newest first');
+    assert.equal(submissions.at(-1).get('mode'), 'lexical');
+    direction.listeners.get('click')();
+    assert.equal(submissions.at(-1).get('sort'), 'date-asc');
+    assert.equal(direction.textContent, '\u2191');
+    assert.match(direction.getAttribute('aria-label'), /Neueste zuerst anzeigen/);
+    ordering.value = 'hybrid';
+    ordering.listeners.get('change')();
+    assert.equal(submissions.at(-1).get('sort'), 'relevance');
+    assert.equal(submissions.at(-1).get('mode'), 'hybrid', 'combined relevance keeps the existing API mode');
+    assert.equal(direction.hidden, true);
+    ordering.value = 'chronological';
+    ordering.listeners.get('change')();
+    assert.equal(submissions.at(-1).get('sort'), 'date-asc', 'returning to chronology retains its direction');
+    assert.equal(submissions.at(-1).get('mode'), 'hybrid', 'chronology must not silently switch retrieval mode');
+    assert.equal(method.textContent, 'Suchart: Kombiniert');
+    assert.equal(method.hidden, false);
     filters.open = true;
     globalListeners.get('popstate')();
     assert.equal(filters.open, false, 'returning to ordinary search closes the previous filter panel');
@@ -260,6 +298,22 @@ export async function testSearchWeb(binary, index, fileId, archives) {
     globalListeners.get('popstate')();
     assert.equal(filters.open, true, 'explicit non-default date roles remain visible');
     assert.equal(fields.get('dateRole').value, 'created');
+    initLocation.search = '?mode=semantic&sort=date-asc&limit=100&offset=100&snapshotId=previous';
+    globalListeners.get('popstate')();
+    assert.equal(ordering.value, 'chronological', 'existing date-sorted semantic URLs restore the combined control');
+    assert.equal(method.textContent, 'Suchart: Thematisch');
+    assert.equal(direction.textContent, '\u2191');
+    direction.listeners.get('click')();
+    const changed = submissions.at(-1);
+    assert.equal(changed.get('mode'), 'semantic');
+    assert.equal(changed.get('sort'), 'date-desc');
+    assert.equal(changed.get('limit'), '100');
+    assert.equal(changed.has('offset'), false, 'control changes start on page one');
+    assert.equal(changed.has('snapshotId'), false, 'control changes do not reuse a pagination snapshot');
+    await delay(0);
+    assert.equal(ordering.options.find(option => option.value === 'semantic').disabled, true,
+      'unconfigured servers still disable thematic relevance');
+    assert.equal(ordering.options.find(option => option.value === 'hybrid').disabled, true);
     const presentation = new Script(scriptText.slice(0, scriptText.indexOf('async function health(')) +
       scriptText.slice(scriptText.indexOf('function renderHit('), scriptText.indexOf('async function search(params)')) +
       '\n({hitTitle,renderHit,renderPdfPage})').runInNewContext({
@@ -315,6 +369,15 @@ export async function testSearchWeb(binary, index, fileId, archives) {
     assert.equal(previewAction.rel, 'noopener noreferrer');
     assert.deepEqual({ ...previewAction.dataset }, { pdfHash, pdfPage: '2', pdfBytes: String(expectedPdf.length) },
       'preview uses the exact cited immutable version and one-based matching page');
+    const titlePreview = presentation.renderHit({ id: paperId, kind: 'Paper', page: 0, name: 'A paper title',
+      snippet: 'Matching metadata.', mainDocument: { fileId, documentUrl: originalUrl,
+        documentVersion: { id: 'urn:test:version', sha256: pdfHash, bytes: expectedPdf.length } },
+      evidence: { citation: { documentVersion: null }, relationshipPath: [] } }, 1);
+    const mainPdfLink = descendants(titlePreview).find(node => node.textContent === 'PDF \u00f6ffnen');
+    assert.equal(mainPdfLink.href, originalUrl, 'Paper title previews retain the main file original click target');
+    assert.deepEqual({ ...mainPdfLink.dataset }, { pdfHash, pdfPage: '1', pdfBytes: String(expectedPdf.length) });
+    assert.ok(visibleNodes(titlePreview).some(node => node.textContent === 'Metadatenauszug'),
+      'opening the main PDF does not relabel a metadata match as PDF text');
     const metadataHit = presentation.renderHit({ id: paperId, kind: 'Paper', page: 0,
       reference: '26/SVV/0001', name: 'A paper title', relatedName: 'A paper title',
       snippet: 'Matching metadata.', sortDate: { value: '2026-07-07', precision: 'day', role: 'paper.date' },

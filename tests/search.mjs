@@ -140,6 +140,13 @@ try {
   assert.match(phrase.hits[0].snippet, /sicherer Schulweg/);
   assert.equal(phrase.hits[0].relatedName, 'Schulweg vertraulich', 'document results expose the title of their matching Paper');
   assert.equal(phrase.hits[0].documentUrl, file(1).downloadUrl, 'PDF hits link to downloadUrl before accessUrl');
+  const titleHit = query('Schulweg', ['--kind', 'Paper']).hits[0];
+  assert.equal(titleHit.page, 0);
+  assert.equal(titleHit.evidence.citation.documentVersion, null, 'metadata citations must not become PDF page citations');
+  assert.equal(titleHit.mainDocument.fileId, file(1).id);
+  assert.equal(titleHit.mainDocument.documentUrl, file(1).downloadUrl);
+  assert.deepEqual(titleHit.mainDocument.documentVersion, phrase.hits[0].evidence.citation.documentVersion,
+    'metadata hits expose the exact canonical main-file version for previews without prepare artifacts');
   const page = JSON.parse(run(searcher, ['--index', index, '--show', file(1).id, '--page', '2', '--json']).stdout);
   assert.match(page.text, /sicherer Schulweg/);
   assert.equal(page.metadata.id, file(1).id);
