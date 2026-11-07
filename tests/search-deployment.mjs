@@ -4,9 +4,11 @@ import { readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { request } from 'node:http';
 
-const [base, binary, index] = process.argv.slice(2);
+const [base, binary, index, embeddings, model] = process.argv.slice(2);
 assert.ok(base && binary && index,
-  'Usage: node tests/search-deployment.mjs HTTP_URL LOCAL_SEARCH_BINARY LOCAL_INDEX');
+  'Usage: node tests/search-deployment.mjs HTTP_URL LOCAL_SEARCH_BINARY LOCAL_INDEX [EMBEDDINGS MODEL]');
+assert.equal(Boolean(embeddings), Boolean(model), 'Supply embeddings and model together.');
+const semanticArgs = embeddings ? ['--embeddings', embeddings, '--model', model, '--threads', '1'] : [];
 const origin = new URL(base).origin;
 assert.equal(new URL(base).protocol, 'http:', 'This check targets the HTTP proxy configuration.');
 const get = (path, headers = {}, method = 'GET', body) => new Promise((resolve, reject) => {
@@ -35,10 +37,16 @@ assert.equal(status.status, 200);
 const info = JSON.parse(status.body);
 assert.equal(info.indexBytes, (await stat(index)).size);
 assert.ok(info.records > 0 && info.terms > 0 && info.pages > 0);
-const localStatus = spawnSync(binary, ['--index', index, '--status', '--json'],
-  { encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+const localStatus = spawnSync(binary, ['--index', index, ...semanticArgs, '--status', '--json'],
+  { encoding: 'utf8', timeout: embeddings ? 120000 : 30000, maxBuffer: 8 * 1024 * 1024 });
 assert.equal(localStatus.status, 0, `${localStatus.error ?? ''}\n${localStatus.stderr}`);
-assert.deepEqual(info, JSON.parse(localStatus.stdout), 'Public service must load the complete current index.');
+const expectedStatus = JSON.parse(localStatus.stdout);
+if (embeddings) {
+  assert.equal(info.semantic?.enabled, true);
+  assert.equal(typeof info.semantic.modelLoaded, 'boolean');
+  expectedStatus.semantic.modelLoaded = info.semantic.modelLoaded;
+}
+assert.deepEqual(info, expectedStatus, 'Public service must load the complete current index.');
 const snapshotId = info.snapshotId;
 const preview = await get('/api/preview-status');
 assert.equal(preview.status, 200);
@@ -200,4 +208,34 @@ const badOriginBody = '{"jsonrpc":"2.0","id":1,"method":"ping"}';
 assert.equal((await get('/mcp', { Origin: 'https://untrusted.invalid', 'Content-Type': 'application/json',
   Accept: 'application/json, text/event-stream', 'Content-Length': String(Buffer.byteLength(badOriginBody)) },
 'POST', badOriginBody)).status, 403);
+if (embeddings) {
+  for (const parameters of [
+    { q: 'Computersicherheit f\u00fcr Lehrerinnen und Lehrer', mode: 'semantic', group: 'paper', limit: '5' },
+    { q: '21/SVV/1029', mode: 'hybrid', year: '2021', group: 'paper', limit: '5' },
+  ]) {
+    const response = await get('/api/search?' + new URLSearchParams(parameters));
+    assert.equal(response.status, 200, response.body);
+    const result = JSON.parse(response.body);
+    assert.equal(result.mode, parameters.mode);
+    assert.equal(result.snapshotId, snapshotId);
+    assert.equal(result.hits[0]?.reference, '21/SVV/1029');
+    const hit = result.hits[0];
+    assert.equal(hit.page, 0);
+    assert.equal(hit.evidence.citation.documentVersion, null);
+    const { sha256, bytes } = hit.mainDocument.documentVersion;
+    assert.match(hit.mainDocument.documentUrl, /^https:\/\/egov\.potsdam\.de\/public\/doc\?/);
+    const mainPdf = await get('/pdf/' + sha256 + '.pdf');
+    assert.equal(mainPdf.status, 200);
+    assert.equal(mainPdf.bytes.length, bytes);
+    assert.deepEqual(mainPdf.bytes, await readFile(join(dirname(index), 'web', 'pdf', sha256 + '.pdf')));
+    const mcp = await rpc('tools/call', { name: 'search',
+      arguments: { ...parameters, limit: Number(parameters.limit),
+        ...(parameters.year ? { year: Number(parameters.year) } : {}) } });
+    assert.equal(mcp.isError, false);
+    assert.deepEqual(mcp.structuredContent, result, 'Semantic MCP and HTTP results must match.');
+  }
+  const semanticStatus = await get('/api/semantic-status');
+  assert.equal(semanticStatus.status, 200);
+  assert.deepEqual(JSON.parse(semanticStatus.body), { ...info.semantic, modelLoaded: true });
+}
 console.log(`Deployment verified: ${info.records} records, ${info.indexBytes} bytes; ${grouped.length} unique Noosha groups; CLI parity, modern/legacy MCP and proxy guards passed.`);

@@ -1046,6 +1046,50 @@ Webroot und `pdf/` muessen echte Verzeichnisse sein, keine Symlinks.
 Die Originalarchive und der Preparation-Cache muessen nicht uebertragen werden.
 `source` bleibt dabei ein Herkunftspfad aus dem urspruenglichen Archiv.
 
+#### Optionaler nativer Embeddingbetrieb
+
+Die Basis-Unit bleibt fuer reine Wortsuche verwendbar. Fuer Thematisch und
+Kombiniert zusaetzlich das verifizierte native Modell unter
+`/opt/oparl-search/models/embeddinggemma/` und den Companion unter
+`/opt/oparl-search/embeddings/` installieren. Zum Modell gehoeren
+`manifest.json`, `tokenizer.eg2`, `weights.eg2` sowie Lizenz- und
+Konvertierungsprovenienz. Vom Companion nur `manifest.json` und die darin
+referenzierte vollstaendige unveraenderliche Generation samt Vektorcaches
+uebertragen. Snapshot und Modellrevision muessen zu Index und Modell passen.
+Alle Verzeichnisse gehoeren root, sind fuer das Dienstkonto lesbar und
+nicht beschreibbar. Bereits identische Index- und PDF-Dateien wiederverwenden;
+vorher SHA-256 vergleichen, nicht nur den Snapshotnamen.
+
+[oparl-search-embeddings.conf](../deploy/oparl-search-embeddings.conf) als
+`/etc/systemd/system/oparl-search.service.d/embeddings.conf` installieren.
+Dieser optionale Drop-in ergaenzt die Modell-/Companionpfade und setzt
+`MemoryMax=5G`; die Basis-Unit mit 3 GiB ist fuer Modellgewichte und
+Inferenzworkspace nicht ausreichend dimensioniert. `--threads 1` und die
+unveraenderte CPU-Quote von 100 Prozent begrenzen die Suche weiterhin auf
+ungefaehr einen CPU-Kern. Wortsuche bleibt die voreingestellte Suchart;
+angeforderte Semantik wird bei Fehlern nicht still durch Wortsuche ersetzt.
+Es gibt weder einen Modelldownload noch eine externe Inferenzruntime.
+
+Vor dem Wechsel das Linux-Binary mit echtem Modell und Companion als
+unprivilegierten Kandidaten auf einem separaten Loopbackport testen.
+Startzeit, kalte/warme Suchlatenz und RSS messen; die Suchanfragen muessen
+in das bestehende 15-Sekunden-Backendlimit des Proxys passen. Modellgewichte
+werden erst bei der ersten semantischen Anfrage geladen. Vorheriges Binary
+und Dienstkonfiguration fuer Rollback sichern. Nach Konfigurationspruefung
+und `systemctl daemon-reload` ausschliesslich `oparl-search.service`
+neu starten, nicht den Proxy oder die bestehenden Websites.
+`/api/semantic-status` zeigt Modellrevision, Jahrgaenge, Abdeckung und
+den Ladezustand des Modells.
+
+Der Linux/x86_64-Probelauf auf dem VPS (AMD EPYC, sechs vCPUs, 16 GiB RAM)
+bestand die nativen Primitive-/Worker-Tests und reale Corpusabfragen.
+Mit einem Inferenzthread dauerte der Start rund 33 Sekunden; die erste
+semantische Anfrage einschliesslich Modellladen 8,5 Sekunden, kurze warme
+Anfragen rund 0,25 bis 0,30 Sekunden. RSS lag nach dem Laden bei rund
+3,16 GiB, der beobachtete Spitzenwert bei 3,65 GiB. Das 5-GiB-Limit
+laesst deshalb Reserve oberhalb des gemessenen Kaltstarts; diese
+Beispielmessungen sind keine garantierte Latenz unter paralleler Last.
+
 Nach Installation und Konfigurationspruefung auf dem Server:
 
 ```sh
@@ -1075,6 +1119,16 @@ Sie prueft auch die aktivierte PDF-Vorschau, Renderer-Bytes und PDF-GET/HEAD:
 ```sh
 node tests/search-deployment.mjs http://178.254.23.157:8080/ \
   build/macos-aarch64/oparl-search build/search/index.ops
+```
+
+Bei aktiviertem Embeddingbetrieb die lokalen Vergleichsartefakte angeben;
+die Pruefung testet dann auch echte thematische und kombinierte Anfragen
+sowie deren MCP-Paritaet:
+
+```sh
+node tests/search-deployment.mjs http://178.254.23.157:8080/ \
+  build/macos-aarch64/oparl-search build/search/index.ops \
+  build/search/embeddings build/models/embeddinggemma
 ```
 
 Diese optionale Pruefung verwendet den realen Potsdamer Index fuer
