@@ -53,6 +53,7 @@ typedef struct { uint32_t term, record, position, byte; } SearchOccurrence;
 typedef struct { uint32_t text, start, count, documents; float idf; uint32_t reserved; } SearchTerm;
 typedef struct { uint32_t record, paper; } SearchOwner;
 typedef struct { uint32_t start, count, paper; } SearchLinks;
+typedef struct SearchEmbedding SearchEmbedding;
 typedef struct {
     ToolByteBuffer strings;
     ToolArray records, terms, occurrences, owners;
@@ -98,16 +99,20 @@ typedef struct {
     uint32_t *meeting_results;
     uint64_t *agenda_order;
     unsigned char *agenda_access, *agenda_results, *relation_hidden;
+    SearchEmbedding *embedding;
 } SearchIndex;
 
-/* Zero-initialize one workspace per concurrent caller; the index stays immutable. */
+/* Zero-initialize one workspace per caller; shared embedding inference is serialized. */
 typedef struct {
     void *parser, *allocation;
     size_t record_count, atom_capacity, hit_capacity, group_capacity;
+    void *embedding_allocation;
+    size_t embedding_capacity;
 } SearchWorkspace;
 
 typedef enum { SEARCH_RELEVANCE, SEARCH_DATE_DESC, SEARCH_DATE_ASC } SearchSort;
 typedef enum { SEARCH_RECORDS, SEARCH_PAPERS, SEARCH_DOCUMENTS } SearchGroup;
+typedef enum { SEARCH_LEXICAL, SEARCH_SEMANTIC, SEARCH_HYBRID } SearchMode;
 typedef struct {
     unsigned int year, limit, offset;
     SearchSort sort;
@@ -116,12 +121,15 @@ typedef struct {
     const char *date_from, *date_through;
     SearchDateRole date_role;
     const char *organization_id, *actor_id, *snapshot_id;
+    SearchMode mode;
 } SearchFilter;
 
 typedef struct {
     uint32_t record, byte, paper, matches;
     float score;
     uint32_t date_source, date_fact, date_role;
+    const char *semantic_text;
+    float semantic_score;
 } SearchHit;
 typedef struct {
     SearchHit hits[100];
@@ -134,6 +142,7 @@ typedef struct {
     int filter_only;
     const char *date_from, *date_through;
     unsigned int offset, limit;
+    SearchMode mode;
 } SearchResult;
 
 typedef struct {
@@ -145,7 +154,18 @@ typedef struct {
 
 typedef struct { ToolArray objects; int incomplete; } SearchCase;
 
-enum { SEARCH_QUERY_INVALID = -1, SEARCH_QUERY_RESOURCE = -2, SEARCH_QUERY_SNAPSHOT = -3, SEARCH_READ_NOT_FOUND = -4 };
+enum { SEARCH_QUERY_INVALID = -1, SEARCH_QUERY_RESOURCE = -2, SEARCH_QUERY_SNAPSHOT = -3, SEARCH_READ_NOT_FOUND = -4,
+       SEARCH_QUERY_UNAVAILABLE = -5 };
+typedef struct { const char *path; unsigned int year; } SearchEmbeddingArchive;
+int search_embedding_build(const char *path, const char *directory, const char *model,
+                           const char *prepared, const SearchEmbeddingArchive *archives,
+                           size_t count, unsigned int threads);
+int search_embedding_open(SearchIndex *index, const char *directory, const char *model, unsigned int threads);
+void search_embedding_close(SearchIndex *index);
+int search_embedding_scores(const SearchIndex *index, const char *query, float *scores,
+                            const char **texts, const char **error);
+int search_embedding_status_json(ToolByteBuffer *out, const SearchIndex *index);
+int search_embedding_source_json(ToolByteBuffer *out, const SearchIndex *index, const SearchHit *hit);
 
 void search_builder_init(SearchBuilder *builder);
 void search_builder_free(SearchBuilder *builder);
@@ -188,7 +208,10 @@ const SearchDate *search_hit_time(const SearchIndex *index, const SearchHit *hit
 const char *search_hit_date_text(const SearchIndex *index, const SearchHit *hit);
 int search_hit_date_json(ToolByteBuffer *out, const SearchIndex *index, const SearchHit *hit);
 int search_json_quote(ToolByteBuffer *buffer, const char *text);
-int search_serve(const SearchIndex *index, unsigned int port);
+int search_serve(const SearchIndex *index, unsigned int port, const char *web_root);
+int search_publish_pdfs(const SearchIndex *index, const char *input, const char *web_root);
+int search_pdf_open(const SearchIndex *index, const char *web_root, const char *hash,
+                    uint64_t *bytes, const char **error);
 int search_error(const char *message, const char *detail);
 const char *search_relation_role_name(unsigned int role);
 int search_research_build(SearchIndex *index);

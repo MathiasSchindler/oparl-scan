@@ -39,6 +39,10 @@ build/macos-aarch64/oparl-search --kind Paper --organization Fraktion \
 | Option | Bedeutung und Standard |
 | --- | --- |
 | `--index DATEI` | Suchindex; Standard `build/search/index.ops` |
+| `--embeddings VERZEICHNIS` | Optionaler, an den Snapshot gebundener nativer Vektorindex |
+| `--model VERZEICHNIS` | Native Modellartefakte; zusammen mit `--embeddings` |
+| `--threads N` | Inferenz-Worker, 1 bis 32; Standard 1 |
+| `--mode MODUS` | `lexical` (Standard), `semantic` oder `hybrid` |
 | `--year YYYY` | Referenzjahr einer Drucksache, 2000 bis 2099, nicht das Datum der PDF |
 | `--paper-type TYP` | Exakter Drucksachentyp, ohne Gross-/Kleinschreibung |
 | `--organization TEXT` | Teilstring der zustaendigen Organisation, ohne Gross-/Kleinschreibung |
@@ -67,13 +71,96 @@ build/macos-aarch64/oparl-search --kind Paper --organization Fraktion \
 | `--page N` | Zusammen mit `--show`: extrahierten PDF-Seitentext abrufen; Seiten ab 1 |
 | `--serve` | Lokale Weboberflaeche und JSON-API auf `127.0.0.1` starten |
 | `--port N` | Mit `--serve`: TCP-Port, 1 bis 65535; Standard 8080 |
+| `--web-root VERZEICHNIS` | Mit `--serve`: lokale PDF-Hovervorschau aus `VERZEICHNIS/pdf/` aktivieren |
+| `--publish-pdfs VERZEICHNIS` | Indexierte PDF-Fassungen als gepruefte Kopien nach `VERZEICHNIS/pdf/` publizieren |
+| `--input VERZEICHNIS` | Mit `--publish-pdfs`: Archiv oder unmittelbar uebergeordnetes Verzeichnis; Standard `downloads` |
 | `--help` | Kurze Kommandozeilenhilfe |
 
-Einzelne Suchanfrage, `--batch`, `--show` und `--serve` sind alternative
+Einzelne Suchanfrage, `--batch`, `--show`, `--serve` und `--publish-pdfs` sind alternative
 Betriebsarten. `--benchmark` gehoert zu einer einzelnen Suchanfrage
 und kann nicht mit `--batch` oder `--show` kombiniert werden.
 Im Webmodus werden Filter pro HTTP-Anfrage gesetzt; CLI-Filter und
 `--json` sind dort nicht zulaessig.
+
+## Thematische und hybride Suche
+
+[Der Indexer](oparl-index.md#optionale-native-embeddings) erzeugt den optionalen
+Companion. Ohne ihn bleiben Wortsuche und deren Ausgabe unveraendert.
+
+```sh
+build/macos-aarch64/oparl-search --index build/search/index.ops \
+  --embeddings build/search/embeddings --model build/models/embeddinggemma \
+  --threads 12 --mode semantic --group paper \
+  'Computersicherheit fuer Lehrerinnen und Lehrer'
+
+build/macos-aarch64/oparl-search --index build/search/index.ops \
+  --embeddings build/search/embeddings --model build/models/embeddinggemma \
+  --mode hybrid --group paper '21/SVV/1029'
+
+build/macos-aarch64/oparl-search --serve --index build/search/index.ops \
+  --embeddings build/search/embeddings --model build/models/embeddinggemma \
+  --threads 12 --web-root build/search/web --port 8081
+```
+
+CLI, `/api/search?mode=semantic|hybrid`, Webformular und MCP-`search` verwenden
+denselben Suchkern. Im Webformular ist **Wortsuche** vorausgewaehlt; Thematisch
+und Hybrid werden erst bei eingerichtetem Companion freigeschaltet.
+`/api/semantic-status` meldet Titel/Abschnitte und eingeschlossene bzw.
+ausgeschlossene Hauptformulare. MCP-`get_index_status` enthaelt dieselbe Abdeckung.
+
+Thematisch behandelt die Anfrage als natuerliche Sprache, nicht als
+AND/OR-Ausdruck. Maximal 4096 UTF-8-Bytes und 256 Tokens einschliesslich
+Anfragepraefix; zu lange oder leere Anfragen werden abgewiesen, nicht gekuerzt.
+Hybrid verwendet weiterhin die Wortsuchsyntax und bettet denselben
+Anfragetext zusaetzlich ein.
+
+Thematische Relevanz ist das Skalarprodukt normalisierter 768-dimensionaler
+Vektoren (Kosinus). Pro PDF-Seite gilt der beste eingeschlossene Abschnitt,
+pro Vorgang bei `group=paper` der beste passende Titel-/Seitenhit.
+Hybrid bildet die Vereinigung aller Wort- und Vektorkandidaten und addiert
+`BM25 / (1 + BM25)` zur vorhandenen Kosinuskomponente; nur Worttreffer erhalten
+allein die normierte Wortkomponente. Das ist eine feste gewichtete Fusion,
+kein RRF und keine Wahrscheinlichkeit. Diese erste Gewichtung ist noch keine
+empirisch kalibrierte Relevanzmetrik. Thematisch liefert eine Rangfolge des
+eingebetteten Bestands, keine kalibrierte Mindestschwelle fuer Relevanz.
+
+Alle Metadaten-/Akteurs-/Datumsfilter, Zaehl- und Gruppierungsregeln sowie die
+Snapshot-Pagination gelten fuer den **vollstaendigen Kandidatenbestand**.
+Nicht erst Top-25-Listen filtern oder fusionieren. `sort=date-asc|date-desc`
+behauptet auch bei semantischen Treffern keine neuen Dokumentdaten.
+
+Die JSON-Felder `semantic.cosine`, `semantic.source` und `semanticText`
+kennzeichnen die Zusatzquelle. PDF-Abschnitte behalten SHA-256, echte
+PDF-Seiten (`pageFirst`/`pageLast`) und ihre Chunk-ID. `joinedTextStart/End`
+sind UTF-8-Bytes im mit zwei Zeilenumbruechen verbundenen Prepare-Seitentext,
+**nicht** Bytepositionen in `layout.text` oder Worttrefferpositionen.
+Deshalb wird fuer solche Treffer kein erfundener matching-text-TOP-/Tabellenkontext
+ausgegeben. Die normale Seitencitation und PDF-Hovervorschau bleiben erhalten;
+ein Klick fuehrt weiterhin zum RIS-Original.
+
+Gewichte werden erst bei der ersten thematischen/hybriden Anfrage geladen und
+danach im Prozess behalten. Ein angeforderter Modus ohne Companion ergibt
+einen expliziten Fehler (HTTP 503); ungueltige Manifeste, Vektoren, PDF-/Text- oder
+Snapshot-Zuordnungen verhindern das Laden. Keine stille Wortsuch-Ausweichantwort.
+
+**Speicher:** Zusaetzlich zum rund 2-GiB-Volltextindex sind FP32-Gewichte
+(rund 1 GiB), Workspace und auf geeigneten Apple-Silicon-Systemen SME-Panels
+einzuplanen. Das bisherige oeffentliche 3-GiB-Dienstlimit reicht dafuer nicht
+zuverlaessig; vor einer Bereitstellung Spitzenverbrauch messen und das
+Gesamtbudget anpassen. Der oeffentliche Dienst wird durch diese Einrichtung
+nicht automatisch veraendert. Linux/x86_64 verwendet den portablen CPU-Pfad,
+nicht die Apple-SME-Optimierung; Crossbuilds allein belegen weder Laufzeit noch
+vergleichbare Geschwindigkeit.
+
+Gezielte Pruefung mit vorhandenen Modellartefakten:
+
+```sh
+make build/macos-aarch64/test-embedding
+build/macos-aarch64/test-embedding
+node tests/search-embedding.mjs build/macos-aarch64/oparl-prepare \
+  build/macos-aarch64/oparl-index build/macos-aarch64/oparl-search \
+  build/models/embeddinggemma
+```
 
 ## Suchsyntax
 
@@ -397,11 +484,16 @@ Die Sortierung kann zwischen Relevanz, neuestem und aeltestem Datum
 wechseln; ihre Bedeutung wird neben der Auswahl erklaert.
 Sortierungs- oder Seitengroessenwechsel beginnen wieder auf Seite 1.
 
-Trefferkarten zeigen neben dem abgesetzten Auszug automatisch erschlossene
-PDF-Fakten, passende TOPs mit Ergebnistext oder Beratungs-/Tagesordnungszeilen.
-Ab 1.280 CSS-Pixeln stehen Auszug und Fakten nebeneinander; darunter
-werden sie gestapelt. Breite Anzeigen nutzen bis zu 1.920 Pixel.
-Die PDF-Details laden alle Seitenbefunde nach, einschliesslich unsicherer
+Trefferkarten zeigen Kennzeichen und Titel, eine kompakte Zeile mit Datum,
+Typ und Organisation sowie einen einmalig beschrifteten Textauszug.
+Die PDF-Seite steht nur am Auszug; Dateiname, technische Datumsrollen und
+Erstellungs-/Aenderungszeitstempel wiederholen sich nicht in der Trefferliste.
+Unter "Details und Quellen" stehen automatisch erschlossene PDF-Fakten,
+passende TOPs mit Ergebnistext, Beratungs-/Tagesordnungszeilen und
+die technischen Quellenangaben. Diese Bereiche sind standardmaessig geschlossen;
+Extraktionsfehler oder -warnungen bleiben an der Zusammenfassung erkennbar.
+Breite Anzeigen nutzen bis zu 1.920 Pixel.
+Die Details laden alle Seitenbefunde nach, einschliesslich unsicherer
 Formularfelder, Quellenzitaten, lokal scrollbaren Tabellen und Seitennavigation.
 Vollstaendige Layoutspannen bleiben der ausdruecklichen JSON-Rohsicht vorbehalten.
 
@@ -413,9 +505,10 @@ Sitzung. Mehrdeutiger oder fehlender Kontext faellt auf den archivierten
 Dateinamen zurueck, nicht auf eine erfundene Vorlagenzuordnung.
 Die JSON-Suche liefert dafuer `fileName` sowie `sourceName`/`sourceKind`
 an den belegten Quellenkanten; Rohname, Gruppierung und Besitzbeziehungen
-bleiben unveraendert. Dokumentnamen wie "Sammeldokument oeffentlich",
-PDF-Seitennummer, Drucksachenkennzeichen, Typ und Datum bleiben separat
-sichtbar. Alle Treffertitel sind Links: Vorlagen und direkt zugeordnete
+bleiben unveraendert. Dokumentnamen wie "Sammeldokument oeffentlich" bleiben
+in den aufklappbaren Details erhalten. PDF-Seitennummer,
+Drucksachenkennzeichen, Typ und Datum bleiben sichtbar.
+Alle Treffertitel sind Links: Vorlagen und direkt zugeordnete
 Dokumente fuehren zur lokalen Vorgangsseite, Sitzungen zur Sitzungsseite.
 Dokumente ohne direkten Vorlagenbesitzer verweisen auf die Original-PDF;
 fehlt eine nutzbare Dokument-URL, auf die lokal archivierten Metadaten
@@ -429,16 +522,18 @@ in den aufklappbaren Details. Die Websuche verwendet standardmaessig
 `group=paper`: ein Treffer pro Vorgang mit Hinweis auf weitere passende
 Fundstellen. Ausschnitte fassen aufeinanderfolgende Leerraeume zusammen.
 Sie erscheinen in einem farblich abgesetzten Zitatfeld, beschriftet als
-PDF-Textauszug mit Seite oder als Metadatenauszug. Quellenrollen,
+PDF-Text mit Seite oder als Metadatenauszug. Quellenrollen,
 SHA-256 und Fassungslinks stehen nur in den aufklappbaren Details;
 die strukturierten Belege in JSON/MCP bleiben erhalten.
 Ein fehlendes Dokumentdatum wird ausdruecklich als nicht angegeben
-bezeichnet. Zusaetzlich zeigt die Ansicht einen eindeutig belegten
+bezeichnet. In den Details stehen ein eindeutig belegter
 Sitzungstermin sowie Erstellungs-/Aenderungszeitstempel des Dateieintrags
 unter getrennten Beschriftungen. Ein Sitzungs- oder Metadatenzeitstempel
 wird nicht als Datum der PDF-Erstellung ausgegeben.
 Auf grossen Bildschirmen stehen Filter neben
-den Ergebnissen; auf kleinen darueber, mit ausklappbaren Filtern.
+den Ergebnissen; auf kleinen darueber. "Suche eingrenzen" ist unabhaengig
+von der Bildschirmbreite standardmaessig geschlossen. Bei expliziten
+Suchfiltern in der URL wird der Filterbereich geoeffnet.
 
 Suchanfragen, Filter, Sortierung und Seitenposition stehen in der
 Browser-URL; Vor-/Zuruecknavigation wird unterstuetzt.
@@ -589,6 +684,68 @@ bleiben gleich. Mit Ctrl+C den Dienst beenden.
 Ein neuer Index wird **nicht automatisch nachgeladen**; nach einem
 Neuaufbau den Dienst neu starten.
 
+### Optionale lokale PDF-Vorschau
+
+Ohne `--web-root` bleiben PDF-Links reine Verweise auf das RIS-Original.
+Mit dieser Option zeigt ein mindestens 250 Millisekunden langes
+Darueberfahren mit der Maus oder Tastaturfokus eine schwebende Canvas-Vorschau.
+Sie zeigt die Trefferseite, bei einem Dateitreffer die erste Seite.
+Der Klick, das Ziel und das Oeffnen im neuen Tab bleiben unveraendert.
+Die Vorschau schliesst nach Verlassen von Link und Vorschau, bei Escape,
+Fensterwechsel oder Entfernen des Treffers; sie bleibt innerhalb des Viewports.
+Bei schmalen Anzeigen liegt sie oberhalb oder unterhalb statt neben dem Link.
+Touch-Klicks werden nicht durch eine Hover-Aktion abgefangen.
+
+```sh
+git submodule update --init vendor/pdf-reader
+make build/macos-aarch64/oparl-search
+
+build/macos-aarch64/oparl-search --index build/search/index.ops \
+  --publish-pdfs build/search/web --input downloads
+
+build/macos-aarch64/oparl-search --serve --index build/search/index.ops \
+  --web-root build/search/web --port 8080
+```
+
+Der native Publikationslauf liest nur lokale Archive einschliesslich
+`history/documents/`; er startet keine RIS-Anfragen, Preparation oder Indexierung.
+Er gleicht die tatsaechlichen PDF-Bytes mit den SHA-256-Fassungen des
+geladenen Indexes ab, dedupliziert gleiche Inhalte und schreibt unabhaengige,
+atomar installierte Kopien nach `pdf/<sha256>.pdf`. Vorhandene Kopien werden
+geprueft und wiederverwendet. Fehlende Fassungen oder beschaedigte Kopien
+sind ausdrueckliche Fehler (Exit 1); bereits publizierte Kopien bleiben erhalten.
+Nach einem Indexneuaufbau den Publikationslauf wiederholen und den Dienst
+mit dem neuen Index starten. Veraltete Kopien werden nicht automatisch geloescht.
+
+`/pdf/<sha256>.pdf` unterstuetzt GET/HEAD und liefert nur Fassungen des
+geladenen Indexes. Groesse und Hash werden vor jeder Auslieferung geprueft;
+Symlinks als PDF-Datei oder unmittelbar konfiguriertes PDF-Verzeichnis
+werden abgelehnt. Es gibt keinen beliebigen Dateizugriff, URL-Proxy oder
+automatischen externen Fallback. `source` wird nicht zu einem Downloadpfad.
+
+Der CC0-Renderer [pdf-crumb.js](https://github.com/MathiasSchindler/pdf-reader)
+ist als Submodul auf Commit `29187bdb1a8079857771342ce2d69f941fd95604` fixiert.
+Nur sein vollstaendiges ESM-Bundle mit Diagnostik wird eingebettet, nicht
+PDF.js oder die Upstream-Beispieldateien. Renderer und Vorschaucontroller
+kommen aus dem C-Binary; der Server benoetigt keine weitere Runtime.
+Das Renderer-Modul und die ganze PDF werden erst fuer die Vorschau geladen,
+nicht fuer die normale Trefferliste. Das Eingabelimit des Renderers
+(128 MiB) wird vor dem PDF-Abruf anhand der indexierten Groesse geprueft;
+Laden und Rendern werden auf 15 Sekunden begrenzt. Maximal zwei Dokumente
+mit zusammen hoechstens 16 MiB PDF-Eingabedaten bleiben im Vorschaucache.
+PDF-Antworten haben zusaetzlich eine Gesamtfrist von zehn Sekunden.
+
+Die Anzeige ist ausdruecklich experimentell: Nicht unterstuetzte Funktionen
+und Diagnosewarnungen erscheinen an der Vorschau; Fehler zeigen eine
+Fehlermeldung statt einer scheinbar korrekten leeren Seite.
+Das RIS-Original bleibt der verlaessliche Ausweg. Es gibt keine Frames,
+externen Renderingdienste, OCR oder Ausfuehrung aktiver PDF-Aktionen.
+Die CSP erlaubt fuer eingebettete Bilder und Fonts nur notwendige lokale
+beziehungsweise Blob-Quellen, keine externen Ressourcen.
+Eine oeffentliche Bereitstellung der Kopien ist ein separater Deployment-
+und Rechtepruefungsschritt; oeffentliche Abrufbarkeit allein klaert
+nicht die Weiterveroeffentlichungsrechte saemtlicher Anlagen.
+
 ### JSON-API
 
 Alle Endpunkte sind nur lesend und unterstuetzen `GET` und `HEAD`.
@@ -597,6 +754,7 @@ Antworten sind UTF-8-JSON; `HEAD` liefert keinen Antwortkoerper.
 | Endpunkt | Parameter | Antwort |
 | --- | --- | --- |
 | `/api/status` | Keine | Zaehler und Abdeckung, `formatVersion`, `snapshotId`, `importedAtEpochSeconds`, `relations`, `documentVersions`, `textSections` des geladenen Indexes |
+| `/api/preview-status` | Keine | `enabled`: ob lokale PDF-Vorschauen mit `--web-root` aktiviert sind |
 | `/api/search` | `q` oder einschraenkende Auflistung; `year`, `paperType`, `organization`, `organizationId`, `actorId`, `kind`, `limit`, `offset`, `sort`, `group`, `dateRole`, `dateFrom`, `dateThrough`, `snapshotId` | CLI-Suchstruktur |
 | `/api/object` | `id`; optional `page`, `fields`, `raw`, `snapshotId` | Kompaktes Einzelobjekt oder explizite Rohdaten/Seitentext |
 | `/api/object?view=relations` | `id`; `direction`, `limit`, `offset`, `snapshotId` | Vollstaendige typisierte Beziehungen, paginiert; nicht mit `page`, `fields` oder `raw` kombinierbar |
@@ -636,9 +794,9 @@ curl http://127.0.0.1:8080/api/status
 
 `curl` ist hier nur ein Beispiel fuer einen API-Client, keine
 Laufzeitabhaengigkeit des Dienstes. Metadaten ohne Seite werden durch
-Weglassen von `page` abgerufen. Original-PDFs werden nicht lokal
-ausgeliefert oder durch den Dienst geleitet: Die Oberflaeche verlinkt
-ihre archivierte Original-URL. `source` bleibt ein lokaler Quellenpfad,
+Weglassen von `page` abgerufen. PDF-Links behalten ihre archivierte
+Original-URL; nur die optionale Hovervorschau nutzt mit `--web-root`
+unveraenderliche lokale PDF-Kopien. `source` bleibt ein lokaler Quellenpfad,
 kein Download-Endpunkt.
 
 Fehlerantworten haben die Form `{"error":"Beschreibung"}`:
@@ -829,6 +987,7 @@ Auf dem Server werden folgende Dateien installiert:
 | `/opt/oparl-search/oparl-search` | Linux-Binary aus `build/linux-x86_64/` |
 | `/opt/oparl-search/index.ops` | Suchindex aus `build/search/` |
 | `/opt/oparl-search/index.ops.coverage.jsonl` | Abdeckungsbericht zum Index |
+| `/opt/oparl-search/web/pdf/<sha256>.pdf` | Gepruefte unveraenderliche PDF-Kopien fuer die Hovervorschau |
 | `/etc/oparl-search/apache.conf` | Eigenstaendige Proxykonfiguration aus der lokalen `deploy/apache.conf` |
 | `/etc/systemd/system/oparl-search.service` | Suchprozess als Benutzer `oparl-search` |
 | `/etc/systemd/system/oparl-search-proxy.service` | Proxy als Benutzer `oparl-search-proxy` |
@@ -851,9 +1010,15 @@ Ein zusaetzliches Access-Log mit Suchanfragen wird nicht geschrieben.
 **Dies ist ein oeffentlich lesbarer HTTP-Dienst ohne Anmeldung oder TLS.**
 Nicht fuer vertrauliche Anfragen oder beliebige hohe Last einsetzen.
 Fuer HTTPS zuerst einen passenden Domainnamen und TLS am Proxy einrichten.
-Die PDF-Dateien werden weiterhin beim Originalanbieter geoeffnet.
-Fuer den Suchdienst genuegt der selbststaendige Index mit Metadaten und
-Volltexten; die Downloadarchive muessen nicht uebertragen werden.
+Der Klick oeffnet PDF-Dateien weiterhin beim Originalanbieter.
+Die Dienstvorlage aktiviert mit `--web-root /opt/oparl-search/web` die
+lokale Hovervorschau. Dazu die mit `--publish-pdfs` erzeugten PDF-Kopien
+einschliesslich ihrer SHA-256-Pruefsummen uebertragen und vor der Aktivierung
+pruefen; das Verzeichnis und die Dateien gehoeren root und sind fuer das
+Dienstkonto nur lesbar. Ohne Vorschau genuegt der selbststaendige Index
+mit Metadaten und Volltexten; dann `--web-root` aus der Unit entfernen.
+Webroot und `pdf/` muessen echte Verzeichnisse sein, keine Symlinks.
+Die Originalarchive und der Preparation-Cache muessen nicht uebertragen werden.
 `source` bleibt dabei ein Herkunftspfad aus dem urspruenglichen Archiv.
 
 Nach Installation und Konfigurationspruefung auf dem Server:
@@ -879,15 +1044,17 @@ Apache-Konfigurationen pruefen; dabei sind kurze Unterbrechungen moeglich.
 
 Die externe Pruefung vergleicht Suchantworten bytegleich mit der lokalen
 CLI und testet Index-Snapshot, Vorgangsseiten, JSON, HEAD, die acht
-MCP-Werkzeuge, Snapshot-Pagination sowie die Host-/Origin-Grenzen:
+MCP-Werkzeuge, Snapshot-Pagination sowie die Host-/Origin-Grenzen.
+Sie prueft auch die aktivierte PDF-Vorschau, Renderer-Bytes und PDF-GET/HEAD:
 
 ```sh
 node tests/search-deployment.mjs http://178.254.23.157:8080/ \
   build/macos-aarch64/oparl-search build/search/index.ops
 ```
 
-Diese optionale Pruefung verwendet den realen Potsdamer Index mit Daten
-fuer 2024 und 2026; sie laeuft nicht als Teil der kleinen Fixture-Tests.
+Diese optionale Pruefung verwendet den realen Potsdamer Index fuer
+2021 bis 2026 und die lokalen publizierten Kopien unter `web/pdf/` neben
+dem Index; sie laeuft nicht als Teil der kleinen Fixture-Tests.
 
 Fuer eine Aktualisierung den neuen Index zunaechst unter einem anderen
 Dateinamen uebertragen, SHA-256 mit dem lokalen Original vergleichen,
@@ -899,6 +1066,11 @@ Bei Programm- oder Indexformatwechseln Binary und Index gemeinsam
 aktualisieren und die passende bisherige Kombination fuer eine
 Ruecknahme sichern. Den bereitgestellten neuen Stand vor dem Umschalten
 mit `--status --json` pruefen.
+Bei aktivierter Vorschau ausserdem alle im neuen Index benoetigten PDF-Fassungen
+vor dem Neustart publizieren und ihre uebertragenen SHA-256-Pruefsummen pruefen.
+Neue Daten zunaechst in einem separaten Release-Verzeichnis bereitstellen;
+die bisherige Kombination aus Binary, Index, Unit und realem Webroot
+bis nach der oeffentlichen Abnahme fuer eine Ruecknahme behalten.
 
 ## Vollstaendigkeit und Exitcodes
 
@@ -965,7 +1137,7 @@ ausgelassen oder durch einen ungeprueften Cache ersetzt.
 Generische Linux-/Windows-ARM64-Builds behalten die portable Implementierung.
 
 Die [systemd-Vorlage](../deploy/oparl-search.service) erlaubt dem Suchbackend
-2 GiB Speicher. Das laesst bei einem vorbereiteten Index von rund 1,35 GB
+3 GiB Speicher. Das laesst beim Index der Jahrgaenge 2021 bis 2026 von rund 2,1 GB
 Platz fuer Validierung, Zuordnungstabellen und laufende Anfragen.
 
 Beim Laden entstehen kompakte Zuordnungstabellen fuer die einmal pro

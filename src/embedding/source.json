@@ -1,0 +1,24 @@
+{
+  "source": "Initial import from the user-owned EmbeddingGemma experiment; maintained as OParl project source",
+  "source_sha256": {
+    "eg2.h": "11ca75fb1dc1d75061eaedac7d978e473052920574ca74cd2ddad53fba6f7327",
+    "bundle.c": "91337c7d2928a3d19c8bdba1b2a0741cb64070abb76114d5456d9d23464f11c7",
+    "tokenizer.c": "6b99aad73604f0dab3fdeff8c3b0fa72ec4211d8b56cd1ea1afa77be3dcb81d3",
+    "model.c": "f56d00c79d2736f58af72bcc41adaee4d0e857f29cdf30c7892dcfdfeceb4485",
+    "kernels.c": "9523872a655d30eba1ca8ee8d699b4bd4f0ea2ef2ca6f13ebabd4c24f1544584",
+    "sme.c": "c789044bf034a3194d49d6da16c7a22de243f957702efd9d2ab55565eaa5982c",
+    "vectors.c": "9fe3711d9f7ef81970aa7dae828cdee80b3f0c2ee5abb5b8250c804f39465da9",
+    "index_io.c": "7ab0d7a5489ec3b7cf6f778b5c2a3d7d1cddaec2c00c7f075a21c03a003a7b32",
+    "index_io.h": "b471dcdc712fff1f65b6e17452488971e772d32f10472cb255645543b31cd495",
+    "sections.c": "8d58a1992a6cff7158b907b8d7003ad71355fc8eff20231ab16e429ca76a56cf",
+    "sections.h": "881c35669810a1dc9eeb965d82571320167169f20d7426acaac1563a0f2b7c71",
+    "search.c": "e05fed8e9d3b8e06269c17b5e0313f08763268affa0c031abf0706ad26e3f7f4",
+    "search.h": "280770fec07ff85c1402aba25ca6fda18eac314cbf3e268c639383b2388c2912",
+    "content_search.c": "199f353e0978b3c444764ec85b0127c0a6f59e9a4470f76b856e76076c94a117",
+    "index.c": "befb45512bea172610763cd5eaa45571d2490cfa7c6cc79200b5e75ebb367fa7",
+    "section_index.c": "0a5bfb2f1f56383a0846893fe9ad22a715fd09da9400aeb1bbf8a9412d9546a7",
+    "json.c": "49599fda3be0c3d0777cdc404459f21c3812ce663c9dd220776763f8cb8d11a5",
+    "json.h": "ad973cc719ea849db7bca01b80eccd56312864182dae6f0d6ce1112581da7d34"
+  },
+  "adaptation": "Namespace JSON symbols/types with eg_ / Eg to coexist with OParl JSON; runtime is supplied by the parent project."
+}

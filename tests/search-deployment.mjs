@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { request } from 'node:http';
 
 const [base, binary, index] = process.argv.slice(2);
@@ -19,10 +20,11 @@ const get = (path, headers = {}, method = 'GET', body) => new Promise((resolve, 
       else chunks.push(chunk);
     });
     response.on('error', reject);
-    response.on('end', () => resolve({
-      status: response.statusCode, headers: response.headers,
-      body: Buffer.concat(chunks).toString('utf8'),
-    }));
+    response.on('end', () => {
+      const bytes = Buffer.concat(chunks);
+      resolve({ status: response.statusCode, headers: response.headers,
+        body: bytes.toString('utf8'), bytes });
+    });
   });
   req.on('timeout', () => req.destroy(new Error('Deployment request timed out')));
   req.on('error', reject);
@@ -38,6 +40,30 @@ const localStatus = spawnSync(binary, ['--index', index, '--status', '--json'],
 assert.equal(localStatus.status, 0, `${localStatus.error ?? ''}\n${localStatus.stderr}`);
 assert.deepEqual(info, JSON.parse(localStatus.stdout), 'Public service must load the complete current index.');
 const snapshotId = info.snapshotId;
+const preview = await get('/api/preview-status');
+assert.equal(preview.status, 200);
+assert.deepEqual(JSON.parse(preview.body), { enabled: true });
+const renderer = await get('/pdf-crumb.js');
+assert.equal(renderer.status, 200);
+assert.equal(renderer.body, await readFile(new URL('../vendor/pdf-reader/dist/pdf-crumb.min.js', import.meta.url), 'utf8'));
+const pdfResults = JSON.parse((await get('/api/search?' + new URLSearchParams({
+  q: 'Cyber*', group: 'paper', sort: 'date-asc', limit: '50',
+}))).body);
+const pdfHit = pdfResults.hits.find(hit => hit.page && hit.evidence?.citation?.documentVersion?.bytes < 1048576);
+assert.ok(pdfHit, 'Corpus must contain a small cited PDF for preview deployment checks.');
+const pdfHash = pdfHit.evidence.citation.documentVersion.sha256;
+const pdfPath = '/pdf/' + pdfHash + '.pdf';
+const pdf = await get(pdfPath);
+assert.equal(pdf.status, 200);
+assert.equal(pdf.headers['content-type'], 'application/pdf');
+assert.deepEqual(pdf.bytes, await readFile(join(dirname(index), 'web', 'pdf', pdfHash + '.pdf')));
+const pdfHead = await get(pdfPath, {}, 'HEAD');
+assert.equal(pdfHead.status, 200);
+assert.equal(Number(pdfHead.headers['content-length']), pdf.bytes.length);
+assert.equal(pdfHead.bytes.length, 0);
+assert.equal((await get(pdfPath, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+assert.equal((await get(pdfPath, { Origin: origin, 'Sec-Fetch-Site': 'same-origin' })).status, 200);
+assert.equal((await get('/pdf/' + '0'.repeat(64) + '.pdf')).status, 404);
 
 for (const path of ['/', '/health', '/app.js']) {
   const response = await get(path);

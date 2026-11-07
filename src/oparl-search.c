@@ -9,14 +9,16 @@ static int compare_time(const void *a, const void *b) {
 
 int main(int argc, char **argv) {
     const char *path = "build/search/index.ops", *query = 0, *error = 0, *show = 0;
-    const char *read_operation = 0;
+    const char *read_operation = 0, *web_root = 0, *publish = 0, *input = "downloads";
+    const char *embeddings = 0, *model = 0;
+    unsigned int threads = 1;
     SearchRead read;
     SearchFilter filter;
     SearchIndex index;
     SearchResult result;
     SearchWorkspace workspace;
     unsigned long long repetitions = 0, opened, started = platform_get_monotonic_time_ns();
-    int i, json = 0, batch = 0, status = 1, serve = 0, port_set = 0, filter_set = 0, limit_set = 0;
+    int i, json = 0, batch = 0, status = 1, serve = 0, port_set = 0, filter_set = 0, limit_set = 0, input_set = 0;
     unsigned int page = 0, port = 8080;
     rt_memset(&workspace, 0, sizeof(workspace));
     rt_memset(&read, 0, sizeof(read));
@@ -27,6 +29,10 @@ int main(int argc, char **argv) {
         if (rt_strcmp(flag, "--help") == 0) {
             rt_write_cstr(1, "Usage: oparl-search [OPTIONS] [QUERY]\n"
                 "  --index FILE          Binary index (default: build/search/index.ops)\n"
+                "  --embeddings DIR      Verified optional companion index\n"
+                "  --model DIR           Native weights.eg2 and tokenizer.eg2 (with --embeddings)\n"
+                "  --threads N           Native inference workers, 1..32 (default: 1)\n"
+                "  --mode MODE           lexical (default), semantic or hybrid\n"
                 "  --year YYYY           Reference year, also through related papers\n"
                 "  --paper-type TYPE     Exact case-insensitive paper type\n"
                 "  --organization TEXT   Responsible organization substring, not authorship\n"
@@ -58,6 +64,9 @@ int main(int argc, char **argv) {
                 "  --page N              With --show: retrieve a PDF text page\n"
                 "  --serve               Local read-only web UI and JSON API (127.0.0.1)\n"
                 "  --port N              With --serve: TCP port, 1..65535 (default: 8080)\n"
+                "  --web-root DIR        With --serve: enable local PDF hover previews from DIR/pdf\n"
+                "  --publish-pdfs DIR    Copy verified indexed PDF versions into DIR/pdf\n"
+                "  --input DIR           With --publish-pdfs: archive or parent (default: downloads)\n"
                 "Queries: AND (implicit), OR, NOT, parentheses, \"exact phrases\", prefix*\n"
                 "Omit QUERY for a filtered listing; unfiltered empty listings are rejected.\n");
             return 0;
@@ -82,8 +91,19 @@ int main(int argc, char **argv) {
             rt_strcmp(flag, "--sort") == 0 || rt_strcmp(flag, "--group") == 0 ||
             rt_strcmp(flag, "--date-role") == 0 || rt_strcmp(flag, "--date-from") == 0 ||
             rt_strcmp(flag, "--date-through") == 0 || !rt_strcmp(flag, "--organization-id") ||
-            !rt_strcmp(flag, "--actor-id") || !rt_strcmp(flag, "--snapshot-id")) filter_set = 1;
+            !rt_strcmp(flag, "--actor-id") || !rt_strcmp(flag, "--snapshot-id") || !rt_strcmp(flag, "--mode")) filter_set = 1;
         if (rt_strcmp(flag, "--index") == 0) path = value;
+        else if (!rt_strcmp(flag, "--web-root")) web_root = value;
+        else if (!rt_strcmp(flag, "--publish-pdfs")) publish = value;
+        else if (!rt_strcmp(flag, "--input")) { input = value; input_set = 1; }
+        else if (!rt_strcmp(flag, "--embeddings")) embeddings = value;
+        else if (!rt_strcmp(flag, "--model")) model = value;
+        else if (!rt_strcmp(flag, "--mode")) {
+            if (!rt_strcmp(value, "lexical")) filter.mode = SEARCH_LEXICAL;
+            else if (!rt_strcmp(value, "semantic")) filter.mode = SEARCH_SEMANTIC;
+            else if (!rt_strcmp(value, "hybrid")) filter.mode = SEARCH_HYBRID;
+            else { search_error("mode must be lexical, semantic or hybrid", value); return 1; }
+        }
         else if (rt_strcmp(flag, "--paper-type") == 0) filter.paper_type = value;
         else if (rt_strcmp(flag, "--organization") == 0) filter.organization = value;
         else if (rt_strcmp(flag, "--kind") == 0) filter.kind = value;
@@ -132,6 +152,7 @@ int main(int argc, char **argv) {
             else if (rt_strcmp(flag, "--limit") == 0 && n >= 1 && n <= 100) { filter.limit = (unsigned int)n; limit_set = 1; }
             else if (rt_strcmp(flag, "--offset") == 0 && n <= UINT32_MAX) filter.offset = (unsigned int)n;
             else if (rt_strcmp(flag, "--benchmark") == 0 && n >= 20 && n <= 100000) repetitions = n;
+            else if (!rt_strcmp(flag, "--threads") && n >= 1 && n <= 32) threads = (unsigned int)n;
             else if (rt_strcmp(flag, "--page") == 0 && n >= 1 && n <= 1000000) page = (unsigned int)n;
             else if (rt_strcmp(flag, "--port") == 0 && n >= 1 && n <= 65535) {
                 port = (unsigned int)n; port_set = 1;
@@ -139,21 +160,29 @@ int main(int argc, char **argv) {
             else { search_error("unknown option or value outside bounds", flag); return 1; }
         }
     }
-    if ((serve && (query || batch || read_operation || repetitions || page || json || filter_set || read.raw || read.fields || read.view || read.direction)) ||
-        (port_set && !serve) || (!serve && !batch && !query && !read_operation && !filter_set) ||
+    if ((embeddings && !model) || (model && !embeddings) || (threads != 1 && !embeddings) ||
+        (read_operation && filter.mode) || (publish && embeddings)) {
+        search_error("--embeddings and --model must be supplied together; --mode applies only to search", 0); return 1;
+    }
+    if ((serve && (publish || query || batch || read_operation || repetitions || page || json || filter_set || read.raw || read.fields || read.view || read.direction)) ||
+        (publish && (web_root || query || batch || read_operation || repetitions || page || json || filter_set || read.raw || read.fields || read.view || read.direction)) ||
+        (input_set && !publish) || (web_root && !serve) ||
+        (port_set && !serve) || (!serve && !publish && !batch && !query && !read_operation && !filter_set) ||
         (batch && (query || repetitions || read_operation)) || (read_operation && (query || repetitions)) ||
         (page && (!read_operation || rt_strcmp(read_operation, "get_object"))) ||
         (!read_operation && (read.raw || read.fields || read.view || read.direction)) ||
         (read_operation && !rt_strcmp(read_operation, "get_index_status") && (filter_set || read.raw || read.fields || read.view || read.direction)) ||
         (read_operation && (filter.year || filter.paper_type || filter.organization || filter.organization_id ||
             filter.actor_id || filter.date_from || filter.date_through || filter.date_role || filter.sort || filter.group))) {
-        search_error("choose a query, --batch, --show or --serve; --port requires --serve", 0); return 1;
+        search_error("choose a query, --batch, --show, --serve or --publish-pdfs; --port/--web-root require --serve; --input requires --publish-pdfs", 0); return 1;
     }
     if (search_open(&index, path) != 0) return 1;
+    if (embeddings && search_embedding_open(&index, embeddings, model, threads)) goto done;
     if (index.incomplete)
         rt_write_cstr(2, "oparl-search: warning: source archives or full-text coverage are incomplete\n");
     opened = platform_get_monotonic_time_ns();
-    if (serve) status = search_serve(&index, port) == 0 ? 0 : 1;
+    if (serve) status = search_serve(&index, port, web_root) == 0 ? 0 : 1;
+    else if (publish) status = search_publish_pdfs(&index, input, publish) == 0 ? 0 : 1;
     else if (read_operation) {
         ToolByteBuffer data;
         int code;

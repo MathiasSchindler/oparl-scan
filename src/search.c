@@ -363,6 +363,7 @@ int search_write(SearchBuilder *builder, const char *path) {
 }
 
 void search_close(SearchIndex *index) {
+    search_embedding_close(index);
     search_research_free(index);
     search_facets_free(index);
     rt_free(index->links);
@@ -829,6 +830,7 @@ static uint64_t evaluate(const Parser *parser, int n, const uint64_t *atoms, siz
 }
 
 void search_workspace_free(SearchWorkspace *workspace) {
+    rt_free(workspace->embedding_allocation);
     rt_free(workspace->parser);
     rt_free(workspace->allocation);
     rt_memset(workspace, 0, sizeof(*workspace));
@@ -903,7 +905,7 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
         (filter->actor_id && !search_actor_known(index, filter->actor_id, 0))) {
         *error = "unknown organizationId/actorId in this snapshot"; return SEARCH_QUERY_INVALID;
     }
-    if (limit > 100 || filter->sort > SEARCH_DATE_ASC || filter->group > SEARCH_DOCUMENTS ||
+    if (limit > 100 || filter->sort > SEARCH_DATE_ASC || filter->group > SEARCH_DOCUMENTS || filter->mode > SEARCH_HYBRID ||
         filter->date_role >= SEARCH_REFERENCE_YEAR || rt_strlen(text) > 16384) {
         *error = "query/limit/sort/group exceeds supported bounds"; return -1;
     }
@@ -924,11 +926,16 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
     result->date_role = filter->date_role; result->sort = filter->sort;
     result->date_from = filter->date_from; result->date_through = filter->date_through;
     result->offset = filter->offset; result->limit = limit;
+    result->mode = filter->mode;
+    if (filter->mode && !index->embedding) {
+        *error = "semantic search requires a verified embedding index and model; configure --embeddings";
+        return SEARCH_QUERY_UNAVAILABLE;
+    }
     if (!workspace->parser) workspace->parser = rt_malloc(sizeof(*parser));
     parser = (Parser *)workspace->parser;
     if (parser == 0) return SEARCH_QUERY_RESOURCE;
     rt_memset(parser, 0, sizeof(*parser));
-    parser->query = text; parser->index = index;
+    parser->query = filter->mode == SEARCH_SEMANTIC ? "" : text; parser->index = index;
     spaces(parser); filter_only = !text[parser->p]; result->filter_only = filter_only;
     if (filter_only && !filter->kind && !filter->year && !filter->paper_type && !filter->organization &&
         !filter->organization_id && !filter->actor_id &&
@@ -936,8 +943,9 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
         *error = "empty listing requires a kind, reference year, metadata/date filter or document group";
         return SEARCH_QUERY_INVALID;
     }
+    if (filter->mode == SEARCH_SEMANTIC) filter_only = result->filter_only = 1;
     root = filter_only ? -1 : parse_or(parser, 0); spaces(parser);
-    if ((!filter_only && root < 0) || text[parser->p]) {
+    if ((!filter_only && root < 0) || parser->query[parser->p]) {
         *error = parser->error ? parser->error : "unexpected query operator"; return -1;
     }
     capacity = workspace->record_count == count && workspace->atom_capacity >= parser->atom_count ?
@@ -973,6 +981,21 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
     query.seen = atoms + capacity * blocks;
     hits = (SearchHit *)(void *)(query.seen + blocks);
     groups = hits + hit_capacity;
+    float *semantic_scores = 0;
+    const char **semantic_texts = 0;
+    if (filter->mode) {
+        if (workspace->embedding_capacity != count) {
+            rt_free(workspace->embedding_allocation);
+            workspace->embedding_allocation = rt_malloc(count * (sizeof(float) + sizeof(char *)));
+            workspace->embedding_capacity = count;
+        }
+        if (!workspace->embedding_allocation) return SEARCH_QUERY_RESOURCE;
+        semantic_texts = workspace->embedding_allocation;
+        semantic_scores = (float *)(void *)(semantic_texts + count);
+        int code = search_embedding_scores(index, text, semantic_scores, semantic_texts, error);
+        if (code) return code;
+        result->filter_only = 0;
+    }
     if (filter->group != SEARCH_RECORDS) rt_memset(groups, 0, count * sizeof(*groups));
     rt_memset(query.states, 0, count);
     rt_memset(atoms, 0, (parser->atom_count ? parser->atom_count : 1) * blocks * sizeof(uint64_t));
@@ -993,6 +1016,9 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
     for (i = 0; i < blocks; i++) {
         uint64_t candidates = filter_only ? (filter->kind ? atoms[i] : UINT64_MAX) :
             evaluate(parser, root, atoms, i, blocks);
+        if (filter->mode == SEARCH_SEMANTIC) candidates = 0;
+        if (filter->mode) for (unsigned int b = 0; b < 64 && i * 64 + b < count; b++)
+            if (semantic_scores[i * 64 + b] > -2) candidates |= 1ULL << b;
         if (i == blocks - 1 && count % 64) candidates &= (1ULL << (count % 64)) - 1;
         while (candidates) {
             unsigned int bit = (unsigned int)__builtin_ctzll(candidates);
@@ -1007,6 +1033,14 @@ int search_query(const SearchIndex *index, SearchWorkspace *workspace, const cha
             hit.paper = query.owners[source == NONE ? record : source];
             hit.matches = 1;
             hit.score = seen ? query.scores[record] : 0;
+            hit.semantic_text = filter->mode && semantic_scores[record] > -2 ? semantic_texts[record] : 0;
+            hit.semantic_score = filter->mode && semantic_scores[record] > -2 ? semantic_scores[record] : -2;
+            if (filter->mode) {
+                float lexical = hit.score;
+                hit.score = hit.semantic_score > -2 ? hit.semantic_score : 0;
+                if (filter->mode == SEARCH_HYBRID && seen && lexical > 0)
+                    hit.score += lexical / (1 + lexical);
+            }
             if (source == NONE) source = record;
             if (filter->group == SEARCH_DOCUMENTS &&
                 (rt_strcmp(index->strings + index->records[source].kind, "File") ||
@@ -1175,6 +1209,7 @@ static int print_results(SearchOutput *out, const SearchIndex *index, const Sear
         out_field_uint(out, "excludedInvalidDateRecords", result->excluded_invalid_dates) != 0 ||
         out_field_uint(out, "excludedUnversionedRecords", result->excluded_unversioned) != 0 ||
         out_field_bool(out, "filterOnly", result->filter_only) != 0 ||
+        (result->mode && out_field_string(out, "mode", result->mode == SEARCH_SEMANTIC ? "semantic" : "hybrid")) ||
         out_field_string(out, "dateRole", search_date_role_name(result->date_role)) != 0 ||
         out_field_string(out, "dateFrom", result->date_from ? result->date_from : "") != 0 ||
         out_field_string(out, "dateThrough", result->date_through ? result->date_through : "") != 0 ||
@@ -1231,6 +1266,16 @@ static int print_results(SearchOutput *out, const SearchIndex *index, const Sear
                 out_field_uint(out, "matchCount", hit->matches) != 0 ||
                 out_field_string(out, "snippet", snippet) != 0 ||
                 out_document_url(out, index, r) != 0) return -1;
+            if (result->mode && (out_field_string(out, "semanticText", hit->semantic_text ? hit->semantic_text : "") ||
+                out_field_bool(out, "semanticMatch", hit->semantic_score > -2))) return -1;
+            if (result->mode) {
+                ToolByteBuffer semantic = {0};
+                int status = search_embedding_source_json(&semantic, index, hit);
+                if (!status) status = out_text(out, ",\"semantic\":") ||
+                    out_write(out, (const char *)semantic.data, semantic.size);
+                tool_byte_buffer_free(&semantic);
+                if (status) return -1;
+            }
             {
                 ToolByteBuffer date;
                 int status;
@@ -1257,7 +1302,8 @@ static int print_results(SearchOutput *out, const SearchIndex *index, const Sear
                 ToolByteBuffer preparation;
                 int status;
                 tool_byte_buffer_init(&preparation);
-                status = search_preparation_json(&preparation, index, r, hit->byte, 0);
+                status = search_preparation_json(&preparation, index, r,
+                                                hit->semantic_text ? NONE : hit->byte, 0);
                 if (!status) status = out_text(out, ",\"preparation\":") ||
                     out_write(out, (const char *)preparation.data, preparation.size);
                 tool_byte_buffer_free(&preparation);
@@ -1412,6 +1458,8 @@ int search_status_json(ToolByteBuffer *buffer, const SearchIndex *index) {
         out_field_uint(&out, "pages", pages) != 0 || out_field_uint(&out, "warningPages", warnings) != 0 ||
         out_field_uint(&out, "ocrPages", ocr) != 0 || out_field_bool(&out, "incomplete", index->incomplete != 0) != 0 ||
         out_text(&out, ",\"coverage\":") != 0 || search_coverage_json(buffer, index) != 0 ||
+        (index->embedding && (out_text(&out, ",\"semantic\":") ||
+                             search_embedding_status_json(buffer, index))) ||
         out_text(&out, "}\n") != 0 ? -1 : 0;
 }
 

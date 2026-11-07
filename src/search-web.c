@@ -4,8 +4,8 @@
 #include "platform.h"
 
 #if defined(_WIN32)
-int search_serve(const SearchIndex *index, unsigned int port) {
-    (void)index; (void)port;
+int search_serve(const SearchIndex *index, unsigned int port, const char *web_root) {
+    (void)index; (void)port; (void)web_root;
     return search_error("web mode requires macOS or Linux; pinned newos has no Windows TCP listener", 0);
 }
 #else
@@ -25,6 +25,12 @@ int search_serve(const SearchIndex *index, unsigned int port) {
 #define WEB_BODY_LIMIT 65536U
 #define WEB_REQUEST_LIMIT (WEB_HEADER_LIMIT + WEB_BODY_LIMIT)
 #define WEB_REQUEST_NS 5000000000ULL
+
+#if defined(__APPLE__)
+/* Bind embedded assets locally; the freestanding linker has no Mach-O GOT. */
+__attribute__((visibility("hidden")))
+#endif
+extern const char search_pdf_preview_script[], search_pdf_renderer_script[];
 
 typedef struct {
     char *path, *parameters, *host, *origin, *site;
@@ -93,7 +99,8 @@ static int headers_allow(int fd, int status, const char *type, long long length,
             "X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n"
             "Referrer-Policy: no-referrer\r\nCross-Origin-Resource-Policy: same-origin\r\n"
             "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
-            "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'\r\n") != 0)
+            "connect-src 'self'; img-src blob:; font-src 'self' blob:; base-uri 'none'; "
+            "frame-ancestors 'none'; form-action 'self'\r\n") != 0)
         return -1;
     if (status == 405 && (rt_write_cstr(fd, "Allow: ") != 0 || rt_write_cstr(fd, allow) != 0 ||
         rt_write_cstr(fd, "\r\n") != 0)) return -1;
@@ -266,7 +273,9 @@ static int parse_request(char *data, WebRequest *request, unsigned int port, con
     }
     if (!line || *cursor || !request->host) return 400;
     if (!local_authority(request->host, port)) { *error = "Host must name this local service"; return 403; }
-    if ((!rt_strncmp(request->path, "/api/", 5) || !rt_strcmp(request->path, "/mcp")) &&
+    if ((!rt_strncmp(request->path, "/api/", 5) || !rt_strncmp(request->path, "/pdf/", 5) ||
+         !rt_strcmp(request->path, "/pdf-preview.js") || !rt_strcmp(request->path, "/pdf-crumb.js") ||
+         !rt_strcmp(request->path, "/mcp")) &&
         ((request->origin && (rt_strncmp(request->origin, "http://", 7) ||
           !tool_str_equal_ignore_case_ascii(request->origin + 7, request->host))) ||
          (request->site && rt_strcmp(request->site, "same-origin") && rt_strcmp(request->site, "none")))) {
@@ -308,7 +317,7 @@ static int decode(char *text) {
 
 static const char *const parameter_names[] = {"q", "year", "paperType", "organization", "kind", "limit",
     "offset", "sort", "id", "page", "group", "dateRole", "dateFrom", "dateThrough",
-    "organizationId", "actorId", "snapshotId", "fields", "raw", "ids", "view", "direction"};
+    "organizationId", "actorId", "snapshotId", "fields", "raw", "ids", "view", "direction", "mode"};
 #define PARAMETER_COUNT (sizeof(parameter_names)/sizeof(parameter_names[0]))
 static int parameters(char *text, char **values, int object) {
     rt_memset(values, 0, PARAMETER_COUNT * sizeof(*values));
@@ -323,8 +332,8 @@ static int parameters(char *text, char **values, int object) {
         for (i = 0; i < PARAMETER_COUNT && rt_strcmp(text, parameter_names[i]); i++) {}
         if (i == PARAMETER_COUNT || values[i] ||
             (object == 1 && i != 8 && i != 9) ||
-            (object == 2 && i != 4 && i != 5 && i != 6 && i != 8 && i != 9 && i < 16) ||
-            (!object && (i == 8 || i == 9 || i >= 17))) return -1;
+            (object == 2 && (i == 22 || (i != 4 && i != 5 && i != 6 && i != 8 && i != 9 && i < 16))) ||
+            (!object && (i == 8 || i == 9 || (i >= 17 && i != 22)))) return -1;
         values[i] = value; text = next;
     }
     return 0;
@@ -387,7 +396,35 @@ done:
     tool_byte_buffer_free(&arguments); tool_byte_buffer_free(&result); return status;
 }
 
-static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, SearchWorkspace *workspace) {
+static int pdf_response(int fd, const WebRequest *request, const SearchIndex *index, const char *root) {
+    unsigned char buffer[65536];
+    char hash[65];
+    const char *error;
+    uint64_t bytes, sent = 0;
+    unsigned long long deadline = platform_get_monotonic_time_ns() + 10000000000ULL;
+    int input, result;
+    if (request->parameters || rt_strlen(request->path) != 73 ||
+        rt_strcmp(request->path + 69, ".pdf"))
+        return web_error(fd, 404, request->head, "expected /pdf/<indexed-sha256>.pdf");
+    memcpy(hash, request->path + 5, 64); hash[64] = 0;
+    input = search_pdf_open(index, root, hash, &bytes, &error);
+    if (input < 0) return web_error(fd, input == -2 ? 500 : 404, request->head, error);
+    result = headers(fd, 200, "application/pdf", (long long)bytes);
+    while (!result && !request->head && sent < bytes) {
+        long got;
+        if (platform_get_monotonic_time_ns() >= deadline) {
+            search_error("local PDF response exceeded its ten-second deadline", hash); result = -1; break;
+        }
+        got = platform_read(input, buffer, (size_t)(bytes - sent < sizeof(buffer) ? bytes - sent : sizeof(buffer)));
+        if (got <= 0) { search_error("cannot read complete local PDF response", hash); result = -1; break; }
+        result = rt_write_all(fd, buffer, (size_t)got); sent += (uint64_t)got;
+    }
+    if (platform_close(input)) { search_error("cannot close local PDF response", hash); result = -1; }
+    return result;
+}
+
+static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, SearchWorkspace *workspace,
+                  const char *web_root) {
     WebRequest request = *parsed;
     SearchFilter filter;
     SearchResult result;
@@ -395,6 +432,30 @@ static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, Se
     const char *const *asset = 0;
     char *values[PARAMETER_COUNT];
     int status;
+    if (!rt_strncmp(request.path, "/pdf/", 5)) return pdf_response(fd, &request, index, web_root);
+    if (!rt_strcmp(request.path, "/pdf-preview.js") || !rt_strcmp(request.path, "/pdf-crumb.js")) {
+        const char *script = !rt_strcmp(request.path, "/pdf-preview.js") ?
+            search_pdf_preview_script : search_pdf_renderer_script;
+        size_t length = rt_strlen(script);
+        if (request.parameters) return web_error(fd, 400, request.head, "preview assets take no parameters");
+        if (headers(fd, 200, "text/javascript; charset=utf-8", (long long)length)) return -1;
+        return request.head ? 0 : rt_write_all(fd, script, length);
+    }
+    if (!rt_strcmp(request.path, "/api/preview-status")) {
+        const char *json = web_root ? "{\"enabled\":true}\n" : "{\"enabled\":false}\n";
+        if (request.parameters) return web_error(fd, 400, request.head, "preview status takes no parameters");
+        if (headers(fd, 200, "application/json; charset=utf-8", (long long)rt_strlen(json))) return -1;
+        return request.head ? 0 : rt_write_cstr(fd, json);
+    }
+    if (!rt_strcmp(request.path, "/api/semantic-status")) {
+        ToolByteBuffer data = {0};
+        if (request.parameters) return web_error(fd, 400, request.head, "semantic status takes no parameters");
+        status = search_embedding_status_json(&data, index);
+        if (!status) status = headers(fd, 200, "application/json; charset=utf-8", (long long)data.size);
+        if (!status && !request.head) status = rt_write_all(fd, data.data, data.size);
+        tool_byte_buffer_free(&data);
+        return status;
+    }
     if (!rt_strcmp(request.path, "/mcp")) {
         ToolByteBuffer reply;
         int http_status;
@@ -469,6 +530,12 @@ static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, Se
     filter.paper_type = values[2]; filter.organization = values[3]; filter.kind = values[4];
     filter.date_from = values[12]; filter.date_through = values[13];
     filter.organization_id = values[14]; filter.actor_id = values[15]; filter.snapshot_id = values[16];
+    if (values[22]) {
+        if (!rt_strcmp(values[22], "lexical")) filter.mode = SEARCH_LEXICAL;
+        else if (!rt_strcmp(values[22], "semantic")) filter.mode = SEARCH_SEMANTIC;
+        else if (!rt_strcmp(values[22], "hybrid")) filter.mode = SEARCH_HYBRID;
+        else return web_error(fd, 400, request.head, "mode must be lexical, semantic or hybrid");
+    }
     if (values[11] && search_date_role(values[11], &filter.date_role))
         return web_error(fd, 400, request.head, "unknown temporal dateRole; reference year uses year");
     if (values[10]) {
@@ -478,7 +545,7 @@ static int handle(int fd, const WebRequest *parsed, const SearchIndex *index, Se
         else return web_error(fd, 400, request.head, "group must be record, paper or document");
     }
     status = search_query(index, workspace, values[0], &filter, &result, &error);
-    if (status) return web_error(fd, status == SEARCH_QUERY_SNAPSHOT ? 409 :
+    if (status) return web_error(fd, status == SEARCH_QUERY_UNAVAILABLE ? 503 : status == SEARCH_QUERY_SNAPSHOT ? 409 :
         status == SEARCH_QUERY_RESOURCE ? 500 : 400, request.head, error);
     if (headers(fd, 200, "application/json; charset=utf-8", -1) != 0) return -1;
     return request.head ? 0 : search_print(fd, index, &result, 1);
@@ -489,12 +556,20 @@ static void close_client(WebClient *client) {
     client->fd = -1; client->used = 0;
 }
 
-int search_serve(const SearchIndex *index, unsigned int port) {
+int search_serve(const SearchIndex *index, unsigned int port, const char *web_root) {
     WebClient *clients;
     SearchWorkspace workspace;
     int listener = -1;
     size_t i;
     rt_memset(&workspace, 0, sizeof(workspace));
+    if (web_root) {
+        char directory[4096];
+        PlatformDirEntry info;
+        if (platform_get_path_info(web_root, &info) || (info.mode & 0170000U) != 0040000U ||
+            rt_join_path(web_root, "pdf", directory, sizeof(directory)) ||
+            platform_get_path_info(directory, &info) || (info.mode & 0170000U) != 0040000U)
+            return search_error("--web-root requires a regular directory with published pdf/ copies", web_root);
+    }
 #if !defined(__APPLE__)
     int signal_number;
     if (platform_parse_signal_name("PIPE", &signal_number) != 0 || platform_ignore_signal(signal_number) != 0)
@@ -593,7 +668,7 @@ int search_serve(const SearchIndex *index, unsigned int port) {
                 if (client->used > end) {
                     if (web_error(client->fd, 400, client->request.head, "unexpected body bytes or HTTP pipelining") != 0)
                         search_error("cannot write HTTP error response", 0);
-                } else if (handle(client->fd, &client->request, index, &workspace) != 0)
+                } else if (handle(client->fd, &client->request, index, &workspace, web_root) != 0)
                     search_error("cannot write HTTP response; client may have disconnected", 0);
             }
             close_client(client);

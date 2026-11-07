@@ -900,6 +900,13 @@ static int emit(Import *import) {
 
 int main(int argc, char **argv) {
     const char *input = "downloads", *output = "build/search/index.ops";
+    const char *embeddings = 0, *model = 0;
+    const char *prepared = 0;
+    SearchEmbeddingArchive embedding_archives[100];
+    char embedding_paths[100][PATH_SIZE];
+    size_t embedding_count = 0;
+    unsigned int threads = 1;
+    int embeddings_only = 0;
     Import import;
     char path[PATH_SIZE], report[PATH_SIZE], part[PATH_SIZE], scratch[PATH_SIZE];
     size_t i;
@@ -913,20 +920,56 @@ int main(int argc, char **argv) {
         if (rt_strcmp(argv[i], "--help") == 0) {
             rt_write_cstr(1, "Usage: oparl-index [--input ARCHIVE_OR_PARENT] [--output INDEX] [--prepared DIRECTORY]\n"
                 "Build a binary metadata/full-text index; originals stay unchanged.\n"
+                "  --embeddings DIR --model DIR  Also build native title/main-form vectors\n"
+                "  --embeddings-only             Keep the existing binary index; update its vectors\n"
+                "  --threads N                   Native inference workers, 1..32 (default: 1)\n"
                 "Exit: 0 complete, 1 error, 3 published index with documented coverage gaps.\n");
             result = 0; goto done;
         }
+        if (!rt_strcmp(argv[i], "--embeddings-only")) { embeddings_only = 1; continue; }
         if (i + 1 == (size_t)argc) { search_error("missing option value", argv[i]); goto done; }
         if (rt_strcmp(argv[i], "--input") == 0) input = argv[++i];
         else if (rt_strcmp(argv[i], "--output") == 0) output = argv[++i];
-        else if (rt_strcmp(argv[i], "--prepared") == 0) import.prepared = argv[++i];
+        else if (rt_strcmp(argv[i], "--prepared") == 0) prepared = import.prepared = argv[++i];
+        else if (!rt_strcmp(argv[i], "--embeddings")) embeddings = argv[++i];
+        else if (!rt_strcmp(argv[i], "--model")) model = argv[++i];
+        else if (!rt_strcmp(argv[i], "--threads")) {
+            unsigned long long n;
+            if (rt_parse_uint(argv[++i], &n) || n < 1 || n > 32) {
+                search_error("threads must be 1..32", argv[i]); goto done;
+            }
+            threads = (unsigned int)n;
+        }
         else { search_error("unknown option", argv[i]); goto done; }
     }
-    if (import.prepared && prepare_manifest_read(import.prepared, import.preparation_key)) goto done;
+    if ((embeddings && (!model || !prepared)) || (model && !embeddings) ||
+        (embeddings_only && !embeddings) || (threads != 1 && !embeddings)) {
+        search_error("embedding options require --embeddings, --model and --prepared together", 0); goto done;
+    }
+    if (!embeddings_only && import.prepared && prepare_manifest_read(import.prepared, import.preparation_key)) goto done;
     if (walk_archive(input, archive_root, &import, 0) != 0) {
         search_error("cannot discover archives", input); goto done;
     }
     if (!import.archives.count) { search_error("no OParl archives found", input); goto done; }
+    if (embeddings) {
+        for (i = 0; i < import.archives.count; i++) {
+            const ArchiveRoot *archive = tool_array_get_const(&import.archives, i);
+            const char *source = string(&import, archive->path);
+            if (!archive->year) {
+                rt_write_cstr(2, "oparl-index: embeddings omit archive without reference year: ");
+                rt_write_cstr(2, source); rt_write_char(2, '\n');
+                continue;
+            }
+            if (embedding_count == 100) { search_error("at most 100 reference-year embedding archives are supported", input); goto done; }
+            if (rt_strlen(source) >= PATH_SIZE) { search_error("embedding archive path is too long", source); goto done; }
+            rt_copy_string(embedding_paths[embedding_count], PATH_SIZE, source);
+            embedding_archives[embedding_count].path = embedding_paths[embedding_count];
+            embedding_archives[embedding_count].year = archive->year;
+            embedding_count++;
+        }
+        if (!embedding_count) { search_error("no reference-year archives available for embeddings", input); goto done; }
+    }
+    if (embeddings_only) { result = 0; goto done; }
     for (i = 0; i < import.archives.count; i++) {
         const ArchiveRoot *archive = (const ArchiveRoot *)tool_array_get_const(&import.archives, i);
         import.archive = archive->path;
@@ -987,5 +1030,12 @@ done:
     tool_array_free(&import.entities); tool_array_free(&import.archives);
     rt_free(import.ids.entries); rt_free(import.files.entries);
     search_builder_free(&import.builder);
+    if ((result == 0 || result == 3) && embeddings && embedding_count) {
+        int code = search_embedding_build(output, embeddings, model, prepared, embedding_archives, embedding_count, threads);
+        if (code < 0) {
+            search_error("embedding pipeline failed; the lexical index remains available", output);
+            result = -1;
+        } else if (code == 3) result = 3;
+    }
     return result < 0 ? 1 : result;
 }

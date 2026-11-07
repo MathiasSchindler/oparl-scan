@@ -1,23 +1,45 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { stat } from 'node:fs/promises';
+import { readFile, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { dirname, join } from 'node:path';
 import { createServer, connect } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Script } from 'node:vm';
 import { testSearchMcp } from './search-mcp.mjs';
 
-export async function testSearchWeb(binary, index, fileId) {
+export async function testSearchWeb(binary, index, fileId, archives) {
   if (process.platform === 'win32') {
     console.log('Web tests skipped: pinned newos has no Windows TCP listener backend.');
     return;
   }
+  const webRoot = join(dirname(index), 'web-preview');
+  const publish = () => spawnSync(binary, ['--index', index, '--publish-pdfs', webRoot, '--input', archives],
+    { encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+  const publication = publish();
+  assert.equal(publication.status, 0, publication.error ?? publication.stderr);
+  const firstPublication = JSON.parse(publication.stdout);
+  assert.equal(firstPublication.missing, 0);
+  assert.equal(firstPublication.reused, 0);
+  assert.ok(firstPublication.copied >= 3 && firstPublication.bytesCopied > 0);
+  const repeatedPublication = publish();
+  assert.equal(repeatedPublication.status, 0, repeatedPublication.error ?? repeatedPublication.stderr);
+  const repeated = JSON.parse(repeatedPublication.stdout);
+  assert.equal(repeated.copied, 0, 'repeat publication must not copy existing PDFs again');
+  assert.equal(repeated.reused, firstPublication.pdfVersions);
+  const sourcePdf = join(archives, '2023', 'documents', createHash('sha256').update(fileId).digest('hex') + '-1.pdf');
+  const expectedPdf = await readFile(sourcePdf);
+  const pdfHash = createHash('sha256').update(expectedPdf).digest('hex');
+  const publishedPdf = join(webRoot, 'pdf', pdfHash + '.pdf');
+  assert.deepEqual(await readFile(publishedPdf), expectedPdf, 'published PDF is an independent exact source copy');
+  assert.notEqual((await stat(publishedPdf)).ino, (await stat(sourcePdf)).ino, 'PDF publication must not hardlink mutable sources');
   const reservation = createServer();
   await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
   const port = reservation.address().port;
   await new Promise(resolve => reservation.close(resolve));
   const base = `http://127.0.0.1:${port}`;
-  const child = spawn(binary, ['--index', index, '--serve', '--port', String(port)],
+  const child = spawn(binary, ['--index', index, '--serve', '--port', String(port), '--web-root', webRoot],
     { stdio: ['ignore', 'pipe', 'pipe'] });
   let log = '', launchError, stdout = '', idle;
   const held = [];
@@ -73,6 +95,92 @@ export async function testSearchWeb(binary, index, fileId) {
     assert.match(html, /<html lang="de">/);
     assert.match(html, /href="\/health"/);
     assert.doesNotMatch(html, /id="coverage"|Index ist unvollstaendig/);
+    assert.deepEqual(await (await get('/api/preview-status')).json(), { enabled: true });
+    assert.deepEqual(await (await get('/api/semantic-status')).json(), { enabled: false });
+    assert.equal((await get('/api/search?q=Schulweg&mode=semantic')).status, 503);
+    assert.equal((await get('/api/search?q=Schulweg&mode=unknown')).status, 400);
+    assert.equal((await get('/api/object?id=' + encodeURIComponent(fileId) + '&mode=semantic')).status, 400);
+    const previewAsset = await get('/pdf-preview.js');
+    assert.equal(previewAsset.status, 200);
+    const previewScript = await previewAsset.text();
+    new Script(previewScript);
+    const disabledRequests = [];
+    new Script(previewScript).runInNewContext({
+      AbortSignal, Map, console,
+      fetch: async path => { disabledRequests.push(path); return { ok: true, json: async () => ({ enabled: false }) }; },
+      document: { addEventListener() { assert.fail('unconfigured servers must not activate preview interactions'); } },
+    });
+    await delay(0);
+    assert.deepEqual(disabledRequests, ['/api/preview-status'],
+      'unconfigured servers must not load a renderer or PDFs');
+    const rendererAsset = await get('/pdf-crumb.js');
+    assert.equal(rendererAsset.status, 200);
+    assert.match(rendererAsset.headers.get('content-type'), /text\/javascript/);
+    assert.equal(await rendererAsset.text(),
+      await readFile(new URL('../vendor/pdf-reader/dist/pdf-crumb.min.js', import.meta.url), 'utf8'),
+      'serve the pinned full renderer without bundling the PDF.js comparator');
+    assert.match(page.headers.get('content-security-policy'), /img-src blob:/);
+    assert.match(page.headers.get('content-security-policy'), /font-src 'self' blob:/);
+    const pdfPath = '/pdf/' + pdfHash + '.pdf';
+    const pdfResponse = await get(pdfPath);
+    assert.equal(pdfResponse.status, 200);
+    assert.equal(pdfResponse.headers.get('content-type'), 'application/pdf');
+    assert.equal(Number(pdfResponse.headers.get('content-length')), expectedPdf.length);
+    assert.deepEqual(Buffer.from(await pdfResponse.arrayBuffer()), expectedPdf);
+    const pdfHead = await get(pdfPath, { method: 'HEAD' });
+    assert.equal(pdfHead.status, 200);
+    assert.equal(Number(pdfHead.headers.get('content-length')), expectedPdf.length);
+    assert.equal((await pdfHead.arrayBuffer()).byteLength, 0);
+    const corrupted = Buffer.from(expectedPdf);
+    corrupted[corrupted.length - 4] ^= 1;
+    await writeFile(publishedPdf, corrupted);
+    const rejectedPdf = await get(pdfPath);
+    assert.equal(rejectedPdf.status, 500, 'same-size corruption must fail SHA-256 validation');
+    assert.match((await rejectedPdf.json()).error, /SHA-256/);
+    const rejectedPublication = publish();
+    assert.equal(rejectedPublication.status, 1, 'never silently adopt or overwrite corrupt immutable copies');
+    await unlink(publishedPdf);
+    await symlink(sourcePdf, publishedPdf);
+    assert.equal((await get(pdfPath)).status, 404, 'do not follow PDF symlinks, even to correct bytes');
+    await unlink(publishedPdf);
+    await writeFile(publishedPdf, expectedPdf);
+    const unknownHash = '0'.repeat(64);
+    await writeFile(join(webRoot, 'pdf', unknownHash + '.pdf'), 'not an indexed PDF');
+    assert.equal((await get('/pdf/' + unknownHash + '.pdf')).status, 404, 'only indexed versions may be served');
+    for (const path of ['/pdf/' + pdfHash + '.pdf?extra=1',
+      '/pdf/' + 'a'.repeat(63) + '.pdf', '/api/preview-status?extra=1'])
+      assert.ok([400, 404].includes((await get(path)).status), path);
+    for (const path of ['/pdf/../../../', '/pdf/%2e%2e/README.md', '/pdf/..%2FREADME.md'])
+      assert.match(await raw(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`), /^HTTP\/1.1 404 /);
+    assert.equal((await get(pdfPath, { headers: { Origin: 'https://attacker.example' } })).status, 403);
+    const previewListeners = new Map(), previewTimers = new Map(), previewRequests = [];
+    let timerId = 0;
+    new Script(previewScript).runInNewContext({
+      AbortSignal, Map, console,
+      fetch: async path => { previewRequests.push(path); return { ok: true, json: async () => ({ enabled: true }) }; },
+      document: { body: {}, addEventListener: (name, listener) => previewListeners.set(name, listener) },
+      window: { addEventListener() {} },
+      MutationObserver: class { observe() {} },
+      setTimeout: (callback, milliseconds) => { const id = ++timerId; previewTimers.set(id, { callback, milliseconds }); return id; },
+      clearTimeout: id => previewTimers.delete(id),
+    });
+    await delay(0);
+    const previewLink = { isConnected: true, contains: () => false };
+    const hover = { pointerType: 'mouse', target: { closest: () => previewLink }, relatedTarget: null };
+    previewListeners.get('pointerover')(hover);
+    assert.ok([...previewTimers.values()].some(timer => timer.milliseconds === 250));
+    previewListeners.get('pointerout')(hover);
+    assert.ok(![...previewTimers.values()].some(timer => timer.milliseconds === 250),
+      'brief mouseovers must not load a renderer or PDF');
+    previewListeners.get('focusin')(hover);
+    let escapeCancelled = false;
+    previewListeners.get('keydown')({ key: 'Escape', preventDefault() { escapeCancelled = true; } });
+    assert.equal(escapeCancelled, true);
+    assert.equal(previewTimers.size, 0, 'Escape cancels pending as well as visible previews');
+    previewListeners.get('pointerover')({ ...hover, pointerType: 'touch' });
+    assert.equal(previewTimers.size, 0, 'touch clicks must not schedule mouseover previews');
+    assert.deepEqual(previewRequests, ['/api/preview-status']);
+    assert.equal(previewListeners.has('click'), false, 'preview delegation must not intercept original-link clicks');
     const health = await get('/health');
     assert.equal(health.status, 200);
     assert.match(await health.text(), /id="health-stats"/);
@@ -122,6 +230,36 @@ export async function testSearchWeb(binary, index, fileId) {
     assert.match(script.headers.get('content-type'), /text\/javascript/);
     const scriptText = await script.text();
     new Script(scriptText);
+    const filters = { open: false }, fields = new Map(), globalListeners = new Map();
+    const initLocation = { search: '' };
+    const initNodes = new Map([['#filters', filters]]);
+    const initNode = selector => {
+      if (!initNodes.has(selector)) initNodes.set(selector, {
+        dataset: {}, addEventListener() {}, replaceChildren() {}, setAttribute() {},
+      });
+      return initNodes.get(selector);
+    };
+    initNode('#search').elements = { namedItem(name) {
+      if (!fields.has(name)) fields.set(name, { addEventListener() {} });
+      return fields.get(name);
+    } };
+    new Script(scriptText.slice(0, scriptText.indexOf('async function health(')) +
+      scriptText.slice(scriptText.indexOf('function initSearch('), scriptText.indexOf('async function showCase(')) +
+      '\ninitSearch();').runInNewContext({
+      URLSearchParams, TextEncoder, TextDecoder, AbortController,
+      location: initLocation, addEventListener: (name, listener) => globalListeners.set(name, listener),
+      matchMedia: () => ({ matches: true }),
+      fetch: async () => ({ ok: true, json: async () => ({ objects: [], next: null }) }),
+      document: { querySelector: initNode, querySelectorAll: () => [] },
+    });
+    assert.equal(filters.open, false, 'ordinary searches keep filters collapsed, even on wide displays');
+    filters.open = true;
+    globalListeners.get('popstate')();
+    assert.equal(filters.open, false, 'returning to ordinary search closes the previous filter panel');
+    initLocation.search = '?dateRole=created';
+    globalListeners.get('popstate')();
+    assert.equal(filters.open, true, 'explicit non-default date roles remain visible');
+    assert.equal(fields.get('dateRole').value, 'created');
     const presentation = new Script(scriptText.slice(0, scriptText.indexOf('async function health(')) +
       scriptText.slice(scriptText.indexOf('function renderHit('), scriptText.indexOf('async function search(params)')) +
       '\n({hitTitle,renderHit,renderPdfPage})').runInNewContext({
@@ -131,6 +269,8 @@ export async function testSearchWeb(binary, index, fileId) {
         addEventListener(name, listener) { this.listeners[name] = listener; } }) },
     });
     const descendants = node => [node, ...node.children.flatMap(descendants)];
+    const visibleNodes = node => [node, ...(node.tagName === 'DETAILS' ? [node.children[0]] :
+      node.children.flatMap(visibleNodes))];
     const contextTitle = (name, sourceKind, sourceName) => presentation.hitTitle({ name, kind: 'Page',
       fileName: 'Original filename.pdf', evidence: { relationshipPath: [{ source: 'context/1', sourceKind, sourceName }] } });
     assert.equal(contextTitle('Sammeldokument \u00f6ffentlich', 'AgendaItem', 'Fazit zur Geothermie'), 'Fazit zur Geothermie');
@@ -157,12 +297,34 @@ export async function testSearchWeb(binary, index, fileId) {
         documentVersion: { id: 'urn:test:version', sha256: 'fixture-hash' } },
       relationshipPath: [{ role: 'paper.mainFile' }] } }, 1);
     const excerpt = descendants(rendered).find(node => node.tagName === 'FIGURE');
-    assert.equal(excerpt.children[0].textContent, 'Textauszug aus der PDF \u00b7 Seite 2');
+    assert.equal(excerpt.children[0].textContent, 'PDF-Text \u00b7 Seite 2');
     assert.equal(excerpt.children[1].tagName, 'BLOCKQUOTE');
     assert.equal(excerpt.children[1].children[0].textContent, 'The matching document text.');
     assert.ok(!rendered.children.some(node => /SHA-256|Quellenrolle/.test(node.textContent || '')));
     assert.ok(rendered.children.find(node => node.tagName === 'DETAILS').children
       .some(node => /SHA-256: fixture-hash/.test(node.textContent || '')), 'technical evidence remains inside collapsed details');
+    assert.ok(!visibleNodes(rendered).some(node => /PDF-Seite/.test(node.textContent || '')),
+      'the PDF page is identified once in the excerpt, not repeated as a badge or document line');
+    const originalUrl = 'https://egov.potsdam.de/public/doc?DOCTYP=138&DOLFDNR=1&OTYP=41';
+    const previewHit = presentation.renderHit({ id: fileId, kind: 'Page', page: 2, name: 'Original PDF',
+      documentUrl: originalUrl, snippet: 'PDF text.', evidence: { relationshipPath: [], citation: {
+        documentVersion: { id: 'urn:test:version', sha256: pdfHash, bytes: expectedPdf.length } } } }, 1);
+    const previewAction = descendants(previewHit).find(node => node.textContent === 'PDF \u00f6ffnen');
+    assert.equal(previewAction.href, originalUrl);
+    assert.equal(previewAction.target, '_blank');
+    assert.equal(previewAction.rel, 'noopener noreferrer');
+    assert.deepEqual({ ...previewAction.dataset }, { pdfHash, pdfPage: '2', pdfBytes: String(expectedPdf.length) },
+      'preview uses the exact cited immutable version and one-based matching page');
+    const metadataHit = presentation.renderHit({ id: paperId, kind: 'Paper', page: 0,
+      reference: '26/SVV/0001', name: 'A paper title', relatedName: 'A paper title',
+      snippet: 'Matching metadata.', sortDate: { value: '2026-07-07', precision: 'day', role: 'paper.date' },
+    }, 2);
+    assert.ok(visibleNodes(metadataHit).some(node => node.textContent === 'Metadatenauszug'),
+      'metadata results remain distinguishable from PDF page results');
+    assert.ok(visibleNodes(metadataHit).some(node => node.textContent === '07.07.2026' && node.title === 'Vorlagendatum'));
+    assert.ok(!visibleNodes(metadataHit).some(node => /paper.date/.test(node.textContent || '')));
+    assert.equal(visibleNodes(metadataHit).filter(node => node.textContent === 'A paper title').length, 1,
+      'the result title is not repeated as a document name');
     const render = hit => presentation.renderHit({ id: fileId, kind: 'Page', page: 20,
       name: 'Protokoll \u00f6ffentlich', dateRole: 'document.date', ...hit }, 3);
     const headingLink = hit => render(hit).children.find(node => node.tagName === 'H2').children[0];
@@ -186,14 +348,17 @@ export async function testSearchWeb(binary, index, fileId) {
       value: '2026-06-24T17:00:00+02:00', precision: 'instant' } }] } });
     const visibleDates = dated.children.filter(node => node.className === 'meta muted')
       .flatMap(node => node.children.map(child => child.textContent));
-    assert.deepEqual(Array.from(visibleDates), ['Dokumentdatum nicht angegeben', 'Sitzung: 24.06.2026',
-      'Dateieintrag erstellt: 07.07.2026', 'Dateieintrag ge\u00e4ndert: 10.07.2026']);
+    assert.deepEqual(Array.from(visibleDates), ['Dokumentdatum nicht angegeben']);
+    const dateDetails = descendants(dated.children.find(node => node.tagName === 'DETAILS'));
+    for (const label of ['Sitzung: 24.06.2026', 'Dateieintrag erstellt: 07.07.2026',
+      'Dateieintrag ge\u00e4ndert: 10.07.2026'])
+      assert.ok(dateDetails.some(node => node.textContent === label), 'additional dates remain inspectable in details');
     const partialDates = render({ evidence: { relationshipsComplete: false, relationshipTotal: 6,
       relationsAvailable: { id: fileId, view: 'relations', direction: 'incoming', snapshotId: 'snapshot' },
       relationshipPath: [{ source: 'meeting/1', sourceKind: 'Meeting', sourceDate: {
         value: '2026-06-24', precision: 'day' } }] } });
-    assert.ok(!partialDates.children.filter(node => node.className === 'meta muted')
-      .flatMap(node => Array.from(node.children)).some(node => /^Sitzung:/.test(node.textContent)),
+    assert.ok(!descendants(partialDates.children.find(node => node.tagName === 'DETAILS'))
+      .some(node => /^Sitzung:/.test(node.textContent)),
       'a truncated relationship set cannot establish a unique meeting date');
     assert.ok(partialDates.children.find(node => node.tagName === 'DETAILS').children
       .some(node => node.tagName === 'A' && node.href.includes('view=relations')));
@@ -201,20 +366,20 @@ export async function testSearchWeb(binary, index, fileId) {
       { source: 'meeting/1', sourceKind: 'Meeting', sourceDate: { value: '2026-06-24', precision: 'day' } },
       { source: 'meeting/2', sourceKind: 'Meeting', sourceDate: { value: '2026-06-25', precision: 'day' } },
     ] } });
-    assert.ok(!ambiguous.children.filter(node => node.className === 'meta muted')
-      .flatMap(node => Array.from(node.children)).some(node => /^Sitzung:/.test(node.textContent)),
+    assert.ok(!descendants(ambiguous.children.find(node => node.tagName === 'DETAILS'))
+      .some(node => /^Sitzung:/.test(node.textContent)),
     'do not choose an arbitrary meeting date for a shared document');
     const partlyDated = render({ evidence: { relationshipPath: [
       { source: 'meeting/1', sourceKind: 'Meeting', sourceDate: { value: '2026-06-24', precision: 'day' } },
       { source: 'meeting/2', sourceKind: 'Meeting', sourceDate: null },
     ] } });
-    assert.ok(!partlyDated.children.filter(node => node.className === 'meta muted')
-      .flatMap(node => Array.from(node.children)).some(node => /^Sitzung:/.test(node.textContent)),
+    assert.ok(!descendants(partlyDated.children.find(node => node.tagName === 'DETAILS'))
+      .some(node => /^Sitzung:/.test(node.textContent)),
     'a second meeting with no date still makes the context ambiguous');
     const invalid = render({ evidence: { documentDates: {
       created: { value: '2026-02-30', precision: 'invalid' } } } });
-    assert.ok(invalid.children.some(node => node.children.some(child =>
-      child.textContent === 'Dateieintrag erstellt: Ung\u00fcltiges Datum: 2026-02-30')));
+    assert.ok(descendants(invalid.children.find(node => node.tagName === 'DETAILS')).some(node =>
+      node.textContent === 'Dateieintrag erstellt: Ung\u00fcltiges Datum: 2026-02-30'));
     const enriched = render({ snippet: 'Passender Protokolltext.', preparation: {
       status: 'complete', selection: 'matching-text', fields: [
         { field: 'document.date', value: '2026-07-16', status: 'rule-supported', page: 1 },
@@ -231,6 +396,11 @@ export async function testSearchWeb(binary, index, fileId) {
     assert.ok(enrichedNodes.some(n => n.textContent === 'Ergebnis laut PDF: vertagt'));
     assert.ok(enrichedNodes.some(n => n.textContent === '<img src=x onerror=alert(1)>'));
     assert.ok(!enrichedNodes.some(n => n.tagName === 'IMG'), 'Extracted source text is never interpreted as HTML');
+    assert.ok(!visibleNodes(enriched).some(n => n.className === 'pdf-facts' || n.className === 'pdf-context'),
+      'additional PDF fields and structural context are consolidated inside details');
+    const failedHit = render({ preparation: { status: 'failed', fields: [] } });
+    assert.ok(visibleNodes(failedHit).some(n => /Textextraktion fehlgeschlagen/.test(n.textContent || '')),
+      'a collapsed detail view must still make extraction failures visible');
     assert.equal(enriched.children.find(n => n.tagName === 'H2').children[0].textContent,
       'Top 3.12 Erhalt einer Stra\u00dfe', 'A source-supported TOP title improves a generic protocol title');
     const structured = { tagName: 'DIV', children: [], append(...nodes) { this.children.push(...nodes); } };
@@ -382,6 +552,9 @@ export async function testSearchWeb(binary, index, fileId) {
       ['--port', '8080', 'Schulweg'], ['--serve', '--year', '2024'], ['--serve', '--json'],
       ['--serve', 'Schulweg'], ['--serve', '--batch'], ['--serve', '--port', '0'],
       ['--serve', '--sort', 'relevance'], ['--serve', '--offset', '0'],
+      ['--web-root', webRoot, 'Schulweg'], ['--input', archives, 'Schulweg'],
+      ['--serve', '--publish-pdfs', webRoot], ['--publish-pdfs', webRoot, '--json'],
+      ['--serve', '--web-root', join(webRoot, 'missing')],
     ]) {
       const invalid = spawnSync(binary, ['--index', index, ...args],
         { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 });

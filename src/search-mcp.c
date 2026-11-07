@@ -39,6 +39,9 @@ static const char *const tools[] = {
     "contextOmitted and available explicitly identify deferred details.\","
     READ_ONLY ",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{"
     "\"q\":{\"type\":\"string\",\"maxLength\":16384},"
+    "\"mode\":{\"enum\":[\"lexical\",\"semantic\",\"hybrid\"],\"default\":\"lexical\","
+    "\"description\":\"semantic embeds natural language; hybrid unions word and vector candidates. "
+    "Optional native embeddings must be configured; scores are not probabilities.\"},"
     "\"year\":{\"type\":\"integer\",\"minimum\":2000,\"maximum\":2099,\"description\":\"Paper reference year from YY/ reference, not document or meeting calendar year\"},"
     "\"paperType\":{\"type\":\"string\",\"minLength\":1},\"organization\":{\"type\":\"string\",\"minLength\":1},"
     "\"organizationId\":{\"type\":\"string\",\"description\":\"Exact responsibility ID, discover with get_search_options\"},"
@@ -222,18 +225,18 @@ static int string_argument(const Json *json, size_t arguments, const char *key, 
 static int call_tool(const SearchIndex *index, SearchWorkspace *workspace, const Json *json,
                      size_t arguments, const char *name, ToolByteBuffer *data, const char **error) {
     static const char *const search_keys[] = {"q", "year", "paperType", "organization", "kind", "limit", "offset", "sort", "group",
-        "dateRole", "dateFrom", "dateThrough", "organizationId", "actorId", "snapshotId"};
+        "dateRole", "dateFrom", "dateThrough", "organizationId", "actorId", "snapshotId", "mode"};
     *error = "invalid tool arguments: unexpected/duplicate fields, wrong types, empty strings or out-of-range values";
     if (!rt_strcmp(name, "search")) {
         SearchFilter filter;
         SearchResult result;
         char q[16385], paper_type[4096], organization[4096], record_kind[128], sort[32], group[32];
-        char date_role[64], date_from[32], date_through[32];
+        char date_role[64], date_from[32], date_through[32], mode[32];
         char organization_id[16385], actor_id[16385], snapshot[65];
         size_t query = json_get(json, arguments, "q");
         rt_memset(&filter, 0, sizeof(filter)); filter.limit = 20; filter.group = SEARCH_PAPERS;
         q[0] = 0;
-        if (object_fields(json, arguments, search_keys, 15, 0) != 0 ||
+        if (object_fields(json, arguments, search_keys, 16, 0) != 0 ||
             (query != JSON_NONE && json_string(json, query, q, sizeof(q)) != 0) ||
             string_argument(json, arguments, "dateRole", date_role, sizeof(date_role), 0) ||
             string_argument(json, arguments, "dateFrom", date_from, sizeof(date_from), 0) ||
@@ -241,6 +244,7 @@ static int call_tool(const SearchIndex *index, SearchWorkspace *workspace, const
             string_argument(json, arguments, "organizationId", organization_id, sizeof(organization_id), 0) ||
             string_argument(json, arguments, "actorId", actor_id, sizeof(actor_id), 0) ||
             string_argument(json, arguments, "snapshotId", snapshot, sizeof(snapshot), 0) ||
+            string_argument(json, arguments, "mode", mode, sizeof(mode), 0) ||
             string_argument(json, arguments, "paperType", paper_type, sizeof(paper_type), 0) != 0 ||
             string_argument(json, arguments, "organization", organization, sizeof(organization), 0) != 0 ||
             string_argument(json, arguments, "kind", record_kind, sizeof(record_kind), 0) != 0 ||
@@ -265,6 +269,11 @@ static int call_tool(const SearchIndex *index, SearchWorkspace *workspace, const
         filter.date_from = *date_from ? date_from : 0; filter.date_through = *date_through ? date_through : 0;
         filter.organization_id = *organization_id ? organization_id : 0;
         filter.actor_id = *actor_id ? actor_id : 0; filter.snapshot_id = *snapshot ? snapshot : 0;
+        if (*mode && rt_strcmp(mode, "lexical")) {
+            if (!rt_strcmp(mode, "semantic")) filter.mode = SEARCH_SEMANTIC;
+            else if (!rt_strcmp(mode, "hybrid")) filter.mode = SEARCH_HYBRID;
+            else return 1;
+        }
         if (*date_role && search_date_role(date_role, &filter.date_role)) return 1;
         {
             int status = search_query(index, workspace, q, &filter, &result, error);

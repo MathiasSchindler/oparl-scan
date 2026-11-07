@@ -87,6 +87,12 @@ try {
   const query = (text, args = []) => JSON.parse(run(searcher, ['--index', index, '--json', ...args,
     ...(args.includes('--offset') ? ['--snapshot-id', snapshotId] : []), text]).stdout);
   const papers = text => query(text, ['--kind', 'Paper']).hits.map(hit => hit.id).sort();
+  assert.deepEqual(query('Schulweg', ['--mode', 'lexical']), query('Schulweg'),
+    'explicit lexical mode preserves the default result shape and ranking');
+  for (const mode of ['semantic', 'hybrid']) {
+    const missing = run(searcher, ['--index', index, '--mode', mode, 'Schulweg'], 1);
+    assert.match(missing.stderr, /requires a verified embedding index/);
+  }
   assert.equal(query('1099', ['--kind', 'Person']).hits[0].name, escapedName,
     'buffered JSON output must preserve quotes, backslashes, UTF-8 and control characters');
   assert.deepEqual(papers('Schulweg OR Haushalt AND NOT vertraulich'), [id('papers/1'), id('papers/2')]);
@@ -315,7 +321,7 @@ try {
     invitation: file(1).id, verbatimProtocol: file(2).id,
     agendaItem: [{ id: id('agendaItems/unrelated'), name: 'Anderer Tagesordnungspunkt' }] });
   run(indexer, ['--input', archives, '--output', index], 3);
-  await testSearchWeb(searcher, index, file(1).id);
+  await testSearchWeb(searcher, index, file(1).id, archives);
   const beforeFailure = await readFile(index);
   await writeFile(join(archives, '2023', 'metadata', 'invalid.json'), '{');
   run(indexer, ['--input', archives, '--output', index], 1);

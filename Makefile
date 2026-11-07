@@ -23,6 +23,7 @@ INDEX_COMMON := $(addprefix $(BUILD)/obj/$(NEWOS)/src/shared/,pdf.o pdf_writer.o
 CPPFLAGS := -I$(NEWOS)/src/shared -Isrc -DNEWOS_HAVE_PTHREAD=0 \
 	-DNEWOS_RUNTIME_THREAD_SAFE_ALLOC=1 -DNEWOS_RUNTIME_ALLOC_LOCK=3
 CFLAGS := -std=c11 -Oz -Wall -Wextra -Wpedantic -ffreestanding -fno-builtin \
+	-fno-strict-aliasing \
 	-fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections
 APP := src/oparl-scan.c src/json.c src/http.c src/archive-version.c src/archive-walk.c
@@ -74,8 +75,18 @@ endif
 OBJECTS := $(addprefix $(BUILD)/obj/,$(addsuffix .o,$(basename $(COMMON) $(PLATFORM) $(START))))
 APP_OBJECTS := $(addprefix $(BUILD)/obj/,$(APP:.c=.o))
 INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o search-model.o search-date.o search-research.o search-preparation.o json.o pdf-text.o pdf-structure.o archive-version.o archive-walk.o prepare.o)
-SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-model.o search-date.o search-research.o search-preparation.o pdf-structure.o search-web.o search-mcp.o json.o)
+SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-model.o search-date.o search-research.o search-preparation.o pdf-structure.o search-web.o search-mcp.o search-pdfs.o search-preview-assets.o archive-walk.o json.o)
 PREPARE_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-prepare.o prepare.o pdf-text.o pdf-structure.o json.o archive-walk.o)
+EMBEDDING := src/embedding
+EMBEDDING_CORE := $(addprefix $(BUILD)/obj/$(EMBEDDING)/,bundle.o tokenizer.o model.o kernels.o sme.o vectors.o index_io.o)
+EMBEDDING_INDEX := $(addprefix $(BUILD)/obj/$(EMBEDDING)/,json.o search.o sections.o content_search.o index.o section_index.o)
+$(EMBEDDING_CORE) $(EMBEDDING_INDEX) $(BUILD)/obj/tests/test-embedding.o: CFLAGS += -O3 -ffp-contract=off
+$(EMBEDDING_CORE) $(EMBEDDING_INDEX) $(BUILD)/obj/tests/test-embedding.o: CPPFLAGS += -I$(EMBEDDING)
+$(BUILD)/obj/$(EMBEDDING)/index.o: CPPFLAGS += -Dmain=eg_title_index_main
+$(BUILD)/obj/$(EMBEDDING)/section_index.o: CPPFLAGS += -Dmain=eg_section_index_main
+$(BUILD)/obj/src/search-semantic.o: CFLAGS += -O3 -ffp-contract=off
+$(BUILD)/test-embedding$(EXE): $(BUILD)/obj/tests/test-embedding.o $(EMBEDDING_CORE) $(BUILD)/obj/$(EMBEDDING)/search.o $(BUILD)/obj/$(EMBEDDING)/json.o $(OBJECTS) $(LINK_DEPS)
+	$(call link,$(BUILD)/obj/tests/test-embedding.o $(EMBEDDING_CORE) $(BUILD)/obj/$(EMBEDDING)/search.o $(BUILD)/obj/$(EMBEDDING)/json.o $(OBJECTS))
 PREPARE_SOURCES := src/prepare.c src/prepare.h src/pdf-text.c src/pdf-text.h src/pdf-structure.c src/pdf-structure.h src/json.c src/json.h \
 	$(NEWOS)/src/shared/pdf.c $(NEWOS)/src/shared/compression/zlib.c \
 	$(NEWOS)/src/shared/compression/crc32.c \
@@ -91,11 +102,11 @@ all: $(PROGRAM) $(INDEX_PROGRAM) $(SEARCH_PROGRAM) $(PREPARE_PROGRAM)
 $(PROGRAM): $(APP_OBJECTS) $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(APP_OBJECTS) $(OBJECTS))
 
-$(INDEX_PROGRAM): $(INDEX_OBJECTS) $(INDEX_COMMON) $(OBJECTS) $(LINK_DEPS)
-	$(call link,$(INDEX_OBJECTS) $(INDEX_COMMON) $(OBJECTS))
+$(INDEX_PROGRAM): $(INDEX_OBJECTS) $(INDEX_COMMON) $(BUILD)/obj/src/search-semantic.o $(EMBEDDING_CORE) $(EMBEDDING_INDEX) $(OBJECTS) $(LINK_DEPS)
+	$(call link,$(INDEX_OBJECTS) $(INDEX_COMMON) $(BUILD)/obj/src/search-semantic.o $(EMBEDDING_CORE) $(EMBEDDING_INDEX) $(OBJECTS))
 
-$(SEARCH_PROGRAM): $(SEARCH_OBJECTS) $(OBJECTS) $(LINK_DEPS)
-	$(call link,$(SEARCH_OBJECTS) $(OBJECTS))
+$(SEARCH_PROGRAM): $(SEARCH_OBJECTS) $(BUILD)/obj/src/search-semantic.o $(EMBEDDING_CORE) $(EMBEDDING_INDEX) $(OBJECTS) $(LINK_DEPS)
+	$(call link,$(SEARCH_OBJECTS) $(BUILD)/obj/src/search-semantic.o $(EMBEDDING_CORE) $(EMBEDDING_INDEX) $(OBJECTS))
 
 $(PREPARE_PROGRAM): $(PREPARE_OBJECTS) $(INDEX_COMMON) $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(PREPARE_OBJECTS) $(INDEX_COMMON) $(OBJECTS))
@@ -112,6 +123,8 @@ $(BUILD)/obj/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(CC) --target=$(TRIPLE) $(CPPFLAGS) -ffreestanding -c $< -o $@
 
+$(BUILD)/obj/src/search-preview-assets.o: src/pdf-preview.js vendor/pdf-reader/dist/pdf-crumb.min.js
+
 $(NEWOS)/build/host-$(NEWOS_HOST)/linker:
 	$(MAKE) -C $(NEWOS) build/host-$(NEWOS_HOST)/linker CC="$(CC)"
 
@@ -119,8 +132,9 @@ $(BUILD)/imports/lib%.a: $(NEWOS)/src/platform/windows/imports/%.def
 	@mkdir -p $(dir $@)
 	llvm-dlltool -m $(if $(filter aarch64,$(ARCH)),arm64,i386:x86-64) -d $< -l $@
 
-test: all $(BUILD)/test-json$(EXE) check-deps
+test: all $(BUILD)/test-json$(EXE) $(BUILD)/test-embedding$(EXE) check-deps
 	$(BUILD)/test-json$(EXE)
+	$(BUILD)/test-embedding$(EXE)
 	node tests/integration.mjs "$(abspath $(PROGRAM))"
 	node tests/incremental.mjs "$(abspath $(PROGRAM))"
 	node tests/archive.mjs "$(abspath $(PROGRAM))" "$(abspath $(INDEX_PROGRAM))" "$(abspath $(SEARCH_PROGRAM))"
@@ -143,4 +157,4 @@ test-mcp-acceptance: all
 benchmark: all
 	node tests/benchmark-search.mjs "$(abspath $(SEARCH_PROGRAM))" build/search/index.ops
 
--include $(OBJECTS:.o=.d) $(APP_OBJECTS:.o=.d) $(INDEX_OBJECTS:.o=.d) $(SEARCH_OBJECTS:.o=.d) $(PREPARE_OBJECTS:.o=.d) $(INDEX_COMMON:.o=.d) $(BUILD)/obj/tests/test-json.d
+-include $(OBJECTS:.o=.d) $(APP_OBJECTS:.o=.d) $(INDEX_OBJECTS:.o=.d) $(SEARCH_OBJECTS:.o=.d) $(PREPARE_OBJECTS:.o=.d) $(INDEX_COMMON:.o=.d) $(EMBEDDING_CORE:.o=.d) $(EMBEDDING_INDEX:.o=.d) $(BUILD)/obj/src/search-semantic.d $(BUILD)/obj/tests/test-embedding.d $(BUILD)/obj/tests/test-json.d

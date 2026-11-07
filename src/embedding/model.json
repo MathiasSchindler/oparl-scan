@@ -1,0 +1,21 @@
+{
+  "repository": "google/embeddinggemma-2",
+  "revision": "f9972ac22e696a105c482202646979e33e4b5a1e",
+  "source_sha256": {
+    "model.safetensors": "197a32965d4b1105faf060417baa899e193fb73cd401f42ec9295234d5553d79",
+    "tokenizer.json": "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4"
+  },
+  "reference": {
+    "device": "cpu",
+    "dtype": "float32",
+    "attention": "eager",
+    "threads": 1
+  },
+  "acceptance": {
+    "max_absolute_error": 0.00005,
+    "rms_error": 0.00001,
+    "minimum_cosine": 0.999999,
+    "layer_atol": 0.005,
+    "layer_rtol": 0.0002
+  }
+}

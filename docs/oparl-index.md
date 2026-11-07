@@ -49,12 +49,80 @@ sind fehlende, veraltete oder defekte Artefakte ein fataler Fehler.
 | `--input PFAD` | Einzelnes Archiv oder Elternverzeichnis; Standard `downloads` |
 | `--output DATEI` | Binaerer Index; Standard `build/search/index.ops` |
 | `--prepared VERZEICHNIS` | Verifizierte Ausgabe von `oparl-prepare`; kein stiller Extraktions-Fallback |
+| `--embeddings VERZEICHNIS` | Optionaler nativer Titel-/Hauptformular-Vektorindex; benoetigt `--model` und `--prepared` |
+| `--model VERZEICHNIS` | Vorhandene native `weights.eg2` und `tokenizer.eg2` |
+| `--threads N` | Inferenz-Worker, 1 bis 32; Standard 1 |
+| `--embeddings-only` | Nur Vektoren zum bereits veroeffentlichten Binaerindex aktualisieren; kein erneuter Volltextindexaufbau |
 | `--help` | Kurze Kommandozeilenhilfe |
 
 Archive werden anhand ihrer `archive.json` gefunden. Auch Verzeichnisse
 mit mehr als 1.024 Dateien werden vollstaendig verarbeitet.
 Die Jahrgangsauswahl erfolgt ueber die Eingabearchive, nicht ueber
 eine eigene `--year`-Option des Indexers.
+
+## Optionale native Embeddings
+
+Die Vektorindexierung laeuft im selben C-Prozess, ohne Python, Unterprozesse,
+zusaetzlichen HTTP-Dienst oder Vektordatenbank. Scan bleibt fuer Originaldaten
+zustaendig; Prepare liefert verifizierte Seitentexte; Index berechnet fehlende
+Vektoren bzw. uebernimmt gepruefte Cache-Eintraege; Search bettet Anfragen nativ ein.
+
+```sh
+build/macos-aarch64/oparl-index --input downloads --prepared build/prepared \
+  --output build/search/index.ops --embeddings build/search/embeddings \
+  --model build/models/embeddinggemma --threads 12
+
+# Vorhandenen Volltextindex beibehalten, nur seinen Vektorbestand erstellen.
+build/macos-aarch64/oparl-index --input downloads --prepared build/prepared \
+  --output build/search/index.ops --embeddings build/search/embeddings \
+  --model build/models/embeddinggemma --threads 12 --embeddings-only
+```
+
+Das Modell ist auf Revision `f9972ac22e696a105c482202646979e33e4b5a1e`
+festgelegt; native Gewichte/Tokenizer werden anhand der im C-Kern hinterlegten
+SHA-256 geprueft. Keine automatischen Modelldownloads. Lizenz und
+Konvertierungsprovenienz des Modells bei einer Weitergabe mitliefern.
+Die Beispiele verwenden `build/models/embeddinggemma` mit `weights.eg2`,
+`tokenizer.eg2` und dem Konvertierungsmanifest. Dieses Verzeichnis wird fuer
+den Betrieb benoetigt und gehoert nicht ins Quellrepository. Der fruehere
+Experimentordner ist keine Build- oder Laufzeitabhaengigkeit.
+
+Die Embedding-Erfassung verarbeitet Archive mit Referenzjahr zwischen 2000 und 2099.
+Zusaetzliche Kalender-/Zeitfensterarchive ohne Referenzjahr bleiben im normalen
+Suchindex, werden aber mit ausdruecklichem Hinweis nicht separat eingebettet.
+Titel werden pro Paper eingebettet. Inhaltsvektoren erfassen **nur** eindeutig
+nummerierte Hauptformulare mit passendem Drucksachenkennzeichen, konsistenten
+Seitenmarkern und warnungsfrei vorbereiteten Formularseiten. Nachfolgende
+Anlagen sind ausgeschlossen. Aeltere Formulare koennen fuer einen gesamten
+Jahrgang null Abschnitte liefern; dies wird mit Einschluss-/Ausschlusszahlen
+ausgewiesen und ist kein behaupteter Volltext-Vektorbestand.
+
+`manifest.json` bindet den Companion an den exakten OParl-Snapshot und an die
+Hashes seiner Jahresmanifeste. Generationen liegen unter
+`generations/<pid>-<monotone-zeit>/`; erst nach Validierung der Titel,
+PDF-Fassungen und aller eingeschlossenen Seitentexte wird das oberste Manifest
+atomar ersetzt. Alte Generationen werden nicht automatisch geloescht.
+Der exklusive Lock `.oparl-embedding.lock` verhindert konkurrierende Builder;
+Suchstarts waehrend des Aufbaus werden explizit abgewiesen, bereits geladene
+Suchprozesse bleiben unveraendert. Nach einem Abbruch den eingetragenen
+Prozess zuerst pruefen, bevor ein verwaister Lock entfernt wird.
+
+Inhaltlich adressierte Vektoren werden aus der vorherigen Generation geprueft
+und wiederverwendet, als Hardlinks oder mit explizit angekuendigter Kopie.
+Fuer die einmalige Uebernahme bestehender Experiment-Caches koennen deren
+`cache/*.egv` vor dem ersten Aufbau unter
+`<embeddings>/<jahr>/titles/cache/` bzw. `sections/cache/` bereitgestellt werden.
+Dabei werden keine ungeprueften fremden Manifeste als Index uebernommen.
+
+Im Modus `--embeddings-only` prueft der native Section-Indexer die vorhandenen
+Prepare-Artefakte anhand ihres eigenen Fingerabdrucks, ihrer Hashes und der
+PDF-Quelle; die Texte muessen exakt zum vorhandenen Suchsnapshot passen.
+Er verlangt keinen Neuaufbau allein wegen eines neu kompilierten
+Prepare-Engine-Fingerabdrucks. Der normale Volltextindexaufbau behaelt dagegen
+seinen bestehenden strengen `--prepared`-Vertrag.
+Bei Fehler bleibt der Binaerindex verfuegbar; ein fehlender/veralteter Companion
+wird niemals still durch Wortsuche ersetzt. Exit 3 fuer bekannte Archiv- oder
+Volltextluecken bleibt erhalten.
 
 ## Welche Inhalte werden indexiert?
 

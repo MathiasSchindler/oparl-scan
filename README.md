@@ -19,6 +19,12 @@ Dokumentationsseiten:
 `oparl-search` bietet eine CLI sowie unter macOS und Linux einen
 lokalen Webdienst mit Suchoberflaeche, JSON-API und lesendem
 HTTP-MCP-Endpunkt `/mcp`. Alle verwenden denselben Suchkern.
+Optional zeigen PDF-Links eine schwebende Vorschau aus geprueften lokalen
+Kopien; der Klick oeffnet weiterhin das RIS-Original.
+Optional integriert dieselbe C-Pipeline die native EmbeddingGemma-Inferenz:
+Wortsuche bleibt Standard, hinzu kommen **Thematisch** und **Hybrid** fuer
+Titel und sicher abgegrenzte Hauptformulare. Modelle und Vektoren bleiben
+ausserhalb des Quellrepositories; es gibt keinen separaten Inferenzdienst.
 
 Die erlaubten Produktionshosts und URL-Pfade sowie die Jahrgangsauswahl
 des Downloaders sind derzeit auf Potsdam abgestimmt. Weitere Endpunkte
@@ -43,6 +49,24 @@ Externe PDF-Werkzeuge oder OCR-Unterprozesse werden nicht gestartet.
 des oeffentlichen [newos-Repositories](https://github.com/mathiasschindler/newos)
 unter CC0. Der Quellcode wird separat bezogen und nicht in die Git-Historie
 von OParl-Scan kopiert. Das Submodul legt die genaue Revision fuer den Build fest.
+Die gepinnte Revision `72d2bfed00a770c0e2aa0ee95615cbca16ff18f0`
+enthaelt bereits den upstream Worker-Claim-Fix; ein eigener Build-Patch ist
+nicht erforderlich.
+
+Die eigene native EmbeddingGemma-Implementierung ist als Bestandteil dieses
+Projekts in [src/embedding](src/embedding) integriert, nicht als Vendor-Abhaengigkeit.
+Sie verwendet ebenfalls ausschliesslich diese gemeinsame newos-Laufzeit.
+Fuer die optionalen Suchmodi werden lokal konvertierte, hashverifizierte
+Artefakte von `google/embeddinggemma-2` benoetigt; Build und Wortsuche
+benoetigen kein Modell. [Einrichtung und Grenzen](docs/oparl-index.md#optionale-native-embeddings).
+Native Modellartefakte koennen unter `build/models/embeddinggemma` liegen;
+der temporaere Experimentordner wird fuer Build und Betrieb nicht benoetigt.
+
+Die optionale Browser-Vorschau verwendet den ebenfalls unter CC0 stehenden
+[pdf-crumb.js-Renderer](https://github.com/MathiasSchindler/pdf-reader) aus dem
+festgelegten Submodul [vendor/pdf-reader](vendor/pdf-reader).
+Das Renderer-Bundle ist im Suchbinary eingebettet und wird nur im Browser
+ausgefuehrt; es fuegt keine Server-Runtime oder C-Laufzeitabhaengigkeit hinzu.
 
 ```sh
 git clone --recurse-submodules https://github.com/MathiasSchindler/oparl-scan.git
@@ -110,6 +134,18 @@ build/macos-aarch64/oparl-search --serve --port 8080
 Die Weboberflaeche ist dann unter <http://127.0.0.1:8080/> erreichbar.
 Mit Ctrl+C den Dienst beenden. API und Betriebsgrenzen erklaert die
 [Webdienst-Dokumentation](docs/oparl-search.md#lokaler-webdienst).
+
+Fuer die optionale PDF-Hovervorschau zuerst unveraenderliche Kopien des
+aktuellen Indexbestands lokal publizieren und den Webdienst damit starten:
+
+```sh
+build/macos-aarch64/oparl-search --publish-pdfs build/search/web --input downloads
+build/macos-aarch64/oparl-search --serve --web-root build/search/web --port 8080
+```
+
+Dabei werden keine RIS-Dateien erneut heruntergeladen. Grenzen,
+Diagnosehinweise und Kopientreue erklaert die
+[Vorschau-Dokumentation](docs/oparl-search.md#optionale-lokale-pdf-vorschau).
 
 Downloads und Indexaufbau nicht gleichzeitig auf denselben Archiven
 ausfuehren. Nach aktualisierten Downloads den Index neu aufbauen;
