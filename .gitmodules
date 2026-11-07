@@ -1,3 +1,6 @@
 [submodule "vendor/newos"]
 	path = vendor/newos
 	url = https://github.com/mathiasschindler/newos.git
+[submodule "vendor/pdf-reader"]
+	path = vendor/pdf-reader
+	url = https://github.com/MathiasSchindler/pdf-reader.git
