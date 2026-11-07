@@ -75,6 +75,7 @@ const server = createServer((req, res) => {
   if (url.pathname.startsWith('/content/')) {
     const number = Number(url.pathname.split('/').at(-1));
     if (mode === 'denied' && number === 1) { res.writeHead(403); res.end(); return; }
+    if (mode === 'missing-document' && number === 1) { res.writeHead(404); res.end(); return; }
     const etag = `"${number}-${versions.get(number)}"`;
     if (req.headers['if-none-match'] === etag) {
       res.writeHead(304, { ETag: etag }); res.end(); return;
@@ -106,6 +107,9 @@ const server = createServer((req, res) => {
         (Date.parse(row.modified) >= since && Date.parse(row.modified) <= until));
     }
   } else {
+    if (mode === 'missing-file' && url.pathname === '/oparl/files/1') {
+      res.writeHead(404); res.end(); return;
+    }
     const resource = objects.get(url.pathname.replace('/oparl/', ''));
     if (!resource) { res.writeHead(404); res.end(); return; }
     res.end(JSON.stringify(resource)); return;
@@ -232,12 +236,35 @@ try {
   const unavailable = await scan(directory, [], 3);
   assert.equal(unavailable.state, 'incomplete');
   assert.equal(unavailable.unavailableDocuments, 1);
-  assert.equal(unavailable.syncCheckpointEpochSeconds, checkpoint);
+  assert.equal(unavailable.syncCheckpointEpochSeconds, unavailable.runStartedAtEpochSeconds);
+  for (const value of objects.values()) value.modified = old;
+  const stillUnavailable = await scan(directory, [], 3);
+  assert.equal(stillUnavailable.unavailableDocuments, 1);
+  assert.equal(stillUnavailable.syncCheckpointEpochSeconds, stillUnavailable.runStartedAtEpochSeconds);
+  assert.equal(requested('/oparl/papers/1').length, 0);
+  assert.equal(requests.filter(request => request.path.startsWith('/content/')).length, 1,
+    'only the unavailable PDF is retried without a File change');
+  const retryReport = await readFile(join(directory, 'unavailable-files.jsonl'), 'utf8');
+  for (const missingMode of ['missing-file', 'missing-document']) {
+    mode = missingMode;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const incompleteRetry = await scan(directory, [], 1);
+      assert.equal(incompleteRetry.syncCheckpointEpochSeconds, stillUnavailable.syncCheckpointEpochSeconds);
+      assert.match(incompleteRetry.stderr, /previous unavailable report retained/);
+      assert.equal(await readFile(join(directory, 'unavailable-files.jsonl'), 'utf8'), retryReport,
+        'failed retries must not drop pending PDFs or falsely heal document gaps');
+    }
+  }
   mode = '';
   assert.equal((await scan(directory)).complete, true);
   assert.deepEqual(await document(directory, 1), payload(1));
+  assert.equal((await readFile(join(directory, 'unavailable-files.jsonl'), 'utf8')).trim(), '');
+  await scan(directory);
+  assert.equal(requests.filter(request => request.path.startsWith('/content/')).length, 0,
+    'recovered PDFs leave the retry list');
 
   checkpoint = await rewind(directory);
+  change('files/1');
   mode = 'ignored-filter';
   const ignored = await scan(directory, [], 1);
   assert.match(ignored.stderr, /filter ignored or invalid timestamp/);
@@ -297,8 +324,47 @@ try {
   assert.equal(backfill.newDocuments, 4, 'switching modes backfills unchanged binary files');
 
   reset(); mode = 'denied';
+  const deniedInitial = join(root, 'denied-initial');
+  const denied = await scan(deniedInitial, [], 3);
+  assert.equal(denied.syncCheckpointEpochSeconds, denied.runStartedAtEpochSeconds);
+  assert.equal(denied.syncBaselineComplete, true);
+  assert.equal(denied.complete, false);
+  const oldDeniedState = await manifest(deniedInitial);
+  const deniedAgain = await scan(deniedInitial, [], 3);
+  assert.equal(deniedAgain.syncMode, 'incremental');
+  assert.equal(deniedAgain.unavailableDocuments, 1);
+  assert.equal(requested('/oparl/papers/1').length, 0);
+  assert.equal(requests.filter(request => request.path.startsWith('/content/')).length, 1);
+  oldDeniedState.syncCheckpointEpochSeconds = 0;
+  oldDeniedState.syncBaselineComplete = false;
+  oldDeniedState.syncMode = 'full';
+  await writeFile(join(deniedInitial, 'archive.json'),
+    JSON.stringify({...oldDeniedState, missingResources:1}));
+  assert.equal((await scan(deniedInitial, [], 3)).syncMode, 'full',
+    'other historical gaps must not adopt an access-denied checkpoint');
+  await writeFile(join(deniedInitial, 'archive.json'), JSON.stringify(oldDeniedState));
+  const migrated = await scan(deniedInitial, [], 3);
+  assert.equal(migrated.syncMode, 'incremental');
+  assert.equal(migrated.syncBaselineComplete, true);
+  assert.match(migrated.stderr, /adopting completed metadata checkpoint/);
+  assert.equal(requested('/oparl/papers/1').length, 0);
+  const missingReportState = await manifest(deniedInitial);
+  await writeFile(join(deniedInitial, 'unavailable-files.jsonl'), '');
+  const missingReport = await scan(deniedInitial, [], 1);
+  assert.equal(missingReport.syncCheckpointEpochSeconds, missingReportState.syncCheckpointEpochSeconds);
+  assert.match(missingReport.stderr, /invalid unavailable file report/);
+  await writeFile(join(deniedInitial, 'unavailable-files.jsonl'),
+    `${JSON.stringify({id:id('files/1'),reason:'access-denied'})}\n`);
+  const report = await readFile(join(deniedInitial, 'unavailable-files.jsonl'), 'utf8');
+  await scan(deniedInitial, ['--metadata-only']);
+  assert.equal(await readFile(join(deniedInitial, 'unavailable-files.jsonl'), 'utf8'), report,
+    'metadata-only scans must not discard unavailable document retries');
+  mode = '';
+  assert.equal((await scan(deniedInitial)).complete, true);
+
+  reset(); mode = 'denied';
   const interrupted = join(root, 'interrupted-initial');
-  assert.equal((await scan(interrupted, [], 3)).syncCheckpointEpochSeconds, 0);
+  assert.equal((await scan(interrupted, ['--no-skip-unavailable-files'], 1)).syncCheckpointEpochSeconds, 0);
   mode = '';
   assert.equal((await scan(interrupted)).syncMode, 'full', 'failed initial archives are not legacy bootstraps');
   console.log('Incremental synchronization tests passed');

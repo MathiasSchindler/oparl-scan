@@ -380,10 +380,20 @@ darf seinen Zeitstand fortschreiben, waehrend `syncBaselineComplete: false`
 und `complete: false` die unvollstaendige historische Basis weiterhin zeigen.
 `--full` kann diese Basis erneut vollstaendig abgleichen.
 
-Nach Fehlern, Limits oder einem Abbruch wird der gespeicherte Abgleichzeitpunkt
-nicht vorgeschoben. Er ist der **Beginn**, nicht das Ende des letzten
-erfolgreichen Laufs. Ein abgebrochener Erstaufbau mit Checkpoint `0` bleibt
-beim Vollaufbau und wird nicht als Legacy-Archiv behandelt. Beim Wechsel von
+Nach fatalen Fehlern, HTTP-404-Luecken, Limits oder einem Abbruch wird der
+gespeicherte Abgleichzeitpunkt nicht vorgeschoben. Verweigerte PDF-Downloads
+blockieren ihn dagegen nicht, wenn der Metadatenabgleich vollstaendig beendet
+wurde: Ihre Datei-IDs bleiben im Bericht und werden auch ohne geaenderten
+OParl-Zeitstempel gezielt erneut abgefragt. `complete: false` und Exitcode `3`
+bleiben bis zur Behebung der Dokumentluecken erhalten.
+Der Checkpoint ist der **Beginn**, nicht das Ende des letzten vollstaendigen
+Metadatenabgleichs. `syncBaselineComplete` kennzeichnet eine vollstaendig
+abgeglichene Basis ohne andere Luecken; separat protokollierte
+Zugriffsverweigerungen verhindern diesen Basisstatus nicht.
+Ein aelterer Vollaufbau mit Checkpoint `0`, der nachweislich nur an
+verweigerten Dokumenten unvollstaendig blieb, uebernimmt automatisch seinen
+damaligen Laufbeginn. Andere abgebrochene Erstaufbauten mit Checkpoint `0` bleiben
+beim Vollaufbau und werden nicht als Legacy-Archiv behandelt. Beim Wechsel von
 `--metadata-only` zu Dokumentdownloads erfolgt ebenfalls ein Vollabgleich,
 damit unveraenderte alte Dateien nicht fehlen.
 
@@ -579,9 +589,11 @@ zum Abbruch.
 
 `archive.json` enthaelt `skipUnavailableFiles` und `unavailableDocuments`.
 Bei fehlenden Dokumenten bleibt `complete: false`, auch wenn der
-Suchlauf beendet ist. Der Bericht wird bei jedem Aufruf neu erstellt;
-fehlende Dateien werden erneut versucht, erfolgreiche Downloads normal
-wiederverwendet. Werden alle zuvor gesperrten Dateien verfuegbar,
+Suchlauf beendet ist. Bei Dokumentabgleichen wird der Bericht neu erstellt;
+im Delta-Modus werden zuvor verweigerte Dateien gezielt anhand ihrer aktuellen
+File-Metadaten erneut versucht, auch ohne Aenderung ihres `modified`-Wertes.
+Erfolgreiche Downloads werden normal wiederverwendet. Metadaten-only-Laeufe
+lassen den bestehenden Bericht unveraendert. Werden alle zuvor gesperrten Dateien verfuegbar,
 ist der naechste Bericht leer und das Archiv kann ohne `--refresh`
 vollstaendig werden.
 
@@ -590,6 +602,9 @@ Durchlauf ohne fatalen Fehler wird sie umbenannt. Bei Unterbrechung oder
 fatalem Fehler bleibt der Teilbericht erhalten. Ein eventuell noch
 vorhandener veroeffentlichter Bericht beschreibt dann weiterhin den
 vorherigen abgeschlossenen Durchlauf.
+Fuehren gezielte Wiederholungsversuche zu HTTP-404-Luecken, wird der
+Delta-Lauf mit Fehler beendet und der bisherige Bericht beibehalten;
+ungeloeste Datei-IDs duerfen nicht aus der Wiederholungsliste verschwinden.
 
 ### Falsche OParl-Dateigroessen
 

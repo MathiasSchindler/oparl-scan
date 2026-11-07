@@ -92,7 +92,7 @@ typedef struct {
     int accept_size_mismatch;
     int refresh;
     int full, incremental, sync_state_present, baseline_complete, sync_metadata_only;
-    unsigned long long sync_checkpoint, sync_since, oldest_metadata;
+    unsigned long long sync_checkpoint, sync_since, oldest_metadata, previous_unavailable;
     char sync_source[32], modified_since[32], modified_until[32];
     int limited;
     ToolArray jobs;
@@ -1363,6 +1363,38 @@ static int collection(Archive *archive, const Job *job) {
     return result;
 }
 
+static int completed_access_denied_run(const Json *json, unsigned long long *checkpoint) {
+    unsigned long long started, finished, unavailable, value;
+    size_t i, types = json_get(json, 0, "types");
+    if (!json_equals(json, json_get(json, 0, "state"), "incomplete") ||
+        !json_equals(json, json_get(json, 0, "syncMode"), "full") ||
+        json_true(json, json_get(json, 0, "metadataOnly")) ||
+        json_true(json, json_get(json, 0, "limited")) ||
+        json_uint(json, json_get(json, 0, "runStartedAtEpochSeconds"), &started) != 0 ||
+        json_uint(json, json_get(json, 0, "runFinishedAtEpochSeconds"), &finished) != 0 ||
+        !started || finished < started ||
+        json_uint(json, json_get(json, 0, "unavailableDocuments"), &unavailable) != 0 ||
+        !unavailable ||
+        json_uint(json, json_get(json, 0, "missingResources"), &value) != 0 || value ||
+        json_uint(json, json_get(json, 0, "unknownMeetingDates"), &value) != 0 || value)
+        return 0;
+    for (i = 0; i < TYPE_COUNT; i++) {
+        size_t type = json_get(json, types, type_names[i]);
+        unsigned long long scheduled, finished_work, errors;
+        if (json_uint(json, json_get(json, type, "scheduledWorkItems"), &scheduled) != 0 ||
+            json_uint(json, json_get(json, type, "finishedWorkItems"), &finished_work) != 0 ||
+            scheduled != finished_work ||
+            (i <= TYPE_BODY && !scheduled) ||
+            json_uint(json, json_get(json, type, "errors"), &errors) != 0 ||
+            errors != (i == TYPE_FILE ? unavailable : 0) ||
+            json_uint(json, json_get(json, type, "missingResources"), &value) != 0 || value ||
+            json_uint(json, json_get(json, type, "incompleteCollections"), &value) != 0 || value)
+            return 0;
+    }
+    *checkpoint = started;
+    return 1;
+}
+
 static int validate_archive(Archive *archive) {
     char path[PATH_CAPACITY];
     unsigned char *bytes = 0;
@@ -1415,6 +1447,18 @@ static int validate_archive(Archive *archive) {
             size_t value = json_get(&json, json_get(&json, types, type_names[i]), "lastSuccessfulRunEndEpochSeconds");
             if (value != JSON_NONE && json_uint(&json, value, &archive->types[i].last_success) != 0) valid = 0;
         }
+    }
+    if (json_equals(&json, json_get(&json, 0, "state"), "incomplete") &&
+        json_get(&json, 0, "unavailableDocuments") != JSON_NONE &&
+        json_uint(&json, json_get(&json, 0, "unavailableDocuments"),
+                  &archive->previous_unavailable) != 0)
+        valid = 0;
+    if (valid && archive->sync_state_present && !archive->sync_checkpoint &&
+        completed_access_denied_run(&json, &archive->sync_checkpoint)) {
+        archive->baseline_complete = 1;
+        archive->sync_metadata_only = 0;
+        rt_copy_string(archive->sync_source, sizeof(archive->sync_source), "completed-metadata-run-start");
+        ris_warning("adopting completed metadata checkpoint; access-denied documents will be retried", path);
     }
     json_free(&json);
     rt_free(bytes);
@@ -1622,12 +1666,54 @@ static int finish_manifest(const Archive *archive, const char *name, int *fd) {
     return 0;
 }
 
+static int queue_unavailable_files(Archive *archive) {
+    char path[PATH_CAPACITY];
+    PlatformDirEntry info;
+    unsigned char *bytes = 0;
+    size_t length, start, end;
+    unsigned long long count = 0;
+    int result = 0;
+    if (!archive->incremental || archive->metadata_only) return 0;
+    if (rt_join_path(archive->output, "unavailable-files.jsonl", path, sizeof(path)) != 0)
+        return ris_error("unavailable file report path is too long", archive->output);
+    if (platform_get_path_info(path, &info) != 0)
+        return archive->previous_unavailable ?
+            ris_error("missing unavailable file report; use --full", path) : 0;
+    if (info.is_dir || info.size > META_LIMIT || tool_read_all_input(path, &bytes, &length) != 0)
+        return ris_error("cannot read unavailable file report; use --full", path);
+    for (start = 0; start < length; start = end + 1) {
+        char id[RIS_URL_CAPACITY], hash[65];
+        Json json;
+        for (end = start; end < length && bytes[end] != '\n'; end++) {}
+        if (end == start) continue;
+        if (json_parse(&json, (const char *)bytes + start, end - start) != 0) {
+            result = -1; break;
+        }
+        result = json_string(&json, json_get(&json, 0, "id"), id, sizeof(id));
+        if (!result && (!json_equals(&json, json_get(&json, 0, "reason"), "access-denied") ||
+                        !http_valid_url(&archive->http, id) || url_type(id) != TYPE_FILE))
+            result = -1;
+        json_free(&json);
+        if (result) break;
+        hash_text(id, hash);
+        if (!hash_seen(&archive->known_files, hash, 0)) { result = -1; break; }
+        count++;
+        if (!hash_seen(&archive->seen_files, hash, 0) && add_job(archive, id, JOB_RESOURCE) != 0) {
+            result = -1; break;
+        }
+    }
+    if (archive->previous_unavailable && count != archive->previous_unavailable) result = -1;
+    if (!result) archive->previous_unavailable = count;
+    rt_free(bytes);
+    return result ? ris_error("invalid unavailable file report; use --full", path) : 0;
+}
+
 static int run(Archive *archive) {
     Json system;
     unsigned char *bytes = 0;
     char bodies[RIS_URL_CAPACITY];
     size_t i;
-    int result;
+    int result, retries_queued = 0;
     {
         size_t used;
         archive->started = (unsigned long long)platform_get_epoch_time();
@@ -1655,7 +1741,7 @@ static int run(Archive *archive) {
             return -1;
         if (retain_selection(archive) != 0) return -1;
     }
-    if (archive->skip_unavailable_files &&
+    if (archive->skip_unavailable_files && !archive->metadata_only &&
         open_manifest(archive, "unavailable-files.jsonl", &archive->unavailable_fd) != 0)
         return -1;
     if (archive->accept_size_mismatch &&
@@ -1690,6 +1776,10 @@ static int run(Archive *archive) {
             return -1;
         }
         type->finished++;
+        if (i + 1 == archive->jobs.count && !retries_queued) {
+            retries_queued = 1;
+            if (queue_unavailable_files(archive) != 0) return -1;
+        }
     }
     return finish_manifest(archive, "selection.jsonl", &archive->selection_fd);
 }
@@ -1699,9 +1789,10 @@ static int write_summary(Archive *archive, int success, int force) {
     unsigned long long now = platform_get_monotonic_time_ns();
     unsigned char *bytes = 0;
     size_t i, length;
-    int fd, result, update_complete = success && !archive->limited && !archive->unavailable_files &&
+    int fd, result, metadata_complete = success && !archive->limited &&
         !archive->missing_resources && !archive->unknown_meetings;
-    int baseline_complete = archive->incremental ? archive->baseline_complete : update_complete;
+    int update_complete = metadata_complete && !archive->unavailable_files;
+    int baseline_complete = archive->incremental ? archive->baseline_complete : metadata_complete;
     int complete = update_complete && baseline_complete;
     if (!force && archive->summary_written_ns != 0 && now >= archive->summary_written_ns &&
         now - archive->summary_written_ns < SUMMARY_INTERVAL_NS) return 0;
@@ -1724,12 +1815,12 @@ static int write_summary(Archive *archive, int success, int force) {
              tool_json_field_uint(fd, "syncSinceEpochSeconds", archive->sync_since) ||
              tool_json_field_uint(fd, "syncUntilEpochSeconds", archive->started) ||
              tool_json_field_uint(fd, "syncCheckpointEpochSeconds",
-                                  update_complete ? archive->started : archive->sync_checkpoint) ||
+                                  metadata_complete ? archive->started : archive->sync_checkpoint) ||
              tool_json_field_string(fd, "syncCheckpointSource",
-                                    update_complete ? "successful-run-start" : archive->sync_source) ||
+                                    metadata_complete ? "successful-run-start" : archive->sync_source) ||
              tool_json_field_bool(fd, "syncBaselineComplete", baseline_complete) ||
              tool_json_field_bool(fd, "syncMetadataOnly",
-                                  update_complete ? archive->metadata_only : archive->sync_metadata_only) ||
+                                  metadata_complete ? archive->metadata_only : archive->sync_metadata_only) ||
              tool_json_field_bool(fd, "calendarOnly", archive->calendar_only) ||
              tool_json_field_string(fd, "calendarFrom", archive->calendar_from) ||
              tool_json_field_string(fd, "calendarThrough", archive->calendar_through) ||
@@ -1813,6 +1904,10 @@ int main(int argc, char **argv) {
         if (finish_manifest(&archive, name, &archive.observations_fd) != 0) result = -1;
     }
     archive.finalizing = 1; archive.finished = (unsigned long long)platform_get_epoch_time();
+    if (result == 0 && archive.incremental && !archive.metadata_only &&
+        archive.previous_unavailable && archive.missing_resources)
+        result = ris_error("document retries incomplete after HTTP 404; previous unavailable report retained",
+                           archive.output);
     if (result == 0 &&
         finish_manifest(&archive, "unavailable-files.jsonl", &archive.unavailable_fd) != 0)
         result = -1;
