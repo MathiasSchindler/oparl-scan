@@ -50,11 +50,10 @@ Externe PDF-Werkzeuge oder OCR-Unterprozesse werden nicht gestartet.
 des oeffentlichen [newos-Repositories](https://github.com/mathiasschindler/newos)
 unter CC0. Der Quellcode wird separat bezogen und nicht in die Git-Historie
 von OParl-Scan kopiert. Das Submodul legt die genaue Revision fuer den Build fest.
-Die gepinnte Revision `3cd45492dda11f6fff702b035baa95f237579f29`
-enthaelt den upstream Worker-Claim-Fix und die Shared-APIs aus
-[MathiasSchindler/newos#4](https://github.com/MathiasSchindler/newos/pull/4).
-Sie ist der veroeffentlichte PR-Stand, nicht die bisherige main-Revision.
-Ein eigener Build-Patch ist nicht erforderlich.
+Die gepinnte Revision `5f37f985375dfb7e72de98e4b20944b10d411ec3`
+enthaelt bereits den upstream Worker-Claim-Fix und die Shared-APIs aus
+[MathiasSchindler/newos#4](https://github.com/MathiasSchindler/newos/pull/4);
+ein eigener Build-Patch ist nicht erforderlich.
 
 Die eigene native EmbeddingGemma-Implementierung ist als Bestandteil dieses
 Projekts in [src/embedding](src/embedding) integriert, nicht als Vendor-Abhaengigkeit.
