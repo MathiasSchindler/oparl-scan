@@ -1,6 +1,7 @@
 #include "sections.h"
 #include "crypto/sha256.h"
 #include "index_io.h"
+#include "hash_util.h"
 
 void eg_section_identity(const char *paper_id, const char pdf_sha[65], const char text_sha[65],
                          size_t start, size_t end, char identity[65]) {
@@ -17,7 +18,7 @@ void eg_section_identity(const char *paper_id, const char pdf_sha[65], const cha
     crypto_sha256_update(&hash, (const unsigned char *)text_sha, 65);
     crypto_sha256_update(&hash, (const unsigned char *)offsets, rt_strlen(offsets));
     crypto_sha256_final(&hash, digest);
-    eg_hex_digest(digest, identity);
+    hash_to_hex(digest, sizeof(digest), identity);
 }
 
 static int continuation(unsigned char c) { return (c & 0xc0U) == 0x80U; }

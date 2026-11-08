@@ -40,7 +40,8 @@ libcurl, OpenSSL, externe JSON-Bibliothek, Unterprozesse oder Shellbefehle**.
 Sie nutzen die gemeinsame Laufzeit, Puffer, Unicode-Verarbeitung,
 SHA-256, JSON-Ausgabe, TLS- und X.509-Implementierung sowie die
 Betriebssystem-Backends von newos.
-[src/json.c](src/json.c) ergaenzt den lesenden JSON-Parser.
+Auch der [lesende JSON-Parser](vendor/newos/src/shared/tool_json_parser.c)
+und die gepufferte JSON-Ausgabe stammen aus newos Shared.
 Vorbereitung und direkter Indexaufbau verwenden ausserdem den PDF-Parser und die Flate-Dekompression
 von newos sowie eine eigene seitenbezogene Font-/ToUnicode-Auswertung.
 Externe PDF-Werkzeuge oder OCR-Unterprozesse werden nicht gestartet.
@@ -49,9 +50,11 @@ Externe PDF-Werkzeuge oder OCR-Unterprozesse werden nicht gestartet.
 des oeffentlichen [newos-Repositories](https://github.com/mathiasschindler/newos)
 unter CC0. Der Quellcode wird separat bezogen und nicht in die Git-Historie
 von OParl-Scan kopiert. Das Submodul legt die genaue Revision fuer den Build fest.
-Die gepinnte Revision `72d2bfed00a770c0e2aa0ee95615cbca16ff18f0`
-enthaelt bereits den upstream Worker-Claim-Fix; ein eigener Build-Patch ist
-nicht erforderlich.
+Die gepinnte Revision `3cd45492dda11f6fff702b035baa95f237579f29`
+enthaelt den upstream Worker-Claim-Fix und die Shared-APIs aus
+[MathiasSchindler/newos#4](https://github.com/MathiasSchindler/newos/pull/4).
+Sie ist der veroeffentlichte PR-Stand, nicht die bisherige main-Revision.
+Ein eigener Build-Patch ist nicht erforderlich.
 
 Die eigene native EmbeddingGemma-Implementierung ist als Bestandteil dieses
 Projekts in [src/embedding](src/embedding) integriert, nicht als Vendor-Abhaengigkeit.

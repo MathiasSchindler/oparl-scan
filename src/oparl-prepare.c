@@ -74,7 +74,7 @@ static int archive(const char *path, const PlatformDirEntry *info, int depth, To
     char manifest[4096], documents[4096];
     unsigned char *bytes = 0;
     size_t length;
-    Json json;
+    ToolJson json;
     int metadata_only;
     (void)depth;
     if (!info->is_dir)
@@ -88,12 +88,12 @@ static int archive(const char *path, const PlatformDirEntry *info, int depth, To
     control->prune = 1;
     if (tool_read_all_input(manifest, &bytes, &length))
         return prepare_error("cannot read archive manifest: ", manifest);
-    if (json_parse(&json, (const char *)bytes, length)) {
+    if (tool_json_parse(&json, (const char *)bytes, length)) {
         rt_free(bytes);
         return prepare_error("invalid archive manifest: ", manifest);
     }
-    metadata_only = json_true(&json, json_get(&json, 0, "metadataOnly"));
-    json_free(&json);
+    metadata_only = tool_json_true(&json, tool_json_get(&json, 0, "metadataOnly"));
+    tool_json_free(&json);
     rt_free(bytes);
     p->archives++;
     if (rt_join_path(path, "documents", documents, sizeof(documents)))

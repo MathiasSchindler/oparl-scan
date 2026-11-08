@@ -1,24 +1,25 @@
 #include "search.h"
 #include "sections.h"
 #include "index_io.h"
-#include "json.h"
+#include "hash_util.h"
+#include "tool_json_parser.h"
 
-static int boolean(const EgJson *json, size_t object, const char *name, int *out) {
-    size_t i = eg_json_get(json, object, name);
-    const EgJsonToken *token = eg_json_token(json, i);
-    if (!token || token->kind != EG_JSON_BOOL) return -1;
-    *out = eg_json_true(json, i);
+static int boolean(const ToolJson *json, size_t object, const char *name, int *out) {
+    size_t i = tool_json_get(json, object, name);
+    const ToolJsonToken *token = tool_json_token(json, i);
+    if (!token || token->kind != TOOL_JSON_BOOL) return -1;
+    *out = tool_json_true(json, i);
     return 0;
 }
 
-static int digest(const EgJson *json, size_t object, const char *name, char text[65]) {
+static int digest(const ToolJson *json, size_t object, const char *name, char text[65]) {
     unsigned char bytes[32];
-    return eg_json_string(json, eg_json_get(json, object, name), text, 65) || eg_parse_digest(text, bytes);
+    return tool_json_string(json, tool_json_get(json, object, name), text, 65) || eg_parse_digest(text, bytes);
 }
 
-static int number(const EgJson *json, size_t object, const char *name, size_t *out) {
+static int number(const ToolJson *json, size_t object, const char *name, size_t *out) {
     unsigned long long value;
-    if (eg_json_uint(json, eg_json_get(json, object, name), &value) || value > 64U * 1024U * 1024U) return -1;
+    if (tool_json_uint(json, tool_json_get(json, object, name), &value) || value > 64U * 1024U * 1024U) return -1;
     *out = (size_t)value;
     return 0;
 }
@@ -52,7 +53,7 @@ void eg_section_index_free(EgSectionIndex *index) {
 }
 
 int eg_section_index_load(EgSectionIndex *index, const char *directory, const EgTitleIndex *titles) {
-    EgJson json = {0};
+    ToolJson json = {0};
     unsigned char *bytes = 0;
     char path[4096];
     size_t size, count, selected, included, excluded, year, dimensions, limit, overlap;
@@ -62,16 +63,16 @@ int eg_section_index_load(EgSectionIndex *index, const char *directory, const Eg
     rt_memset(index, 0, sizeof(*index));
     if (rt_join_path(directory, "manifest.json", path, sizeof(path)) ||
         eg_read_regular(path, 64U * 1024U * 1024U, &bytes, &size) ||
-        eg_json_parse(&json, (const char *)bytes, size)) goto invalid;
-    if (!eg_json_equals(&json, eg_json_get(&json, 0, "format"), "eg2-paper-section-index-v1") ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "model_revision"), EG2_MODEL_REVISION) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "weights_sha256"), EG2_WEIGHTS_SHA256) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "tokenizer_sha256"), EG2_TOKENIZER_SHA256) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "task"), "document") ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "prefix"), EG2_DOCUMENT_PREFIX) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "section_key_recipe"), EG_SECTION_RECIPE) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "boundary_recipe"), "exact-reference-numbered-main-form-v1") ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "chunk_recipe"), "utf8-2400bytes-800tokens-sentence-end-overlap80-v1") ||
+        tool_json_parse(&json, (const char *)bytes, size)) goto invalid;
+    if (!tool_json_equals_alloc(&json, tool_json_get(&json, 0, "format"), "eg2-paper-section-index-v1") ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "model_revision"), EG2_MODEL_REVISION) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "weights_sha256"), EG2_WEIGHTS_SHA256) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "tokenizer_sha256"), EG2_TOKENIZER_SHA256) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "task"), "document") ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "prefix"), EG2_DOCUMENT_PREFIX) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "section_key_recipe"), EG_SECTION_RECIPE) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "boundary_recipe"), "exact-reference-numbered-main-form-v1") ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "chunk_recipe"), "utf8-2400bytes-800tokens-sentence-end-overlap80-v1") ||
         number(&json, 0, "count", &count) || count > 100000 ||
         number(&json, 0, "documents_selected", &selected) || !selected || selected > 100000 ||
         number(&json, 0, "documents_included", &included) || included > selected ||
@@ -91,17 +92,17 @@ int eg_section_index_load(EgSectionIndex *index, const char *directory, const Eg
     index->document_count = selected; index->count = count; index->year = (unsigned int)year;
     index->year_present[year - 2000] = 1;
     index->included = included; index->excluded = excluded; index->combined_count = titles->count;
-    size_t documents_index = eg_json_get(&json, 0, "documents"), n = 0, actual_included = 0, planned = 0;
-    const EgJsonToken *documents = eg_json_token(&json, documents_index);
-    if (!documents || documents->kind != EG_JSON_ARRAY) goto invalid;
-    for (size_t i = documents_index + 1; i < documents->next; i = eg_json_token(&json, i)->next) {
+    size_t documents_index = tool_json_get(&json, 0, "documents"), n = 0, actual_included = 0, planned = 0;
+    const ToolJsonToken *documents = tool_json_token(&json, documents_index);
+    if (!documents || documents->kind != TOOL_JSON_ARRAY) goto invalid;
+    for (size_t i = documents_index + 1; i < documents->next; i = tool_json_token(&json, i)->next) {
         if (n == selected) goto invalid;
         EgContentDocument *d = index->documents + n;
         d->year = (unsigned int)year;
         ordered[n++] = d;
-        d->id = eg_json_dup_string(&json, eg_json_get(&json, i, "id"), 4096);
-        d->title = eg_json_dup_string(&json, eg_json_get(&json, i, "title"), EG2_MAX_TEXT);
-        d->reference = eg_json_dup_string(&json, eg_json_get(&json, i, "reference"), 512);
+        d->id = tool_json_dup_string(&json, tool_json_get(&json, i, "id"), 4096);
+        d->title = tool_json_dup_string(&json, tool_json_get(&json, i, "title"), EG2_MAX_TEXT);
+        d->reference = tool_json_dup_string(&json, tool_json_get(&json, i, "reference"), 512);
         char prefix[4] = {(char)('0' + year % 100 / 10), (char)('0' + year % 10), '/', 0};
         if (!d->id || !d->id[0] || !d->title || !d->title[0] || !d->reference ||
             rt_strncmp(d->reference, prefix, 3) || number(&json, i, "first_chunk", &d->first) ||
@@ -115,7 +116,7 @@ int eg_section_index_load(EgSectionIndex *index, const char *directory, const Eg
         }
         if (d->count) {
             if (d->first != planned || !d->pages ||
-                !eg_json_equals(&json, eg_json_get(&json, i, "coverage"), "numbered-main-form-only") ||
+                !tool_json_equals_alloc(&json, tool_json_get(&json, i, "coverage"), "numbered-main-form-only") ||
                 digest(&json, i, "pdf_sha256", d->pdf_sha) ||
                 digest(&json, i, "joined_text_sha256", d->text_sha)) goto invalid;
             planned += d->count; actual_included++;
@@ -125,11 +126,11 @@ int eg_section_index_load(EgSectionIndex *index, const char *directory, const Eg
     if (n != selected || actual_included != included || planned != count) goto invalid;
     rt_sort(ordered, selected, sizeof(*ordered), compare_document);
     for (size_t i = 1; i < selected; i++) if (!rt_strcmp(ordered[i - 1]->id, ordered[i]->id)) goto invalid;
-    size_t items_index = eg_json_get(&json, 0, "items");
-    const EgJsonToken *items = eg_json_token(&json, items_index);
-    if (!items || items->kind != EG_JSON_ARRAY) goto invalid;
+    size_t items_index = tool_json_get(&json, 0, "items");
+    const ToolJsonToken *items = tool_json_token(&json, items_index);
+    if (!items || items->kind != TOOL_JSON_ARRAY) goto invalid;
     n = 0;
-    for (size_t i = items_index + 1; i < items->next; i = eg_json_token(&json, i)->next) {
+    for (size_t i = items_index + 1; i < items->next; i = tool_json_token(&json, i)->next) {
         if (n == count) goto invalid;
         EgPassage *p = index->passages + n;
         size_t ordinal, tokens;
@@ -144,9 +145,9 @@ int eg_section_index_load(EgSectionIndex *index, const char *directory, const Eg
             number(&json, i, "tokens", &tokens) || tokens < 2 || tokens > EG_SECTION_LIMIT) goto invalid;
         const EgContentDocument *d = index->documents + p->document;
         if (n < d->first || n >= d->first + d->count || ordinal != n - d->first + 1 || p->page_last > d->pages ||
-            !eg_json_equals(&json, eg_json_get(&json, i, "paper_id"), d->id)) goto invalid;
-        p->id = eg_json_dup_string(&json, eg_json_get(&json, i, "id"), 64);
-        p->text = eg_json_dup_string(&json, eg_json_get(&json, i, "text"), 2400);
+            !tool_json_equals_alloc(&json, tool_json_get(&json, i, "paper_id"), d->id)) goto invalid;
+        p->id = tool_json_dup_string(&json, tool_json_get(&json, i, "id"), 64);
+        p->text = tool_json_dup_string(&json, tool_json_get(&json, i, "text"), 2400);
         if (!p->id || !p->text || rt_strlen(p->text) != p->end - p->start ||
             rt_utf8_validate(p->text, rt_strlen(p->text))) goto invalid;
         eg_section_identity(d->id, d->pdf_sha, d->text_sha, p->start, p->end, identity);
@@ -155,10 +156,10 @@ int eg_section_index_load(EgSectionIndex *index, const char *directory, const Eg
         crypto_sha256_init(&hash);
         crypto_sha256_update(&hash, (const unsigned char *)EG_SECTION_RECIPE, sizeof(EG_SECTION_RECIPE) - 1);
         crypto_sha256_update(&hash, (const unsigned char *)p->text, rt_strlen(p->text));
-        crypto_sha256_final(&hash, key); eg_hex_digest(key, key_text);
-        if (!eg_json_equals(&json, eg_json_get(&json, i, "key"), key_text)) goto invalid;
+        crypto_sha256_final(&hash, key); hash_to_hex(key, sizeof(key), key_text);
+        if (!tool_json_equals_alloc(&json, tool_json_get(&json, i, "key"), key_text)) goto invalid;
         eg_title_vector_path(key, relative);
-        if (eg_json_string(&json, eg_json_get(&json, i, "vector"), stored, sizeof(stored)) || rt_strcmp(relative, stored) ||
+        if (tool_json_string(&json, tool_json_get(&json, i, "vector"), stored, sizeof(stored)) || rt_strcmp(relative, stored) ||
             rt_join_path(directory, relative, path, sizeof(path))) goto invalid;
         int found;
         if (eg_vector_read(path, key, p->vector, &found)) goto done;
@@ -176,7 +177,7 @@ int eg_section_index_load(EgSectionIndex *index, const char *directory, const Eg
         }
         if (ordinal == d->count) {
             unsigned char sha[32]; char text_sha[65];
-            crypto_sha256_hash(joined.data, joined.size, sha); eg_hex_digest(sha, text_sha);
+            crypto_sha256_hash(joined.data, joined.size, sha); hash_to_hex(sha, sizeof(sha), text_sha);
             if (rt_strcmp(d->text_sha, text_sha)) goto invalid;
         }
         n++;
@@ -187,7 +188,7 @@ int eg_section_index_load(EgSectionIndex *index, const char *directory, const Eg
 invalid:
     eg_error("invalid, incompatible or inconsistent section index: ", directory);
 done:
-    rt_free(ordered); rt_free(bytes); eg_json_free(&json); tool_byte_buffer_free(&joined);
+    rt_free(ordered); rt_free(bytes); tool_json_free(&json); tool_byte_buffer_free(&joined);
     if (result) eg_section_index_free(index);
     return result;
 }

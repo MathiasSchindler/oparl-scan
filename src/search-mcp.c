@@ -1,5 +1,5 @@
 #include "search-mcp.h"
-#include "json.h"
+#include "tool_json_parser.h"
 #include "runtime.h"
 
 #define MODERN "2026-07-28"
@@ -105,21 +105,21 @@ static int append(ToolByteBuffer *out, const char *text) {
     return tool_byte_buffer_append_cstr(out, text);
 }
 
-static int raw(ToolByteBuffer *out, const Json *json, size_t value) {
-    const JsonToken *token = json_token(json, value);
+static int raw(ToolByteBuffer *out, const ToolJson *json, size_t value) {
+    const ToolJsonToken *token = tool_json_token(json, value);
     return token ? tool_byte_buffer_append(out, json->text + token->start, token->end - token->start) :
                    append(out, "null");
 }
 
-static int object_fields(const Json *json, size_t object, const char *const *names, size_t count, int extra) {
-    const JsonToken *root = json_token(json, object);
+static int object_fields(const ToolJson *json, size_t object, const char *const *names, size_t count, int extra) {
+    const ToolJsonToken *root = tool_json_token(json, object);
     unsigned int seen = 0;
     size_t i;
-    if (!root || root->kind != JSON_OBJECT) return -1;
+    if (!root || root->kind != TOOL_JSON_OBJECT) return -1;
     for (i = object + 1; i < root->next;) {
         size_t n, value = i + 1;
-        const JsonToken *token = json_token(json, value);
-        for (n = 0; n < count && !json_equals(json, i, names[n]); n++) {}
+        const ToolJsonToken *token = tool_json_token(json, value);
+        for (n = 0; n < count && !tool_json_equals(json, i, names[n]); n++) {}
         if (n == count) { if (!extra) return -1; }
         else {
             if (seen & (1U << n)) return -1;
@@ -131,32 +131,32 @@ static int object_fields(const Json *json, size_t object, const char *const *nam
     return 0;
 }
 
-static int kind(const Json *json, size_t value, JsonKind expected) {
-    const JsonToken *token = json_token(json, value);
+static int kind(const ToolJson *json, size_t value, ToolJsonKind expected) {
+    const ToolJsonToken *token = tool_json_token(json, value);
     return token && token->kind == expected;
 }
 
-static int integer_id(const Json *json, size_t value) {
-    const JsonToken *token = json_token(json, value);
+static int integer_id(const ToolJson *json, size_t value) {
+    const ToolJsonToken *token = tool_json_token(json, value);
     size_t p;
-    if (!token || token->kind != JSON_NUMBER) return 0;
+    if (!token || token->kind != TOOL_JSON_NUMBER) return 0;
     for (p = token->start; p < token->end; p++)
         if (json->text[p] == '.' || json->text[p] == 'e' || json->text[p] == 'E') return 0;
     return 1;
 }
 
-static int rpc_error(ToolByteBuffer *reply, const Json *json, size_t id, int code, const char *message) {
+static int rpc_error(ToolByteBuffer *reply, const ToolJson *json, size_t id, int code, const char *message) {
     char number[32];
     reply->size = 0;
     search_error("MCP request rejected", message);
     rt_unsigned_to_string((unsigned int)-code, number, sizeof(number));
     return append(reply, "{\"jsonrpc\":\"2.0\",\"id\":") != 0 || raw(reply, json, id) != 0 ||
         append(reply, ",\"error\":{\"code\":-") != 0 || append(reply, number) != 0 ||
-        append(reply, ",\"message\":") != 0 || search_json_quote(reply, message) != 0 ||
+        append(reply, ",\"message\":") != 0 || tool_json_append_string(reply, message) != 0 ||
         append(reply, "}}\n") != 0 ? -1 : 0;
 }
 
-static int begin_result(ToolByteBuffer *reply, const Json *json, size_t id, int modern, int fields) {
+static int begin_result(ToolByteBuffer *reply, const ToolJson *json, size_t id, int modern, int fields) {
     if (append(reply, "{\"jsonrpc\":\"2.0\",\"id\":") != 0 || raw(reply, json, id) != 0 ||
         append(reply, ",\"result\":{") != 0) return -1;
     if (modern && (append(reply, "\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/serverInfo\":"
@@ -205,24 +205,24 @@ static int header_matches(const char *header, const char *value) {
     return used == expected;
 }
 
-static int uint_argument(const Json *json, size_t arguments, const char *key,
+static int uint_argument(const ToolJson *json, size_t arguments, const char *key,
                          unsigned int min, unsigned int max, unsigned int *out) {
-    size_t value = json_get(json, arguments, key);
+    size_t value = tool_json_get(json, arguments, key);
     unsigned long long number;
-    if (value == JSON_NONE) return 0;
-    if (json_uint(json, value, &number) != 0 || number < min || number > max) return -1;
+    if (value == TOOL_JSON_NONE) return 0;
+    if (tool_json_uint(json, value, &number) != 0 || number < min || number > max) return -1;
     *out = (unsigned int)number;
     return 0;
 }
 
-static int string_argument(const Json *json, size_t arguments, const char *key, char *out, size_t size, int required) {
-    size_t value = json_get(json, arguments, key);
+static int string_argument(const ToolJson *json, size_t arguments, const char *key, char *out, size_t size, int required) {
+    size_t value = tool_json_get(json, arguments, key);
     out[0] = '\0';
-    if (value == JSON_NONE) return required ? -1 : 0;
-    return json_string(json, value, out, size) != 0 || !*out ? -1 : 0;
+    if (value == TOOL_JSON_NONE) return required ? -1 : 0;
+    return tool_json_string(json, value, out, size) != 0 || !*out ? -1 : 0;
 }
 
-static int call_tool(const SearchIndex *index, SearchWorkspace *workspace, const Json *json,
+static int call_tool(const SearchIndex *index, SearchWorkspace *workspace, const ToolJson *json,
                      size_t arguments, const char *name, ToolByteBuffer *data, const char **error) {
     static const char *const search_keys[] = {"q", "year", "paperType", "organization", "kind", "limit", "offset", "sort", "group",
         "dateRole", "dateFrom", "dateThrough", "organizationId", "actorId", "snapshotId", "mode"};
@@ -233,11 +233,11 @@ static int call_tool(const SearchIndex *index, SearchWorkspace *workspace, const
         char q[16385], paper_type[4096], organization[4096], record_kind[128], sort[32], group[32];
         char date_role[64], date_from[32], date_through[32], mode[32];
         char organization_id[16385], actor_id[16385], snapshot[65];
-        size_t query = json_get(json, arguments, "q");
+        size_t query = tool_json_get(json, arguments, "q");
         rt_memset(&filter, 0, sizeof(filter)); filter.limit = 20; filter.group = SEARCH_PAPERS;
         q[0] = 0;
         if (object_fields(json, arguments, search_keys, 16, 0) != 0 ||
-            (query != JSON_NONE && json_string(json, query, q, sizeof(q)) != 0) ||
+            (query != TOOL_JSON_NONE && tool_json_string(json, query, q, sizeof(q)) != 0) ||
             string_argument(json, arguments, "dateRole", date_role, sizeof(date_role), 0) ||
             string_argument(json, arguments, "dateFrom", date_from, sizeof(date_from), 0) ||
             string_argument(json, arguments, "dateThrough", date_through, sizeof(date_through), 0) ||
@@ -281,14 +281,14 @@ static int call_tool(const SearchIndex *index, SearchWorkspace *workspace, const
         }
         if (search_results_json(data, index, &result) == 0) return 0;
     } else if (!rt_strcmp(name, "get_index_status")) {
-        if (arguments != JSON_NONE && object_fields(json, arguments, 0, 0, 0) != 0) return 1;
+        if (arguments != TOOL_JSON_NONE && object_fields(json, arguments, 0, 0, 0) != 0) return 1;
         if (search_status_json(data, index) == 0) return 0;
     } else {
         SearchRead request;
         char storage[65536];
         int code;
         rt_memset(&request, 0, sizeof(request));
-        code = arguments == JSON_NONE && !rt_strcmp(name, "get_search_options") ? 0 :
+        code = arguments == TOOL_JSON_NONE && !rt_strcmp(name, "get_search_options") ? 0 :
             search_read_arguments(json, arguments, &request, storage, sizeof(storage), error);
         if (!code) code = search_read_json(data, index, name, &request, error);
         if (!code) return 0;
@@ -307,40 +307,40 @@ int search_mcp(const SearchIndex *index, SearchWorkspace *workspace,
     static const char *const call_keys[] = {"_meta", "name", "arguments"};
     static const char *const init_keys[] = {"_meta", "protocolVersion", "capabilities", "clientInfo"};
     static const char *const empty_keys[] = {"_meta"};
-    Json json;
-    size_t id = JSON_NONE, params, meta, version;
+    ToolJson json;
+    size_t id = TOOL_JSON_NONE, params, meta, version;
     char method[128], name[128], requested[64] = "";
     int modern = 0, status = 0, notification = 0;
     const char *error = 0;
     *http_status = 200;
-    if (json_parse(&json, body, length) != 0) {
+    if (tool_json_parse(&json, body, length) != 0) {
         rt_memset(&json, 0, sizeof(json));
         *http_status = 400;
-        return rpc_error(reply, &json, JSON_NONE, -32700, "invalid JSON");
+        return rpc_error(reply, &json, TOOL_JSON_NONE, -32700, "invalid JSON");
     }
-    id = json_get(&json, 0, "id");
-    if (id != JSON_NONE && !kind(&json, id, JSON_STRING) && !integer_id(&json, id)) {
-        id = JSON_NONE; error = "id must be a string or integer"; goto invalid;
+    id = tool_json_get(&json, 0, "id");
+    if (id != TOOL_JSON_NONE && !kind(&json, id, TOOL_JSON_STRING) && !integer_id(&json, id)) {
+        id = TOOL_JSON_NONE; error = "id must be a string or integer"; goto invalid;
     }
-    if (object_fields(&json, 0, root_keys, 4, 0) != 0 || !json_equals(&json, json_get(&json, 0, "jsonrpc"), "2.0") ||
-        json_string(&json, json_get(&json, 0, "method"), method, sizeof(method)) != 0 || !*method) {
+    if (object_fields(&json, 0, root_keys, 4, 0) != 0 || !tool_json_equals(&json, tool_json_get(&json, 0, "jsonrpc"), "2.0") ||
+        tool_json_string(&json, tool_json_get(&json, 0, "method"), method, sizeof(method)) != 0 || !*method) {
         error = "expected one JSON-RPC 2.0 request or notification"; goto invalid;
     }
-    notification = id == JSON_NONE;
-    params = json_get(&json, 0, "params");
-    if (params != JSON_NONE && !kind(&json, params, JSON_OBJECT)) {
+    notification = id == TOOL_JSON_NONE;
+    params = tool_json_get(&json, 0, "params");
+    if (params != TOOL_JSON_NONE && !kind(&json, params, TOOL_JSON_OBJECT)) {
         error = "params must be an object"; goto invalid_params;
     }
-    meta = json_get(&json, params, "_meta");
-    version = json_get(&json, meta, "io.modelcontextprotocol/protocolVersion");
-    modern = (protocol && !rt_strcmp(protocol, MODERN)) || version != JSON_NONE;
+    meta = tool_json_get(&json, params, "_meta");
+    version = tool_json_get(&json, meta, "io.modelcontextprotocol/protocolVersion");
+    modern = (protocol && !rt_strcmp(protocol, MODERN)) || version != TOOL_JSON_NONE;
     if (modern) {
-        size_t client = json_get(&json, meta, "io.modelcontextprotocol/clientInfo");
+        size_t client = tool_json_get(&json, meta, "io.modelcontextprotocol/clientInfo");
         char client_name[256], client_version[128];
         if (object_fields(&json, meta, meta_keys, 3, 1) != 0 ||
-            json_string(&json, version, requested, sizeof(requested)) != 0 ||
-            !kind(&json, json_get(&json, meta, "io.modelcontextprotocol/clientCapabilities"), JSON_OBJECT) ||
-            (client != JSON_NONE &&
+            tool_json_string(&json, version, requested, sizeof(requested)) != 0 ||
+            !kind(&json, tool_json_get(&json, meta, "io.modelcontextprotocol/clientCapabilities"), TOOL_JSON_OBJECT) ||
+            (client != TOOL_JSON_NONE &&
              (string_argument(&json, client, "name", client_name, sizeof(client_name), 1) != 0 ||
               string_argument(&json, client, "version", client_version, sizeof(client_version), 1) != 0))) {
             error = "modern requests require _meta protocolVersion and clientCapabilities"; goto invalid_params;
@@ -359,28 +359,28 @@ int search_mcp(const SearchIndex *index, SearchWorkspace *workspace,
     if (notification) { *http_status = 202; goto done; }
     if (!rt_strcmp(method, "initialize") && !modern) {
         char client_name[256], client_version[128];
-        size_t client = json_get(&json, params, "clientInfo");
+        size_t client = tool_json_get(&json, params, "clientInfo");
         const char *negotiated;
         if (object_fields(&json, params, init_keys, 4, 0) != 0 ||
-            json_string(&json, json_get(&json, params, "protocolVersion"), requested, sizeof(requested)) != 0 ||
-            !kind(&json, json_get(&json, params, "capabilities"), JSON_OBJECT) ||
+            tool_json_string(&json, tool_json_get(&json, params, "protocolVersion"), requested, sizeof(requested)) != 0 ||
+            !kind(&json, tool_json_get(&json, params, "capabilities"), TOOL_JSON_OBJECT) ||
             string_argument(&json, client, "name", client_name, sizeof(client_name), 1) != 0 ||
             string_argument(&json, client, "version", client_version, sizeof(client_version), 1) != 0) {
             error = "initialize requires protocolVersion, capabilities and clientInfo"; goto invalid_params;
         }
         negotiated = legacy_version(requested) ? requested : LEGACY;
         if (begin_result(reply, &json, id, 0, 1) != 0 || append(reply, "\"protocolVersion\":") != 0 ||
-            search_json_quote(reply, negotiated) != 0 || append(reply, ",\"capabilities\":{\"tools\":{}},\"serverInfo\":"
-                IDENTITY ",\"instructions\":") != 0 || search_json_quote(reply, INSTRUCTIONS) != 0) status = -1;
+            tool_json_append_string(reply, negotiated) != 0 || append(reply, ",\"capabilities\":{\"tools\":{}},\"serverInfo\":"
+                IDENTITY ",\"instructions\":") != 0 || tool_json_append_string(reply, INSTRUCTIONS) != 0) status = -1;
     } else if ((!rt_strcmp(method, "server/discover") && modern) || !rt_strcmp(method, "tools/list") ||
                !rt_strcmp(method, "ping")) {
-        if (params != JSON_NONE && object_fields(&json, params, empty_keys, 1, 0) != 0) {
+        if (params != TOOL_JSON_NONE && object_fields(&json, params, empty_keys, 1, 0) != 0) {
             error = "this method takes no parameters other than _meta"; goto invalid_params;
         }
         if (begin_result(reply, &json, id, modern, rt_strcmp(method, "ping") != 0) != 0) status = -1;
         else if (!rt_strcmp(method, "server/discover")) {
             if (append(reply, "\"supportedVersions\":" VERSIONS ",\"capabilities\":{\"tools\":{}},\"instructions\":") != 0 ||
-                search_json_quote(reply, INSTRUCTIONS) != 0) status = -1;
+                tool_json_append_string(reply, INSTRUCTIONS) != 0) status = -1;
         } else if (!rt_strcmp(method, "tools/list") &&
             append(reply, "\"tools\":") != 0) status = -1;
         if (!status && !rt_strcmp(method, "tools/list")) {
@@ -390,10 +390,10 @@ int search_mcp(const SearchIndex *index, SearchWorkspace *workspace,
     } else if (!rt_strcmp(method, "tools/call")) {
         ToolByteBuffer data;
         int tool_status;
-        size_t arguments = json_get(&json, params, "arguments");
+        size_t arguments = tool_json_get(&json, params, "arguments");
         if (object_fields(&json, params, call_keys, 3, 0) != 0 ||
-            json_string(&json, json_get(&json, params, "name"), name, sizeof(name)) != 0 ||
-            (arguments != JSON_NONE && !kind(&json, arguments, JSON_OBJECT))) {
+            tool_json_string(&json, tool_json_get(&json, params, "name"), name, sizeof(name)) != 0 ||
+            (arguments != TOOL_JSON_NONE && !kind(&json, arguments, TOOL_JSON_OBJECT))) {
             error = "tools/call requires name and optional object arguments"; goto invalid_params;
         }
         if (modern && !header_matches(name_header, name)) {
@@ -413,7 +413,7 @@ int search_mcp(const SearchIndex *index, SearchWorkspace *workspace,
             *http_status = 500; status = rpc_error(reply, &json, id, -32603, error);
         } else if (tool_byte_buffer_terminate(&data) != 0 || begin_result(reply, &json, id, modern, 1) != 0 ||
                    append(reply, "\"content\":[{\"type\":\"text\",\"text\":") != 0 ||
-                   search_json_quote(reply, tool_status ? error : modern ?
+                   tool_json_append_string(reply, tool_status ? error : modern ?
                        "Result in structuredContent; follow next for remaining items." : (const char *)data.data) != 0 ||
                    append(reply, tool_status ? "}],\"isError\":true" : "}],\"isError\":false,\"structuredContent\":") != 0 ||
                    (!tool_status && tool_byte_buffer_append(reply, data.data, data.size) != 0)) status = -1;
@@ -433,7 +433,7 @@ unsupported:
     if (!status) {
         reply->size -= 3;
         if (append(reply, ",\"data\":{\"supported\":" VERSIONS ",\"requested\":") != 0 ||
-            search_json_quote(reply, requested) != 0 || append(reply, "}}}\n") != 0) status = -1;
+            tool_json_append_string(reply, requested) != 0 || append(reply, "}}}\n") != 0) status = -1;
     }
     goto done;
 invalid:
@@ -445,6 +445,6 @@ invalid_params:
     status = rpc_error(reply, &json, id, -32602, error);
 done:
     if (notification) reply->size = 0;
-    json_free(&json);
+    tool_json_free(&json);
     return status;
 }

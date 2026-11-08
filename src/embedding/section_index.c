@@ -1,5 +1,6 @@
 #include "index_io.h"
-#include "json.h"
+#include "hash_util.h"
+#include "tool_json_parser.h"
 #include "search.h"
 #include "sections.h"
 
@@ -41,20 +42,18 @@ typedef struct {
 } Run;
 
 static int string_field(ToolByteBuffer *buffer, const char *key, const char *value) {
-    return eg_json_quote(buffer, key) || tool_byte_buffer_append_char(buffer, ':') ||
-        eg_json_quote(buffer, value) || tool_byte_buffer_append_char(buffer, ',');
+    return tool_json_append_string(buffer, key) || tool_byte_buffer_append_char(buffer, ':') ||
+        tool_json_append_string(buffer, value) || tool_byte_buffer_append_char(buffer, ',');
 }
 
 static int integer_field(ToolByteBuffer *buffer, const char *key, unsigned long long value) {
-    char digits[32];
-    rt_unsigned_to_string(value, digits, sizeof(digits));
-    return eg_json_quote(buffer, key) || tool_byte_buffer_append_char(buffer, ':') ||
-        tool_byte_buffer_append_cstr(buffer, digits) || tool_byte_buffer_append_char(buffer, ',');
+    return tool_json_append_string(buffer, key) || tool_byte_buffer_append_char(buffer, ':') ||
+        tool_byte_buffer_append_uint(buffer, value) || tool_byte_buffer_append_char(buffer, ',');
 }
 
-static int digest_field(const EgJson *json, size_t object, const char *key, char value[65]) {
+static int digest_field(const ToolJson *json, size_t object, const char *key, char value[65]) {
     unsigned char digest[32];
-    if (eg_json_string(json, eg_json_get(json, object, key), value, 65) || eg_parse_digest(value, digest))
+    if (tool_json_string(json, tool_json_get(json, object, key), value, 65) || eg_parse_digest(value, digest))
         return eg_error("invalid digest field: ", key);
     return 0;
 }
@@ -67,7 +66,7 @@ static int join(const char *directory, const char *name, char path[4096]) {
 static void hash_text(const void *bytes, size_t size, char text[65]) {
     unsigned char sha[32];
     crypto_sha256_hash(bytes, size, sha);
-    eg_hex_digest(sha, text);
+    hash_to_hex(sha, sizeof(sha), text);
 }
 
 static int expired(const Run *run) {
@@ -150,19 +149,19 @@ static int verify_snapshot(Run *run) {
     return 0;
 }
 
-static int read_json(Run *run, const char *path, EgJson *json, unsigned char **bytes,
+static int read_json(Run *run, const char *path, ToolJson *json, unsigned char **bytes,
                      int optional, int *found) {
     size_t size;
     if (read_snapshot(run, path, EG_JSON_BUDGET, bytes, &size, optional, found)) return -1;
     if (!*found) return 0;
-    if (eg_json_parse(json, (const char *)*bytes, size)) return eg_error("invalid JSON input: ", path);
+    if (tool_json_parse(json, (const char *)*bytes, size)) return eg_error("invalid JSON input: ", path);
     return 0;
 }
 
 static int resolve_pdf(Run *run, Document *document) {
     char id_hash[65], relative[4096], path[4096], base[4096], expected[65];
     unsigned char *bytes = 0;
-    EgJson json = {0};
+    ToolJson json = {0};
     int found, result = -1;
     unsigned long long expected_size = 0;
     size_t size;
@@ -173,8 +172,8 @@ static int resolve_pdf(Run *run, Document *document) {
     if (join(run->archive, relative, path) || read_json(run, path, &json, &bytes, 1, &found)) goto done;
     if (found) {
         if (digest_field(&json, 0, "sha256", expected) ||
-            eg_json_uint(&json, eg_json_get(&json, 0, "size"), &expected_size) ||
-            eg_json_string(&json, eg_json_get(&json, 0, "currentPath"), relative, sizeof(relative)) ||
+            tool_json_uint(&json, tool_json_get(&json, 0, "size"), &expected_size) ||
+            tool_json_string(&json, tool_json_get(&json, 0, "currentPath"), relative, sizeof(relative)) ||
             rt_strncmp(relative, "documents/", 10) || rt_strncmp(relative + 10, id_hash, 64) ||
             relative[74] != '-' || !relative[75]) goto invalid;
         for (size_t i = 10; relative[i]; i++)
@@ -197,7 +196,7 @@ static int resolve_pdf(Run *run, Document *document) {
             goto done;
         }
     }
-    eg_json_free(&json); rt_free(bytes); bytes = 0;
+    tool_json_free(&json); rt_free(bytes); bytes = 0;
     if (read_snapshot(run, document->pdf, PDF_BUDGET, &bytes, &size, 0, &found)) goto done;
     hash_text(bytes, size, document->pdf_sha);
     if (document->attested && (expected_size != size || rt_strcmp(expected, document->pdf_sha))) {
@@ -209,7 +208,7 @@ static int resolve_pdf(Run *run, Document *document) {
 invalid:
     eg_error("invalid mainFile archive attestation: ", path);
 done:
-    eg_json_free(&json); rt_free(bytes);
+    tool_json_free(&json); rt_free(bytes);
     return result;
 }
 
@@ -221,7 +220,7 @@ static int contains(const char *text, const char *needle) {
 
 static int prepare_document(Run *run, Document *document) {
     char relative[160], data_sha[65], source_sha[65], engine[129], key[65];
-    EgJson json = {0};
+    ToolJson json = {0};
     unsigned char *bytes = 0;
     int found, result = -1, boundary = 1, selected_warnings = 0;
     unsigned long long format, source_size, pages, warning_pages, observed_warnings = 0;
@@ -234,42 +233,42 @@ static int prepare_document(Run *run, Document *document) {
     if (join(run->prepared, relative, document->artifact) ||
         read_json(run, document->artifact, &json, &bytes, 1, &found)) goto done;
     if (!found) { document->coverage = "not-prepared"; result = 0; goto done; }
-    size_t data_index = eg_json_get(&json, 0, "data"), array_index = eg_json_get(&json, data_index, "pages");
-    const EgJsonToken *data = eg_json_token(&json, data_index), *array = eg_json_token(&json, array_index);
-    if (eg_json_uint(&json, eg_json_get(&json, 0, "format"), &format) || format != 1 ||
-        !data || data->kind != EG_JSON_OBJECT || digest_field(&json, 0, "sha256", data_sha)) goto invalid;
+    size_t data_index = tool_json_get(&json, 0, "data"), array_index = tool_json_get(&json, data_index, "pages");
+    const ToolJsonToken *data = tool_json_token(&json, data_index), *array = tool_json_token(&json, array_index);
+    if (tool_json_uint(&json, tool_json_get(&json, 0, "format"), &format) || format != 1 ||
+        !data || data->kind != TOOL_JSON_OBJECT || digest_field(&json, 0, "sha256", data_sha)) goto invalid;
     hash_text(bytes + data->start, data->end - data->start, document->prepared_sha);
     if (rt_strcmp(data_sha, document->prepared_sha) ||
         digest_field(&json, data_index, "sourceSha256", source_sha) ||
         rt_strcmp(source_sha, document->pdf_sha) ||
-        eg_json_uint(&json, eg_json_get(&json, data_index, "sourceBytes"), &source_size) ||
+        tool_json_uint(&json, tool_json_get(&json, data_index, "sourceBytes"), &source_size) ||
         source_size != document->pdf_bytes ||
-        eg_json_string(&json, eg_json_get(&json, data_index, "engine"), engine, sizeof(engine)) ||
+        tool_json_string(&json, tool_json_get(&json, data_index, "engine"), engine, sizeof(engine)) ||
         rt_strcmp(engine, run->engine) || digest_field(&json, data_index, "key", key) ||
-        rt_strcmp(key, run->pipeline) || !array || array->kind != EG_JSON_ARRAY ||
-        eg_json_uint(&json, eg_json_get(&json, data_index, "pageCount"), &pages) || pages > 100000 ||
-        eg_json_uint(&json, eg_json_get(&json, data_index, "warningPages"), &warning_pages)) goto invalid;
-    if (eg_json_equals(&json, eg_json_get(&json, data_index, "status"), "failed")) {
+        rt_strcmp(key, run->pipeline) || !array || array->kind != TOOL_JSON_ARRAY ||
+        tool_json_uint(&json, tool_json_get(&json, data_index, "pageCount"), &pages) || pages > 100000 ||
+        tool_json_uint(&json, tool_json_get(&json, data_index, "warningPages"), &warning_pages)) goto invalid;
+    if (tool_json_equals_alloc(&json, tool_json_get(&json, data_index, "status"), "failed")) {
         document->coverage = "preparation-failed"; result = 0; goto done;
     }
-    if ((!eg_json_equals(&json, eg_json_get(&json, data_index, "status"), "complete") &&
-         !eg_json_equals(&json, eg_json_get(&json, data_index, "status"), "warnings")) ||
-        !eg_json_token(&json, eg_json_get(&json, data_index, "error")) ||
-        eg_json_token(&json, eg_json_get(&json, data_index, "error"))->kind != EG_JSON_NULL) goto invalid;
+    if ((!tool_json_equals_alloc(&json, tool_json_get(&json, data_index, "status"), "complete") &&
+         !tool_json_equals_alloc(&json, tool_json_get(&json, data_index, "status"), "warnings")) ||
+        !tool_json_token(&json, tool_json_get(&json, data_index, "error")) ||
+        tool_json_token(&json, tool_json_get(&json, data_index, "error"))->kind != TOOL_JSON_NULL) goto invalid;
     document->pdf_pages = (size_t)pages;
     size_t observed = 0;
     unsigned int main_pages = 0;
-    for (size_t i = array_index + 1; i < array->next; i = eg_json_token(&json, i)->next) {
+    for (size_t i = array_index + 1; i < array->next; i = tool_json_token(&json, i)->next) {
         unsigned long long ordinal, warnings;
-        size_t text_index = eg_json_get(&json, i, "text");
-        const EgJsonToken *page_text = eg_json_token(&json, text_index);
+        size_t text_index = tool_json_get(&json, i, "text");
+        const ToolJsonToken *page_text = tool_json_token(&json, text_index);
         observed++;
-        if (eg_json_uint(&json, eg_json_get(&json, i, "page"), &ordinal) || ordinal != observed ||
-            eg_json_uint(&json, eg_json_get(&json, i, "warnings"), &warnings) || warnings > 7 ||
-            !page_text || page_text->kind != EG_JSON_STRING) goto invalid;
+        if (tool_json_uint(&json, tool_json_get(&json, i, "page"), &ordinal) || ordinal != observed ||
+            tool_json_uint(&json, tool_json_get(&json, i, "warnings"), &warnings) || warnings > 7 ||
+            !page_text || page_text->kind != TOOL_JSON_STRING) goto invalid;
         observed_warnings += warnings != 0;
         if (observed != 1 && observed > main_pages) continue;
-        char *decoded = eg_json_dup_string(&json, text_index, EG_JSON_BUDGET);
+        char *decoded = tool_json_dup_string(&json, text_index, EG_JSON_BUDGET);
         if (!decoded) goto invalid;
         unsigned int page = 0, total = 0;
         int numbered = eg_form_number(decoded, &page, &total);
@@ -323,54 +322,54 @@ memory:
 invalid:
     eg_error("invalid or inconsistent prepared artifact: ", document->artifact);
 done:
-    eg_json_free(&json); rt_free(bytes); tool_byte_buffer_free(&text);
+    tool_json_free(&json); rt_free(bytes); tool_byte_buffer_free(&text);
     return result;
 }
 
-static int plan_document(Run *run, const EgJson *selection, size_t item) {
+static int plan_document(Run *run, const ToolJson *selection, size_t item) {
     Document *document = tool_array_append(&run->documents);
-    EgJson json = {0};
+    ToolJson json = {0};
     unsigned char *bytes = 0;
     char expected_sha[65], observed_sha[65], file_id[4096];
     int found, result = -1;
     if (!document) return eg_error("cannot allocate document plan", 0);
     rt_memset(document, 0, sizeof(*document));
     tool_array_init(&document->pages, sizeof(PageRange));
-    document->id = eg_json_dup_string(selection, eg_json_get(selection, item, "id"), 4096);
-    document->title = eg_json_dup_string(selection, eg_json_get(selection, item, "title"), EG2_MAX_TEXT);
-    document->reference = eg_json_dup_string(selection, eg_json_get(selection, item, "reference"), 512);
+    document->id = tool_json_dup_string(selection, tool_json_get(selection, item, "id"), 4096);
+    document->title = tool_json_dup_string(selection, tool_json_get(selection, item, "title"), EG2_MAX_TEXT);
+    document->reference = tool_json_dup_string(selection, tool_json_get(selection, item, "reference"), 512);
     run->reference = document->reference;
     if (!document->id || !document->title || !document->reference ||
-        eg_json_string(selection, eg_json_get(selection, item, "source_file"), document->source, sizeof(document->source)) ||
+        tool_json_string(selection, tool_json_get(selection, item, "source_file"), document->source, sizeof(document->source)) ||
         digest_field(selection, item, "source_sha256", expected_sha) ||
         read_json(run, document->source, &json, &bytes, 0, &found)) goto done;
     hash_text(bytes, json.length, observed_sha);
     if (rt_strcmp(expected_sha, observed_sha) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "id"), document->id) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "name"), document->title) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "reference"), document->reference) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/Paper") ||
-        eg_json_true(&json, eg_json_get(&json, 0, "deleted"))) {
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "id"), document->id) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "name"), document->title) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "reference"), document->reference) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "type"), "https://schema.oparl.org/1.1/Paper") ||
+        tool_json_true(&json, tool_json_get(&json, 0, "deleted"))) {
         eg_error("Paper no longer matches title-index source snapshot: ", document->source); goto done;
     }
     rt_copy_string(document->source_sha, sizeof(document->source_sha), observed_sha);
-    size_t main_index = eg_json_get(&json, 0, "mainFile");
-    const EgJsonToken *main = eg_json_token(&json, main_index);
-    if (!main || main->kind == EG_JSON_NULL) { document->coverage = "no-main-file"; result = 0; goto done; }
-    if (main->kind == EG_JSON_OBJECT) {
-        if (eg_json_true(&json, eg_json_get(&json, main_index, "deleted"))) {
+    size_t main_index = tool_json_get(&json, 0, "mainFile");
+    const ToolJsonToken *main = tool_json_token(&json, main_index);
+    if (!main || main->kind == TOOL_JSON_NULL) { document->coverage = "no-main-file"; result = 0; goto done; }
+    if (main->kind == TOOL_JSON_OBJECT) {
+        if (tool_json_true(&json, tool_json_get(&json, main_index, "deleted"))) {
             document->coverage = "main-file-deleted"; result = 0; goto done;
         }
-        main_index = eg_json_get(&json, main_index, "id");
+        main_index = tool_json_get(&json, main_index, "id");
     }
-    if (eg_json_string(&json, main_index, file_id, sizeof(file_id)) || !file_id[0]) {
+    if (tool_json_string(&json, main_index, file_id, sizeof(file_id)) || !file_id[0]) {
         eg_error("invalid Paper.mainFile: ", document->source); goto done;
     }
-    document->file_id = eg_json_dup_string(&json, main_index, sizeof(file_id));
+    document->file_id = tool_json_dup_string(&json, main_index, sizeof(file_id));
     if (!document->file_id || resolve_pdf(run, document) || prepare_document(run, document)) goto done;
     result = 0;
 done:
-    eg_json_free(&json); rt_free(bytes);
+    tool_json_free(&json); rt_free(bytes);
     if (!result) {
         run->scanned++;
         if (document->count) { run->included++; run->pages += document->main_pages; }
@@ -427,7 +426,7 @@ static int manifest(Run *run) {
         const EgSection *s = &chunk->span;
         const Document *d = tool_array_get_const(&run->documents, chunk->document);
         char key[65], relative[80], identity[65];
-        eg_hex_digest(s->key, key); eg_title_vector_path(s->key, relative);
+        hash_to_hex(s->key, sizeof(s->key), key); eg_title_vector_path(s->key, relative);
         eg_section_identity(d->id, d->pdf_sha, d->text_sha, s->start, s->end, identity);
         size_t first_page = 0, last_page = 0, page_start = 0, page_end = 0;
         for (size_t p = 0; p < d->pages.count; p++) {
@@ -446,8 +445,8 @@ static int manifest(Run *run) {
         NUM("start", s->start); NUM("end", s->end); NUM("page_first", first_page); NUM("page_last", last_page);
         NUM("page_first_start", page_start); NUM("page_last_end", page_end); NUM("tokens", s->tokens);
         STR("key", key); STR("vector", relative);
-        int failed = eg_json_quote(&buffer, "text") || tool_byte_buffer_append_char(&buffer, ':') ||
-            eg_json_quote(&buffer, text) || tool_byte_buffer_append_char(&buffer, '}');
+        int failed = tool_json_append_string(&buffer, "text") || tool_byte_buffer_append_char(&buffer, ':') ||
+            tool_json_append_string(&buffer, text) || tool_byte_buffer_append_char(&buffer, '}');
         rt_free(text);
         if (failed) goto memory;
     }
@@ -475,7 +474,7 @@ int main(int argc, char **argv) {
     Run run = {0};
     const char *papers = 0, *prepared = 0, *output = 0, *model_dir = "models/native";
     char path[4096], lock[4096], paper_root[4096], cache[4096];
-    EgJson selection = {0}, pipeline = {0};
+    ToolJson selection = {0}, pipeline = {0};
     EgTitleIndex titles = {0};
     unsigned char *selection_bytes = 0, *pipeline_bytes = 0;
     int result = 1, locked = 0, found;
@@ -520,10 +519,10 @@ int main(int argc, char **argv) {
         eg_title_index_load(&titles, paper_root)) goto done;
     unsigned long long year, count, format;
     char archive_path[4096];
-    if (!eg_json_equals(&selection, eg_json_get(&selection, 0, "format"), "eg2-paper-title-index-v1") ||
-        eg_json_uint(&selection, eg_json_get(&selection, 0, "year"), &year) ||
-        eg_json_uint(&selection, eg_json_get(&selection, 0, "count"), &count) || count != titles.count ||
-        eg_json_string(&selection, eg_json_get(&selection, 0, "source_archive"), archive_path, sizeof(archive_path)) ||
+    if (!tool_json_equals_alloc(&selection, tool_json_get(&selection, 0, "format"), "eg2-paper-title-index-v1") ||
+        tool_json_uint(&selection, tool_json_get(&selection, 0, "year"), &year) ||
+        tool_json_uint(&selection, tool_json_get(&selection, 0, "count"), &count) || count != titles.count ||
+        tool_json_string(&selection, tool_json_get(&selection, 0, "source_archive"), archive_path, sizeof(archive_path)) ||
         eg_absolute_path(archive_path, 0, run.archive, sizeof(run.archive))) {
         eg_error("--papers requires a verified single-year title index", 0); goto done;
     }
@@ -544,20 +543,20 @@ int main(int argc, char **argv) {
     if (status(&run, 1)) goto done;
     if (join(run.archive, "documents", path) || eg_index_files(path, 0, &run.files) ||
         join(run.prepared, "manifest.json", path) || read_json(&run, path, &pipeline, &pipeline_bytes, 0, &found)) goto done;
-    const EgJsonToken *layout = eg_json_token(&pipeline, eg_json_get(&pipeline, 0, "allPageLayout"));
+    const ToolJsonToken *layout = tool_json_token(&pipeline, tool_json_get(&pipeline, 0, "allPageLayout"));
     char templates[65];
-    if (eg_json_uint(&pipeline, eg_json_get(&pipeline, 0, "format"), &format) || format != 1 ||
+    if (tool_json_uint(&pipeline, tool_json_get(&pipeline, 0, "format"), &format) || format != 1 ||
         digest_field(&pipeline, 0, "key", run.pipeline) || digest_field(&pipeline, 0, "templatesSha256", templates) ||
-        eg_json_string(&pipeline, eg_json_get(&pipeline, 0, "engine"), run.engine, sizeof(run.engine)) ||
-        !run.engine[0] || !layout || layout->kind != EG_JSON_BOOL) {
+        tool_json_string(&pipeline, tool_json_get(&pipeline, 0, "engine"), run.engine, sizeof(run.engine)) ||
+        !run.engine[0] || !layout || layout->kind != TOOL_JSON_BOOL) {
         eg_error("invalid preparation pipeline manifest", 0); goto done;
     }
     if (join(run.model_dir, "tokenizer.eg2", path) || eg_tokenizer_load(&run.tokenizer, path) ||
         join(run.output, "cache", cache) || eg_ensure_directory(cache) || verify_snapshot(&run)) goto done;
-    size_t items_index = eg_json_get(&selection, 0, "items");
-    const EgJsonToken *items = eg_json_token(&selection, items_index);
-    if (!items || items->kind != EG_JSON_ARRAY) { eg_error("invalid selected Paper array", 0); goto done; }
-    for (size_t i = items_index + 1; i < items->next; i = eg_json_token(&selection, i)->next) {
+    size_t items_index = tool_json_get(&selection, 0, "items");
+    const ToolJsonToken *items = tool_json_token(&selection, items_index);
+    if (!items || items->kind != TOOL_JSON_ARRAY) { eg_error("invalid selected Paper array", 0); goto done; }
+    for (size_t i = items_index + 1; i < items->next; i = tool_json_token(&selection, i)->next) {
         if (expired(&run)) goto done;
         if (plan_document(&run, &selection, i) || status(&run, 0)) goto done;
     }
@@ -627,7 +626,7 @@ done:
         if (platform_remove_file(lock)) { eg_error("cannot remove owned index lock: ", lock); result = 1; }
     }
     eg_model_free(&run.model); eg_tokenizer_free(&run.tokenizer); eg_title_index_free(&titles);
-    eg_json_free(&selection); eg_json_free(&pipeline); rt_free(selection_bytes); rt_free(pipeline_bytes);
+    tool_json_free(&selection); tool_json_free(&pipeline); rt_free(selection_bytes); rt_free(pipeline_bytes);
     for (size_t i = 0; i < run.documents.count; i++) {
         Document *d = tool_array_get(&run.documents, i);
         rt_free(d->id); rt_free(d->title); rt_free(d->reference); rt_free(d->file_id); rt_free(d->text);

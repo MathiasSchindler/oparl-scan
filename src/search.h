@@ -2,7 +2,7 @@
 #define OPARL_SEARCH_H
 
 #include "tool_util.h"
-#include "json.h"
+#include "tool_json_parser.h"
 #include <stdint.h>
 
 typedef struct {
@@ -208,7 +208,6 @@ void search_hit_date(const SearchIndex *index, SearchHit *hit, SearchDateRole ro
 const SearchDate *search_hit_time(const SearchIndex *index, const SearchHit *hit);
 const char *search_hit_date_text(const SearchIndex *index, const SearchHit *hit);
 int search_hit_date_json(ToolByteBuffer *out, const SearchIndex *index, const SearchHit *hit);
-int search_json_quote(ToolByteBuffer *buffer, const char *text);
 int search_serve(const SearchIndex *index, unsigned int port, const char *web_root);
 int search_publish_pdfs(const SearchIndex *index, const char *input, const char *web_root);
 int search_pdf_open(const SearchIndex *index, const char *web_root, const char *hash,
@@ -225,7 +224,7 @@ int search_read_json(ToolByteBuffer *out, const SearchIndex *index, const char *
                      const SearchRead *request, const char **error);
 int search_hit_source_json(ToolByteBuffer *out, const SearchIndex *index, const SearchHit *hit);
 int search_coverage_json(ToolByteBuffer *out, const SearchIndex *index);
-int search_read_arguments(const Json *json, size_t arguments, SearchRead *request,
+int search_read_arguments(const ToolJson *json, size_t arguments, SearchRead *request,
                           char *storage, size_t capacity, const char **error);
 
 #endif

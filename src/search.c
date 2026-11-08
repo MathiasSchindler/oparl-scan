@@ -1,6 +1,6 @@
 #include "search.h"
 #include "pdf-text.h"
-#include "json.h"
+#include "tool_json_parser.h"
 #include "runtime.h"
 #include "hash_util.h"
 #include "platform.h"
@@ -1116,9 +1116,10 @@ static int out_char(SearchOutput *out, char ch) {
 }
 
 static int out_uint(SearchOutput *out, unsigned long long value) {
-    char text[32];
-    rt_unsigned_to_string(value, text, sizeof(text));
-    return out_text(out, text);
+    if (!out->memory) return tool_output_buffer_write_uint(&out->stream, value);
+    if (out->memory->size > 16U * 1024U * 1024U ||
+        tool_count_decimal_digits(value) > 16U * 1024U * 1024U - out->memory->size) return -1;
+    return tool_byte_buffer_append_uint(out->memory, value);
 }
 
 static int out_line(SearchOutput *out, const char *text) {
@@ -1167,8 +1168,8 @@ static int out_field_bool(SearchOutput *out, const char *name, int value) {
 }
 
 static int out_document_url(SearchOutput *out, const SearchIndex *index, const SearchRecord *record) {
-    Json json;
-    const JsonToken *token;
+    ToolJson json;
+    const ToolJsonToken *token;
     size_t value;
     int status = 0;
     int main_document = !rt_strcmp(index->strings + record->kind, "Paper");
@@ -1176,24 +1177,24 @@ static int out_document_url(SearchOutput *out, const SearchIndex *index, const S
     if (file == NONE) return 0;
     record = &index->records[file];
     if (!record->payload || rt_strcmp(index->strings + record->kind, "File")) return 0;
-    if (json_parse(&json, index->strings + record->payload, rt_strlen(index->strings + record->payload)) != 0)
+    if (tool_json_parse(&json, index->strings + record->payload, rt_strlen(index->strings + record->payload)) != 0)
         return search_error("cannot parse indexed File metadata", index->strings + record->id);
     if (main_document)
         status = out_key(out, "mainDocument") || out_text(out, "{\"fileId\":") ||
             out_string(out, index->strings + record->id);
-    value = json_get(&json, 0, "downloadUrl");
-    token = json_token(&json, value);
-    if (!token || token->kind == JSON_NULL || (token->kind == JSON_STRING && token->end - token->start == 2))
-        token = json_token(&json, json_get(&json, 0, "accessUrl"));
-    if (!status && token && token->kind != JSON_NULL) {
-        if (token->kind != JSON_STRING) status = search_error("document URL is not a string", index->strings + record->id);
+    value = tool_json_get(&json, 0, "downloadUrl");
+    token = tool_json_token(&json, value);
+    if (!token || token->kind == TOOL_JSON_NULL || (token->kind == TOOL_JSON_STRING && token->end - token->start == 2))
+        token = tool_json_token(&json, tool_json_get(&json, 0, "accessUrl"));
+    if (!status && token && token->kind != TOOL_JSON_NULL) {
+        if (token->kind != TOOL_JSON_STRING) status = search_error("document URL is not a string", index->strings + record->id);
         else if (token->end - token->start > 2)
             status = out_key(out, "documentUrl") != 0 ||
                 out_write(out, json.text + token->start, token->end - token->start) != 0 ? -1 : 0;
     }
-    token = json_token(&json, json_get(&json, 0, "fileName"));
-    if (!status && token && token->kind != JSON_NULL) {
-        if (token->kind != JSON_STRING) status = search_error("fileName is not a string", index->strings + record->id);
+    token = tool_json_token(&json, tool_json_get(&json, 0, "fileName"));
+    if (!status && token && token->kind != TOOL_JSON_NULL) {
+        if (token->kind != TOOL_JSON_STRING) status = search_error("fileName is not a string", index->strings + record->id);
         else if (token->end - token->start > 2)
             status = out_key(out, "fileName") != 0 ||
                 out_write(out, json.text + token->start, token->end - token->start) != 0 ? -1 : 0;
@@ -1209,7 +1210,7 @@ static int out_document_url(SearchOutput *out, const SearchIndex *index, const S
         } else if (!status) status = out_text(out, "null");
         if (!status) status = out_text(out, "}");
     }
-    json_free(&json);
+    tool_json_free(&json);
     return status;
 }
 
@@ -1440,10 +1441,6 @@ int search_results_json(ToolByteBuffer *buffer, const SearchIndex *index, const 
     return print_results(&out, index, result, 1);
 }
 
-int search_json_quote(ToolByteBuffer *buffer, const char *text) {
-    return json_quote(buffer, text);
-}
-
 int search_record_json(ToolByteBuffer *buffer, const SearchIndex *index, const SearchRecord *record) {
     return search_record_view_json(buffer, index, record, 1);
 }
@@ -1484,7 +1481,7 @@ typedef struct {
     char *id;
     const char *kind;
     const SearchRecord *record;
-    Json json;
+    ToolJson json;
 } CaseObject;
 
 typedef struct { const char *key, *kind; } CaseRelation;
@@ -1493,34 +1490,34 @@ void search_case_close(SearchCase *context) {
     size_t i;
     for (i = 0; i < context->objects.count; i++) {
         CaseObject *object = (CaseObject *)tool_array_get(&context->objects, i);
-        if (object->json.text) json_free(&object->json);
+        if (object->json.text) tool_json_free(&object->json);
         rt_free(object->id);
     }
     tool_array_free(&context->objects);
 }
 
 static int case_metadata(CaseObject *object, const char *text, size_t length, const char **error) {
-    if (json_parse(&object->json, text, length) != 0) {
+    if (tool_json_parse(&object->json, text, length) != 0) {
         object->json.text = 0;
         *error = "cannot parse case metadata";
         return -1;
     }
-    if (json_token(&object->json, 0)->kind != JSON_OBJECT) {
+    if (tool_json_token(&object->json, 0)->kind != TOOL_JSON_OBJECT) {
         *error = "case metadata is not an object"; return -1;
     }
     return 0;
 }
 
 static int case_add(SearchCase *context, const SearchIndex *index, char *id, const char *kind,
-                    const Json *embedded, size_t value, const char **error) {
+                    const ToolJson *embedded, size_t value, const char **error) {
     CaseObject *object;
     size_t i;
-    const JsonToken *token = embedded ? json_token(embedded, value) : 0;
+    const ToolJsonToken *token = embedded ? tool_json_token(embedded, value) : 0;
     for (i = 0; i < context->objects.count; i++) {
         object = (CaseObject *)tool_array_get(&context->objects, i);
         if (!rt_strcmp(object->id, id)) {
             rt_free(id);
-            if (!object->json.text && token && token->kind == JSON_OBJECT)
+            if (!object->json.text && token && token->kind == TOOL_JSON_OBJECT)
                 return case_metadata(object, embedded->text + token->start, token->end - token->start, error);
             return 0;
         }
@@ -1540,30 +1537,30 @@ static int case_add(SearchCase *context, const SearchIndex *index, char *id, con
             return case_metadata(object, payload, rt_strlen(payload), error);
         }
     } else context->incomplete = 1;
-    if (token && token->kind == JSON_OBJECT)
+    if (token && token->kind == TOOL_JSON_OBJECT)
         return case_metadata(object, embedded->text + token->start, token->end - token->start, error);
     return 0;
 }
 
-static int case_value(SearchCase *context, const SearchIndex *index, const Json *json, size_t value,
+static int case_value(SearchCase *context, const SearchIndex *index, const ToolJson *json, size_t value,
                       const char *kind, const char **error) {
-    const JsonToken *token = json_token(json, value), *identity;
+    const ToolJsonToken *token = tool_json_token(json, value), *identity;
     char *id;
     size_t child;
-    if (!token || token->kind == JSON_NULL) return 0;
-    if (token->kind == JSON_ARRAY) {
-        for (child = value + 1; child < token->next; child = json_token(json, child)->next)
+    if (!token || token->kind == TOOL_JSON_NULL) return 0;
+    if (token->kind == TOOL_JSON_ARRAY) {
+        for (child = value + 1; child < token->next; child = tool_json_token(json, child)->next)
             if (case_value(context, index, json, child, kind, error) != 0) return -1;
         return 0;
     }
-    child = token->kind == JSON_OBJECT ? json_get(json, value, "id") : value;
-    identity = json_token(json, child);
-    if (!identity || identity->kind != JSON_STRING) {
+    child = token->kind == TOOL_JSON_OBJECT ? tool_json_get(json, value, "id") : value;
+    identity = tool_json_token(json, child);
+    if (!identity || identity->kind != TOOL_JSON_STRING) {
         *error = "case relationship has no string ID"; return -1;
     }
     id = (char *)rt_malloc(identity->end - identity->start + 1);
     if (!id) { *error = "cannot allocate case identity"; return -1; }
-    if (json_string(json, child, id, identity->end - identity->start + 1) != 0 || !*id) {
+    if (tool_json_string(json, child, id, identity->end - identity->start + 1) != 0 || !*id) {
         rt_free(id); *error = "invalid case relationship ID"; return -1;
     }
     return case_add(context, index, id, kind, json, value, error);
@@ -1598,7 +1595,7 @@ int search_case_open(SearchCase *context, const SearchIndex *index, const Search
         CaseObject object = *(const CaseObject *)tool_array_get_const(&context->objects, i);
         const CaseRelation *links = 0;
         size_t count = 0;
-        if (!object.json.text || json_true(&object.json, json_get(&object.json, 0, "deleted"))) continue;
+        if (!object.json.text || tool_json_true(&object.json, tool_json_get(&object.json, 0, "deleted"))) continue;
         if (i == 0) { links = paper_links; count = sizeof(paper_links)/sizeof(paper_links[0]); }
         else if (!rt_strcmp(object.kind, "Consultation")) {
             links = consultation_links; count = sizeof(consultation_links)/sizeof(consultation_links[0]);
@@ -1608,7 +1605,7 @@ int search_case_open(SearchCase *context, const SearchIndex *index, const Search
             links = meeting_links; count = sizeof(meeting_links)/sizeof(meeting_links[0]);
         }
         for (j = 0; j < count; j++)
-            if (case_value(context, index, &object.json, json_get(&object.json, 0, links[j].key),
+            if (case_value(context, index, &object.json, tool_json_get(&object.json, 0, links[j].key),
                            links[j].kind, error) != 0) goto fail;
     }
     return 0;

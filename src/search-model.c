@@ -1,7 +1,7 @@
 #include "search.h"
 #include "runtime.h"
 #include "hash_util.h"
-#include "json.h"
+#include "tool_json_parser.h"
 
 #define NONE UINT32_MAX
 
@@ -98,20 +98,20 @@ int search_model_validate(const SearchIndex *index) {
             if (r->preparation != index->records[r->parent].preparation &&
                 (index->format_version < 5 || search_preparation_validate(index, r))) return -1;
         } else if (r->preparation) {
-            Json json;
+            ToolJson json;
             const SearchVersion *version = version_for(index, (uint32_t)i);
             const char *summary = index->strings + r->preparation;
-            const JsonToken *fields;
+            const ToolJsonToken *fields;
             char hash[65];
             unsigned long long format;
             int invalid;
             if (rt_strcmp(index->strings + r->kind, "File") || !version ||
-                json_parse(&json, summary, rt_strlen(summary))) return -1;
-            fields = json_token(&json, json_get(&json, 0, "fields"));
-            invalid = json_uint(&json, json_get(&json, 0, "format"), &format) || format != 1 ||
-                json_string(&json, json_get(&json, 0, "sourceSha256"), hash, sizeof(hash)) ||
-                rt_strcmp(hash, index->strings + version->hash) || !fields || fields->kind != JSON_ARRAY;
-            json_free(&json);
+                tool_json_parse(&json, summary, rt_strlen(summary))) return -1;
+            fields = tool_json_token(&json, tool_json_get(&json, 0, "fields"));
+            invalid = tool_json_uint(&json, tool_json_get(&json, 0, "format"), &format) || format != 1 ||
+                tool_json_string(&json, tool_json_get(&json, 0, "sourceSha256"), hash, sizeof(hash)) ||
+                rt_strcmp(hash, index->strings + version->hash) || !fields || fields->kind != TOOL_JSON_ARRAY;
+            tool_json_free(&json);
             if (invalid) return -1;
         }
     }
@@ -185,16 +185,11 @@ int search_model_validate(const SearchIndex *index) {
 static int put(ToolByteBuffer *out, const char *text) {
     return tool_byte_buffer_append_cstr(out, text);
 }
-static int number(ToolByteBuffer *out, uint64_t value) {
-    char text[32];
-    rt_unsigned_to_string(value, text, sizeof(text));
-    return put(out, text);
-}
 static int value(ToolByteBuffer *out, const SearchIndex *index, uint32_t offset) {
-    return offset ? search_json_quote(out, index->strings + offset) : put(out, "null");
+    return offset ? tool_json_append_string(out, index->strings + offset) : put(out, "null");
 }
 static int key(ToolByteBuffer *out, const char *name) {
-    return put(out, ",") != 0 || search_json_quote(out, name) != 0 || put(out, ":") != 0 ? -1 : 0;
+    return put(out, ",") != 0 || tool_json_append_string(out, name) != 0 || put(out, ":") != 0 ? -1 : 0;
 }
 static int field(ToolByteBuffer *out, const SearchIndex *index, const char *name, uint32_t offset) {
     return key(out, name) != 0 || value(out, index, offset) != 0 ? -1 : 0;
@@ -203,10 +198,10 @@ static int proof(ToolByteBuffer *out, const SearchIndex *index, uint32_t n) {
     const SearchEvidence *e = &index->evidence[n];
     return put(out, "{\"sourceObject\":") != 0 || value(out, index, e->object) != 0 ||
         field(out, index, "documentVersion", e->version) != 0 || key(out, "page") != 0 ||
-        (e->page ? number(out, e->page) : put(out, "null")) != 0 ||
+        (e->page ? tool_byte_buffer_append_uint(out, e->page) : put(out, "null")) != 0 ||
         field(out, index, "section", e->section) != 0 || field(out, index, "property", e->property) != 0 ||
         field(out, index, "rule", e->rule) != 0 || key(out, "certainty") != 0 ||
-        search_json_quote(out, certainty[e->certainty]) != 0 || put(out, "}") != 0 ? -1 : 0;
+        tool_json_append_string(out, certainty[e->certainty]) != 0 || put(out, "}") != 0 ? -1 : 0;
 }
 static int fact(ToolByteBuffer *out, const SearchIndex *index, const SearchFact *f) {
     return put(out, "{\"value\":") != 0 || value(out, index, f->value) != 0 ||
@@ -229,9 +224,9 @@ int search_model_json(ToolByteBuffer *out, const SearchIndex *index, const Searc
     if (put(out, "{\"identity\":") != 0 || value(out, index, record->identity) != 0 ||
         field(out, index, "objectId", record->id) != 0 || field(out, index, "kind", record->kind) != 0 ||
         key(out, "metadataOrigin") != 0 ||
-        search_json_quote(out, record->metadata_origin == 2 ? "archive-resource" :
+        tool_json_append_string(out, record->metadata_origin == 2 ? "archive-resource" :
             record->metadata_origin == 1 ? "embedded" : "archive-file") != 0 ||
-        key(out, "snapshotId") != 0 || search_json_quote(out, index->snapshot_id) != 0 ||
+        key(out, "snapshotId") != 0 || tool_json_append_string(out, index->snapshot_id) != 0 ||
         put(out, ",\"context\":{\"system\":") != 0 || value(out, index, record->system) != 0 ||
         field(out, index, "body", record->body) != 0 || put(out, "},\"initiative\":null") != 0) return -1;
     if (!rt_strcmp(index->strings + record->kind, "Paper") &&
@@ -241,18 +236,18 @@ int search_model_json(ToolByteBuffer *out, const SearchIndex *index, const Searc
     if (version) {
         if (put(out, "{\"id\":") != 0 || value(out, index, version->id) != 0 ||
             field(out, index, "sha256", version->hash) != 0 || key(out, "bytes") != 0 ||
-            number(out, version->bytes) != 0 || key(out, "observedAtEpochSeconds") != 0 ||
-            (version->observed_at ? number(out, version->observed_at) : put(out, "null")) != 0 ||
+            tool_byte_buffer_append_uint(out, version->bytes) != 0 || key(out, "observedAtEpochSeconds") != 0 ||
+            (version->observed_at ? tool_byte_buffer_append_uint(out, version->observed_at) : put(out, "null")) != 0 ||
             key(out, "fetchedAtEpochSeconds") != 0 ||
-            (version->fetched_at ? number(out, version->fetched_at) : put(out, "null")) != 0 ||
+            (version->fetched_at ? tool_byte_buffer_append_uint(out, version->fetched_at) : put(out, "null")) != 0 ||
             put(out, "}") != 0) return -1;
     } else if (put(out, "null") != 0) return -1;
     if (put(out, ",\"sections\":[") != 0) return -1;
     for (i = 0; i < index->section_count; i++) if (index->sections[i].record == n) {
         const SearchSection *s = &index->sections[i];
         if (put(out, "{\"id\":") != 0 || value(out, index, s->id) != 0 ||
-            key(out, "byteStart") != 0 || number(out, s->start - record->body_start) != 0 ||
-            key(out, "byteLength") != 0 || number(out, s->length) != 0 ||
+            key(out, "byteStart") != 0 || tool_byte_buffer_append_uint(out, s->start - record->body_start) != 0 ||
+            key(out, "byteLength") != 0 || tool_byte_buffer_append_uint(out, s->length) != 0 ||
             key(out, "evidence") != 0 || proof(out, index, s->evidence) != 0 || put(out, "}") != 0) return -1;
     }
     if (put(out, "],\"dates\":{") != 0) return -1;
@@ -260,10 +255,10 @@ int search_model_json(ToolByteBuffer *out, const SearchIndex *index, const Searc
         const SearchFact *found = 0;
         for (j = first_fact; j < index->fact_count && index->facts[j].record == object; j++)
             if (index->facts[j].role == i) { found = &index->facts[j]; break; }
-        if ((i > 1 && put(out, ",") != 0) || search_json_quote(out, dates[i]) != 0 || put(out, ":") != 0) return -1;
+        if ((i > 1 && put(out, ",") != 0) || tool_json_append_string(out, dates[i]) != 0 || put(out, ":") != 0) return -1;
         if (found) { if (fact(out, index, found) != 0) return -1; }
         else if (i == SEARCH_IMPORTED) {
-            if (put(out, "{\"epochSeconds\":") != 0 || number(out, index->imported_at) != 0 ||
+            if (put(out, "{\"epochSeconds\":") != 0 || tool_byte_buffer_append_uint(out, index->imported_at) != 0 ||
                 put(out, ",\"evidence\":{\"sourceObject\":") != 0 || value(out, index, record->id) != 0 ||
                 put(out, ",\"rule\":\"local-archive-index-import-v1\",\"scope\":\"local-archive-read\","
                     "\"certainty\":\"exact\"}}") != 0) return -1;
@@ -287,7 +282,7 @@ int search_model_json(ToolByteBuffer *out, const SearchIndex *index, const Searc
             crypto_sha256_final(&sha, digest); hash_to_hex(digest, 32, hex);
             if ((comma && put(out, ",") != 0) || put(out, "{\"id\":\"urn:oparl-search:event:") != 0 ||
                 put(out, hex) != 0 || put(out, "\",\"dateRole\":") != 0 ||
-                search_json_quote(out, dates[f->role]) != 0 || key(out, "time") != 0 ||
+                tool_json_append_string(out, dates[f->role]) != 0 || key(out, "time") != 0 ||
                 fact(out, index, f) != 0 || put(out, "}") != 0) return -1;
             comma = 1;
         }
@@ -295,13 +290,13 @@ int search_model_json(ToolByteBuffer *out, const SearchIndex *index, const Searc
     if (put(out, "],\"relations\":{") != 0) return -1;
     for (i = 0; i < sizeof(groups)/sizeof(groups[0]); i++) {
         int comma = 0;
-        if ((i && put(out, ",") != 0) || search_json_quote(out, groups[i]) != 0 || put(out, ":[") != 0) return -1;
+        if ((i && put(out, ",") != 0) || tool_json_append_string(out, groups[i]) != 0 || put(out, ":[") != 0) return -1;
         for (j = start; j < index->relation_count && index->relations[j].source == object; j++) {
             const SearchRelation *r = &index->relations[j];
             if (scope(r->role) != i) continue;
             if ((comma && put(out, ",") != 0) || put(out, "{\"target\":") != 0 || value(out, index, r->target) != 0 ||
-                key(out, "role") != 0 || search_json_quote(out, roles[r->role]) != 0 ||
-                key(out, "authority") != 0 || search_json_quote(out, authority[r->authority]) != 0 ||
+                key(out, "role") != 0 || tool_json_append_string(out, roles[r->role]) != 0 ||
+                key(out, "authority") != 0 || tool_json_append_string(out, authority[r->authority]) != 0 ||
                 key(out, "evidence") != 0 || proof(out, index, r->evidence) != 0 || put(out, "}") != 0) return -1;
             comma = 1;
         }

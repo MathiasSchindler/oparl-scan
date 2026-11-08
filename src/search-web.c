@@ -350,7 +350,7 @@ static int research_response(int fd, const WebRequest *request, const SearchInde
     char *values[PARAMETER_COUNT], storage[16385];
     ToolByteBuffer arguments, result;
     SearchRead read;
-    Json json;
+    ToolJson json;
     const char *error = "invalid research parameters";
     size_t i;
     int status = 0, comma = 0, parsed = 0;
@@ -359,7 +359,7 @@ static int research_response(int fd, const WebRequest *request, const SearchInde
     if (tool_byte_buffer_append_cstr(&arguments, "{")) { status = SEARCH_QUERY_RESOURCE; goto done; }
     for (i = 0; i < PARAMETER_COUNT; i++) if (values[i]) {
         if ((comma && tool_byte_buffer_append_cstr(&arguments, ",")) ||
-            search_json_quote(&arguments, parameter_names[i]) || tool_byte_buffer_append_cstr(&arguments, ":")) {
+            tool_json_append_string(&arguments, parameter_names[i]) || tool_byte_buffer_append_cstr(&arguments, ":")) {
             status = SEARCH_QUERY_RESOURCE; goto done;
         }
         if (i == 5 || i == 6 || i == 9) {
@@ -371,22 +371,22 @@ static int research_response(int fd, const WebRequest *request, const SearchInde
             rt_unsigned_to_string(value, text, sizeof(text));
             if (tool_byte_buffer_append_cstr(&arguments, text)) { status = SEARCH_QUERY_RESOURCE; goto done; }
         } else if (i == 18 || i == 19) {
-            Json value;
-            if (json_parse(&value, values[i], rt_strlen(values[i]))) { status = SEARCH_QUERY_INVALID; goto done; }
-            if (json_token(&value, 0)->kind != (i == 18 ? JSON_BOOL : JSON_ARRAY)) status = SEARCH_QUERY_INVALID;
-            json_free(&value);
+            ToolJson value;
+            if (tool_json_parse(&value, values[i], rt_strlen(values[i]))) { status = SEARCH_QUERY_INVALID; goto done; }
+            if (tool_json_token(&value, 0)->kind != (i == 18 ? TOOL_JSON_BOOL : TOOL_JSON_ARRAY)) status = SEARCH_QUERY_INVALID;
+            tool_json_free(&value);
             if (status) goto done;
             if (tool_byte_buffer_append_cstr(&arguments, values[i])) { status = SEARCH_QUERY_RESOURCE; goto done; }
-        } else if (search_json_quote(&arguments, values[i])) { status = SEARCH_QUERY_RESOURCE; goto done; }
+        } else if (tool_json_append_string(&arguments, values[i])) { status = SEARCH_QUERY_RESOURCE; goto done; }
         comma = 1;
     }
     if (tool_byte_buffer_append_cstr(&arguments, "}")) { status = SEARCH_QUERY_RESOURCE; goto done; }
-    if (json_parse(&json, (const char *)arguments.data, arguments.size)) { status = SEARCH_QUERY_INVALID; goto done; }
+    if (tool_json_parse(&json, (const char *)arguments.data, arguments.size)) { status = SEARCH_QUERY_INVALID; goto done; }
     parsed = 1;
     status = search_read_arguments(&json, 0, &read, storage, sizeof(storage), &error);
     if (!status) status = search_read_json(&result, index, operation, &read, &error);
 done:
-    if (parsed) json_free(&json);
+    if (parsed) tool_json_free(&json);
     if (status) status = web_error(fd, status == SEARCH_READ_NOT_FOUND ? 404 : status == SEARCH_QUERY_SNAPSHOT ? 409 :
         status == SEARCH_QUERY_RESOURCE ? 500 : 400, request->head, error);
     else {

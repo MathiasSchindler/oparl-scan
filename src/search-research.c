@@ -1,5 +1,5 @@
 #include "search.h"
-#include "json.h"
+#include "tool_json_parser.h"
 #include "runtime.h"
 
 #define NONE UINT32_MAX
@@ -18,23 +18,20 @@ static const char *const metadata_fields[] = {
 };
 static int put(ToolByteBuffer *out, const char *text) { return tool_byte_buffer_append_cstr(out, text); }
 static int key(ToolByteBuffer *out, const char *name) {
-    return put(out, ",") || search_json_quote(out, name) || put(out, ":");
-}
-static int number(ToolByteBuffer *out, unsigned long long value) {
-    char text[32]; rt_unsigned_to_string(value, text, sizeof(text)); return put(out, text);
+    return put(out, ",") || tool_json_append_string(out, name) || put(out, ":");
 }
 static int string(ToolByteBuffer *out, const char *name, const char *value) {
-    return key(out, name) || search_json_quote(out, value);
+    return key(out, name) || tool_json_append_string(out, value);
 }
 static int uint(ToolByteBuffer *out, const char *name, unsigned long long value) {
-    return key(out, name) || number(out, value);
+    return key(out, name) || tool_byte_buffer_append_uint(out, value);
 }
 static int boolean(ToolByteBuffer *out, const char *name, int value) {
     return key(out, name) || put(out, value ? "true" : "false");
 }
-static int metadata(const SearchIndex *index, uint32_t record, Json *json) {
+static int metadata(const SearchIndex *index, uint32_t record, ToolJson *json) {
     const char *text = index->strings + index->records[record].payload;
-    return json_parse(json, *text ? text : "{}", *text ? rt_strlen(text) : 2);
+    return tool_json_parse(json, *text ? text : "{}", *text ? rt_strlen(text) : 2);
 }
 static int identity_compare(const void *a, const void *b) {
     const SearchIdentity *x = (const SearchIdentity *)a, *y = (const SearchIdentity *)b;
@@ -59,23 +56,23 @@ const SearchRecord *search_identity_find(const SearchIndex *index, const char *i
     }
     return 0;
 }
-static int actor_value(SearchIndex *index, const Json *json, size_t value, uint32_t source, uint32_t property) {
-    const JsonToken *token = json_token(json, value);
+static int actor_value(SearchIndex *index, const ToolJson *json, size_t value, uint32_t source, uint32_t property) {
+    const ToolJsonToken *token = tool_json_token(json, value);
     size_t i;
     SearchActor *actor;
     size_t previous_capacity = index->actors.capacity;
     char *id;
-    if (!token || token->kind == JSON_NULL) return 0;
-    if (token->kind == JSON_ARRAY) {
-        for (i = value+1; i < token->next; i = json_token(json, i)->next)
+    if (!token || token->kind == TOOL_JSON_NULL) return 0;
+    if (token->kind == TOOL_JSON_ARRAY) {
+        for (i = value+1; i < token->next; i = tool_json_token(json, i)->next)
             if (actor_value(index, json, i, source, property)) return -1;
         return 0;
     }
-    if (token->kind == JSON_OBJECT) return actor_value(index, json, json_get(json, value, "id"), source, property);
-    if (token->kind != JSON_STRING) return search_error("actor relationship is not a string/object/array", 0);
+    if (token->kind == TOOL_JSON_OBJECT) return actor_value(index, json, tool_json_get(json, value, "id"), source, property);
+    if (token->kind != TOOL_JSON_STRING) return search_error("actor relationship is not a string/object/array", 0);
     id = (char *)rt_malloc(token->end-token->start+1);
     if (!id) return -1;
-    if (json_string(json, value, id, token->end-token->start+1) || !*id) {
+    if (tool_json_string(json, value, id, token->end-token->start+1) || !*id) {
         rt_free(id); return search_error("invalid actor relationship ID", 0);
     }
     actor = (SearchActor *)tool_array_append(&index->actors);
@@ -143,7 +140,7 @@ int search_research_build(SearchIndex *index) {
     for (i = 0; i < count; i++) {
         const SearchRecord *r = &index->records[i];
         const char *kind = index->strings + r->kind;
-        Json json;
+        ToolJson json;
         index->actor_start[i] = (uint32_t)index->actors.count; index->agenda_order[i] = UINT64_MAX;
         index->agenda_access[i] = 0;
         for (j = 0; rt_strcmp(index->strings + index->kinds[j].name, kind); j++) {}
@@ -158,32 +155,32 @@ int search_research_build(SearchIndex *index) {
         if (r->parent != NONE) continue;
         if (metadata(index, (uint32_t)i, &json)) return search_error("cannot parse research metadata", index->strings + r->id);
         for (j = 0; j < sizeof(actor_properties)/sizeof(actor_properties[0]); j++)
-            if (actor_value(index, &json, json_get(&json, 0, actor_properties[j]), (uint32_t)i, (uint32_t)j)) {
-                json_free(&json); return -1;
+            if (actor_value(index, &json, tool_json_get(&json, 0, actor_properties[j]), (uint32_t)i, (uint32_t)j)) {
+                tool_json_free(&json); return -1;
             }
         if (!rt_strcmp(kind, "AgendaItem")) {
             unsigned long long order;
-            const JsonToken *access = json_token(&json, json_get(&json, 0, "public"));
-            const JsonToken *result = json_token(&json, json_get(&json, 0, "result"));
-            if (!json_uint(&json, json_get(&json, 0, "order"), &order)) index->agenda_order[i] = order;
-            if (access && access->kind == JSON_BOOL)
-                index->agenda_access[i] = json_true(&json, json_get(&json, 0, "public")) ? 1 : 2;
-            index->agenda_results[i] = result && result->kind == JSON_STRING && result->end-result->start > 2;
+            const ToolJsonToken *access = tool_json_token(&json, tool_json_get(&json, 0, "public"));
+            const ToolJsonToken *result = tool_json_token(&json, tool_json_get(&json, 0, "result"));
+            if (!tool_json_uint(&json, tool_json_get(&json, 0, "order"), &order)) index->agenda_order[i] = order;
+            if (access && access->kind == TOOL_JSON_BOOL)
+                index->agenda_access[i] = tool_json_true(&json, tool_json_get(&json, 0, "public")) ? 1 : 2;
+            index->agenda_results[i] = result && result->kind == TOOL_JSON_STRING && result->end-result->start > 2;
         }
         if (!rt_strcmp(kind, "Meeting")) {
-            size_t value = json_get(&json, 0, "agendaItem"), n;
-            const JsonToken *items = json_token(&json, value);
-            if (items) for (n = items->kind == JSON_ARRAY ? value+1 : value;
-                n < items->next; n = json_token(&json, n)->next) {
-                const JsonToken *access = json_token(&json, json_get(&json, n, "public"));
-                size_t id = json_get(&json, n, "id"), k;
-                const JsonToken *identity = json_token(&json, id);
+            size_t value = tool_json_get(&json, 0, "agendaItem"), n;
+            const ToolJsonToken *items = tool_json_token(&json, value);
+            if (items) for (n = items->kind == TOOL_JSON_ARRAY ? value+1 : value;
+                n < items->next; n = tool_json_token(&json, n)->next) {
+                const ToolJsonToken *access = tool_json_token(&json, tool_json_get(&json, n, "public"));
+                size_t id = tool_json_get(&json, n, "id"), k;
+                const ToolJsonToken *identity = tool_json_token(&json, id);
                 char *decoded;
-                if (!access || access->kind != JSON_BOOL || json_true(&json, json_get(&json, n, "public"))) continue;
-                if (!identity || identity->kind != JSON_STRING) continue;
+                if (!access || access->kind != TOOL_JSON_BOOL || tool_json_true(&json, tool_json_get(&json, n, "public"))) continue;
+                if (!identity || identity->kind != TOOL_JSON_STRING) continue;
                 decoded = (char *)rt_malloc(identity->end-identity->start+1);
-                if (!decoded || json_string(&json, id, decoded, identity->end-identity->start+1)) {
-                    rt_free(decoded); json_free(&json);
+                if (!decoded || tool_json_string(&json, id, decoded, identity->end-identity->start+1)) {
+                    rt_free(decoded); tool_json_free(&json);
                     return search_error("cannot decode nonpublic agenda reference", index->strings + r->id);
                 }
                 for (k = relation_start(index, (uint32_t)i); k < index->relation_count &&
@@ -193,7 +190,7 @@ int search_research_build(SearchIndex *index) {
                 rt_free(decoded);
             }
         }
-        json_free(&json);
+        tool_json_free(&json);
     }
     index->actor_start[count] = (uint32_t)index->actors.count;
     for (i = 0; i < index->relation_count; i++) {
@@ -266,29 +263,29 @@ int search_snapshot_check(const SearchIndex *index, const char *snapshot, unsign
     }
     return 0;
 }
-static int argument_string(const Json *json, size_t value, const char **out,
+static int argument_string(const ToolJson *json, size_t value, const char **out,
                            char **storage, size_t *capacity) {
-    const JsonToken *token = json_token(json, value);
+    const ToolJsonToken *token = tool_json_token(json, value);
     size_t used;
-    if (!token || token->kind != JSON_STRING || token->end-token->start+1 > *capacity ||
-        json_string(json, value, *storage, *capacity) || !**storage) return -1;
+    if (!token || token->kind != TOOL_JSON_STRING || token->end-token->start+1 > *capacity ||
+        tool_json_string(json, value, *storage, *capacity) || !**storage) return -1;
     *out = *storage; used = rt_strlen(*storage)+1; *storage += used; *capacity -= used;
     return 0;
 }
-int search_read_arguments(const Json *json, size_t arguments, SearchRead *request,
+int search_read_arguments(const ToolJson *json, size_t arguments, SearchRead *request,
                           char *storage, size_t capacity, const char **error) {
     static const char *const names[] = {"id","kind","fields","snapshotId","limit","offset","page","raw","ids","view","direction"};
-    const JsonToken *root = json_token(json, arguments);
+    const ToolJsonToken *root = tool_json_token(json, arguments);
     unsigned int seen = 0;
     size_t i;
     rt_memset(request, 0, sizeof(*request));
     *error = "invalid research arguments: duplicate/unknown field, wrong type or out-of-range value";
-    if (!root || root->kind != JSON_OBJECT) return SEARCH_QUERY_INVALID;
+    if (!root || root->kind != TOOL_JSON_OBJECT) return SEARCH_QUERY_INVALID;
     for (i = arguments+1; i < root->next;) {
         size_t n, value = i+1;
-        const JsonToken *token = json_token(json, value);
+        const ToolJsonToken *token = tool_json_token(json, value);
         unsigned long long number;
-        for (n = 0; n < sizeof(names)/sizeof(names[0]) && !json_equals(json, i, names[n]); n++) {}
+        for (n = 0; n < sizeof(names)/sizeof(names[0]) && !tool_json_equals(json, i, names[n]); n++) {}
         if (n == sizeof(names)/sizeof(names[0]) || (seen & (1U << n)) || !token) return SEARCH_QUERY_INVALID;
         seen |= 1U << n;
         if (n < 4 || n >= 9) {
@@ -297,18 +294,18 @@ int search_read_arguments(const Json *json, size_t arguments, SearchRead *reques
                 n == 9 ? &request->view : &request->direction;
             if (argument_string(json, value, target, &storage, &capacity)) return SEARCH_QUERY_INVALID;
         } else if (n < 7) {
-            if (json_uint(json, value, &number) || number > (n == 4 ? 100 : n == 5 ? UINT32_MAX : 1000000) ||
+            if (tool_json_uint(json, value, &number) || number > (n == 4 ? 100 : n == 5 ? UINT32_MAX : 1000000) ||
                 (n != 5 && !number)) return SEARCH_QUERY_INVALID;
             if (n == 4) request->limit = (unsigned int)number;
             else if (n == 5) request->offset = (unsigned int)number;
             else request->page = (unsigned int)number;
         } else if (n == 7) {
-            if (token->kind != JSON_BOOL) return SEARCH_QUERY_INVALID;
-            request->raw = json_true(json, value);
+            if (token->kind != TOOL_JSON_BOOL) return SEARCH_QUERY_INVALID;
+            request->raw = tool_json_true(json, value);
         } else {
             size_t child;
-            if (token->kind != JSON_ARRAY) return SEARCH_QUERY_INVALID;
-            for (child = value+1; child < token->next; child = json_token(json, child)->next) {
+            if (token->kind != TOOL_JSON_ARRAY) return SEARCH_QUERY_INVALID;
+            for (child = value+1; child < token->next; child = tool_json_token(json, child)->next) {
                 if (request->id_count == 20 || argument_string(json, child, &request->ids[request->id_count],
                     &storage, &capacity)) return SEARCH_QUERY_INVALID;
                 request->id_count++;
@@ -325,14 +322,14 @@ int search_coverage_json(ToolByteBuffer *out, const SearchIndex *index) {
         put(out, ",\"perType\":[")) return -1;
     for (i = 0; i < index->kind_count; i++) {
         const SearchFacet *f = &index->kinds[i];
-        if ((i && put(out, ",")) || put(out, "{\"kind\":") || search_json_quote(out, index->strings + f->name) ||
+        if ((i && put(out, ",")) || put(out, "{\"kind\":") || tool_json_append_string(out, index->strings + f->name) ||
             uint(out, "records", f->count) || uint(out, "localWarningRecords", f->warnings) ||
             uint(out, "unresolvedRelationTargets", f->unresolved) ||
             uint(out, "filesWithoutIndexedVersion", f->unversioned) ||
-            put(out, ",\"fileVersionReasons\":{\"notArchivedAtIndexBuild\":") || number(out, f->not_archived) ||
+            put(out, ",\"fileVersionReasons\":{\"notArchivedAtIndexBuild\":") || tool_byte_buffer_append_uint(out, f->not_archived) ||
             uint(out, "unknown", f->missing_version_unknown) ||
             uint(out, "binaryPresentExtractionFailed", f->extraction_failed) ||
-            put(out, "},\"unresolvedReasons\":{\"explicitlyNonpublic\":") || number(out, f->nonpublic) ||
+            put(out, "},\"unresolvedReasons\":{\"explicitlyNonpublic\":") || tool_byte_buffer_append_uint(out, f->nonpublic) ||
             uint(out, "unknown", f->unresolved_unknown) || put(out, "}}")) return -1;
     }
     return put(out, "]}");
@@ -359,35 +356,35 @@ static int selected(const char *fields, const char *name) {
     }
     return 0;
 }
-static int projected(ToolByteBuffer *out, const Json *json, const char *fields, int raw,
+static int projected(ToolByteBuffer *out, const ToolJson *json, const char *fields, int raw,
                      ToolByteBuffer *omitted) {
     size_t i;
     int comma = 0;
     if (put(out, "{")) return -1;
     for (i = 0; i < sizeof(metadata_fields)/sizeof(metadata_fields[0]); i++) {
         const char *name = metadata_fields[i];
-        const JsonToken *token = json_token(json, json_get(json, 0, name));
+        const ToolJsonToken *token = tool_json_token(json, tool_json_get(json, 0, name));
         if (!selected(fields, name) || !token) continue;
-        if (token->kind == JSON_ARRAY || token->kind == JSON_OBJECT || (!raw && token->end-token->start > 514)) {
-            if ((omitted->size && put(omitted, ",")) || search_json_quote(omitted, name)) return -1;
+        if (token->kind == TOOL_JSON_ARRAY || token->kind == TOOL_JSON_OBJECT || (!raw && token->end-token->start > 514)) {
+            if ((omitted->size && put(omitted, ",")) || tool_json_append_string(omitted, name)) return -1;
             continue;
         }
-        if ((comma && put(out, ",")) || search_json_quote(out, name) || put(out, ":") ||
+        if ((comma && put(out, ",")) || tool_json_append_string(out, name) || put(out, ":") ||
             tool_byte_buffer_append(out, json->text + token->start, token->end-token->start)) return -1;
         comma = 1;
     }
     return put(out, "}");
 }
-static const char *lifecycle(const Json *json) {
+static const char *lifecycle(const ToolJson *json) {
     char state[128];
-    if (json_true(json, json_get(json, 0, "cancelled"))) return "cancelled";
-    if (json_string(json, json_get(json, 0, "meetingState"), state, sizeof(state))) return "unknown";
+    if (tool_json_true(json, tool_json_get(json, 0, "cancelled"))) return "cancelled";
+    if (tool_json_string(json, tool_json_get(json, 0, "meetingState"), state, sizeof(state))) return "unknown";
     if (!rt_strcmp(state, "abgesagt")) return "cancelled";
     if (!rt_strcmp(state, "eingeladen") || !rt_strcmp(state, "geplant")) return "planned";
     if (!rt_strcmp(state, "durchgef\xc3\xbchrt") || !rt_strcmp(state, "durchgefuehrt") || !rt_strcmp(state, "abgeschlossen")) return "held";
     return "unknown";
 }
-static int meeting_state(ToolByteBuffer *out, const SearchIndex *index, uint32_t record, const Json *json) {
+static int meeting_state(ToolByteBuffer *out, const SearchIndex *index, uint32_t record, const ToolJson *json) {
     const char *state = lifecycle(json);
     int conflict = index->meeting_results[record] &&
         (!rt_strcmp(state, "planned") || !rt_strcmp(state, "cancelled"));
@@ -400,14 +397,14 @@ static int citation(ToolByteBuffer *out, const SearchIndex *index, uint32_t reco
     const SearchRecord *r = &index->records[record];
     uint32_t source = r->parent == NONE ? record : r->parent, version = index->version_lookup[source];
     if (put(out, "{")) return -1;
-    if (!compact && (put(out, "\"objectId\":") || search_json_quote(out, index->strings + r->id) ||
+    if (!compact && (put(out, "\"objectId\":") || tool_json_append_string(out, index->strings + r->id) ||
         string(out, "snapshotId", index->snapshot_id) || put(out, ","))) return -1;
-    if (put(out, "\"page\":") || number(out, r->page) ||
+    if (put(out, "\"page\":") || tool_byte_buffer_append_uint(out, r->page) ||
         ((!compact || rt_strcmp(index->strings + r->identity, index->strings + r->id)) &&
             string(out, "identity", index->strings + r->identity)) || key(out, "documentVersion")) return -1;
     if (version != NONE) {
         const SearchVersion *v = &index->versions[version];
-        if (put(out, "{\"id\":") || search_json_quote(out, index->strings + v->id) ||
+        if (put(out, "{\"id\":") || tool_json_append_string(out, index->strings + v->id) ||
             string(out, "sha256", index->strings + v->hash) || uint(out, "bytes", v->bytes) || put(out, "}")) return -1;
     } else if (put(out, "null")) return -1;
     return boolean(out, "originalUrlMayChange", 1) || put(out, "}");
@@ -490,7 +487,7 @@ static int path(ToolByteBuffer *out, const SearchIndex *index, const ToolArray *
     if (put(out, "[")) return -1;
     while (used) {
         const SearchRelation *r = &index->relations[chain[--used]];
-        if (put(out, "{\"source\":") || search_json_quote(out, index->strings + index->records[r->source].id) ||
+        if (put(out, "{\"source\":") || tool_json_append_string(out, index->strings + index->records[r->source].id) ||
             string(out, "role", search_relation_role_name(r->role)) ||
             string(out, "target", index->strings + r->target) ||
             string(out, "direction", incoming[used] ? "incoming" : "outgoing") ||
@@ -499,26 +496,26 @@ static int path(ToolByteBuffer *out, const SearchIndex *index, const ToolArray *
     return put(out, "]");
 }
 static int linked_summary(ToolByteBuffer *out, const SearchIndex *index, uint32_t record) {
-    Json json;
+    ToolJson json;
     ToolByteBuffer omitted;
     int status;
     tool_byte_buffer_init(&omitted);
     if (metadata(index, record, &json)) return -1;
-    status = put(out, "{\"id\":") || search_json_quote(out, index->strings + index->records[record].id) ||
+    status = put(out, "{\"id\":") || tool_json_append_string(out, index->strings + index->records[record].id) ||
         key(out, "metadata") || projected(out, &json, "name,start,meetingState,cancelled,number,result,authoritative", 0, &omitted) ||
         key(out, "omittedFields") || put(out, "[") || tool_byte_buffer_append(out, omitted.data, omitted.size) || put(out, "]");
     if (!status && !rt_strcmp(index->strings + index->records[record].kind, "Meeting"))
         status = meeting_state(out, index, record, &json);
     if (!status) status = put(out, "}");
-    json_free(&json); tool_byte_buffer_free(&omitted); return status;
+    tool_json_free(&json); tool_byte_buffer_free(&omitted); return status;
 }
-static int consultation(ToolByteBuffer *out, const SearchIndex *index, uint32_t record, const Json *json) {
-    const JsonToken *flag = json_token(json, json_get(json, 0, "authoritative"));
+static int consultation(ToolByteBuffer *out, const SearchIndex *index, uint32_t record, const ToolJson *json) {
+    const ToolJsonToken *flag = tool_json_token(json, tool_json_get(json, 0, "authoritative"));
     size_t i;
     unsigned int emitted = 0, total = 0;
     if (key(out, "consultation") || put(out, "{\"authority\":") ||
-        search_json_quote(out, flag && flag->kind == JSON_BOOL ?
-            json_true(json, json_get(json, 0, "authoritative")) ? "authoritative" : "preliminary" : "unknown") ||
+        tool_json_append_string(out, flag && flag->kind == TOOL_JSON_BOOL ?
+            tool_json_true(json, tool_json_get(json, 0, "authoritative")) ? "authoritative" : "preliminary" : "unknown") ||
         string(out, "authoritySource", index->strings + index->records[record].id) ||
         put(out, ",\"context\":[")) return -1;
     for (i = relation_start(index, record); i < index->relation_count && index->relations[i].source == record; i++) {
@@ -528,9 +525,9 @@ static int consultation(ToolByteBuffer *out, const SearchIndex *index, uint32_t 
         total++;
         if (emitted >= 3) continue;
         if ((emitted && put(out, ",")) || put(out, "{\"role\":") ||
-            search_json_quote(out, search_relation_role_name(r->role)) || key(out, "object")) return -1;
+            tool_json_append_string(out, search_relation_role_name(r->role)) || key(out, "object")) return -1;
         if (target == NONE) {
-            if (put(out, "{\"id\":") || search_json_quote(out, index->strings + r->target) || boolean(out, "indexed", 0) || put(out, "}")) return -1;
+            if (put(out, "{\"id\":") || tool_json_append_string(out, index->strings + r->target) || boolean(out, "indexed", 0) || put(out, "}")) return -1;
         } else if (linked_summary(out, index, target)) return -1;
         if (put(out, "}")) return -1;
         emitted++;
@@ -552,7 +549,7 @@ static int consultation(ToolByteBuffer *out, const SearchIndex *index, uint32_t 
                 if ((emitted && put(out, ",")) || put(out, "{\"role\":\"meeting.organization\"") ||
                     string(out, "via", index->strings + index->records[meeting].id) || key(out, "object")) return -1;
                 if (target == NONE) {
-                    if (put(out, "{\"id\":") || search_json_quote(out, index->strings + index->relations[j].target) ||
+                    if (put(out, "{\"id\":") || tool_json_append_string(out, index->strings + index->relations[j].target) ||
                         boolean(out, "indexed", 0) || put(out, "}")) return -1;
                 } else if (linked_summary(out, index, target)) return -1;
                 if (put(out, "}")) return -1;
@@ -574,13 +571,13 @@ static int consultation(ToolByteBuffer *out, const SearchIndex *index, uint32_t 
             total++;
             if (emitted == 3) continue;
             if ((emitted && put(out, ",")) || put(out, "{\"id\":") ||
-                search_json_quote(out, index->strings + r->target) ||
+                tool_json_append_string(out, index->strings + r->target) ||
                 string(out, "sourceAgenda", index->strings + index->records[agenda].id) ||
                 string(out, "role", search_relation_role_name(r->role)) ||
                 boolean(out, "indexed", target != NONE) || key(out, "documentVersion")) return -1;
             if (target != NONE && index->version_lookup[target] != NONE) {
                 const SearchVersion *v = &index->versions[index->version_lookup[target]];
-                if (put(out, "{\"id\":") || search_json_quote(out, index->strings + v->id) ||
+                if (put(out, "{\"id\":") || tool_json_append_string(out, index->strings + v->id) ||
                     string(out, "sha256", index->strings + v->hash) || put(out, "}")) return -1;
             } else if (put(out, "null")) return -1;
             if (put(out, "}")) return -1;
@@ -600,9 +597,9 @@ static int object_json(ToolByteBuffer *out, const SearchIndex *index, const Tool
             entry->relation != NONE && (index->relations[entry->relation].role == SEARCH_MAIN_FILE ||
                 index->relations[entry->relation].role == SEARCH_PAPER_ATTACHMENT) ? "directSource" : "contextSource" : "context";
     ToolByteBuffer omitted;
-    Json json;
+    ToolJson json;
     int status;
-    if (put(out, "{\"id\":") || search_json_quote(out, index->strings + entry->id) ||
+    if (put(out, "{\"id\":") || tool_json_append_string(out, index->strings + entry->id) ||
         string(out, "kind", r ? index->strings + r->kind : "") || string(out, "scope", scope) ||
         boolean(out, "indexed", r != 0) || string(out, "sourceRole", role)) return -1;
     if (!collection) {
@@ -637,7 +634,7 @@ static int object_json(ToolByteBuffer *out, const SearchIndex *index, const Tool
         status = put(out, ",\"actors\":[");
         for (i = index->actor_start[entry->record]; !status && i < index->actor_start[entry->record+1] && count < 5; i++, count++) {
             const SearchActor *actor = (const SearchActor *)tool_array_get_const(&index->actors, i);
-            status = (count && put(out, ",")) || put(out, "{\"id\":") || search_json_quote(out, actor->id) ||
+            status = (count && put(out, ",")) || put(out, "{\"id\":") || tool_json_append_string(out, actor->id) ||
                 string(out, "sourceProperty", actor_properties[actor->property]) ||
                 boolean(out, "indexed", search_identity_find(index, actor->id, 0) != 0) || put(out, "}");
         }
@@ -645,7 +642,7 @@ static int object_json(ToolByteBuffer *out, const SearchIndex *index, const Tool
             index->actor_start[entry->record+1]-index->actor_start[entry->record]);
     }
     if (!status) status = put(out, "}");
-    json_free(&json); tool_byte_buffer_free(&omitted); return status;
+    tool_json_free(&json); tool_byte_buffer_free(&omitted); return status;
 }
 static int agenda_compare(const void *a, const void *b) {
     const Entry *x = (const Entry *)a, *y = (const Entry *)b;
@@ -683,7 +680,7 @@ static int next(ToolByteBuffer *out, const SearchIndex *index, const char *opera
                 const SearchRead *request, size_t offset, size_t total) {
     if (key(out, "next")) return -1;
     if (offset >= total) return put(out, "null");
-    if (put(out, "{\"operation\":") || search_json_quote(out, operation) ||
+    if (put(out, "{\"operation\":") || tool_json_append_string(out, operation) ||
         string(out, "snapshotId", index->snapshot_id) || uint(out, "offset", offset) ||
         uint(out, "limit", request->limit ? request->limit : 10)) return -1;
     if (request->id && string(out, "id", request->id)) return -1;
@@ -712,7 +709,7 @@ static int paper_types_json(ToolByteBuffer *out, const SearchIndex *index) {
     }
     if (put(out, ",\"paperTypes\":[")) goto done;
     for (i = 0; i < types.count; i++)
-        if ((i && put(out, ",")) || search_json_quote(out,
+        if ((i && put(out, ",")) || tool_json_append_string(out,
             index->strings + *(const uint32_t *)tool_array_get_const(&types, i))) goto done;
     status = put(out, "]");
 done:
@@ -722,7 +719,7 @@ static int relationship(ToolByteBuffer *out, const SearchIndex *index, uint32_t 
     const SearchRelation *r = &index->relations[n];
     const SearchRecord *source = &index->records[r->source];
     const char *name = index->strings + source->name;
-    if (put(out, "{\"source\":") || search_json_quote(out, index->strings + source->id) ||
+    if (put(out, "{\"source\":") || tool_json_append_string(out, index->strings + source->id) ||
         (rt_strlen(name) <= 512 ? string(out, "sourceName", name) : boolean(out, "sourceNameOmitted", 1)) ||
         string(out, "sourceKind", index->strings + source->kind) ||
         (r->role >= SEARCH_MEETING_ATTACHMENT && r->role <= SEARCH_VERBATIM_PROTOCOL &&
@@ -756,7 +753,7 @@ static int relations_json(ToolByteBuffer *out, const SearchIndex *index, uint32_
     if (in) for (i = incoming; i < index->incoming_start[record+1]; i++)
         if (!index->relation_hidden[index->incoming_relations[i]] &&
             (!outgoing || index->relations[index->incoming_relations[i]].source != record)) total++;
-    if (put(out, "{\"snapshotId\":") || search_json_quote(out, index->snapshot_id) ||
+    if (put(out, "{\"snapshotId\":") || tool_json_append_string(out, index->snapshot_id) ||
         string(out, "id", index->strings + index->records[record].id) ||
         string(out, "view", "relations") || string(out, "countUnit", "relationship") ||
         uint(out, "total", total) || uint(out, "nonPublicReferences", hidden) ||
@@ -868,7 +865,7 @@ int search_read_json(ToolByteBuffer *out, const SearchIndex *index, const char *
         status = object_json(out, index, &entries, (const Entry *)entries.data, request, 0);
         goto done;
     }
-    if (put(out, "{\"snapshotId\":") || search_json_quote(out, index->snapshot_id) ||
+    if (put(out, "{\"snapshotId\":") || tool_json_append_string(out, index->snapshot_id) ||
         boolean(out, "incomplete", index->incomplete != 0) || uint(out, "total", entries.count-first) ||
         string(out, "countUnit", first ? "agendaItem" : "object") ||
         string(out, "relationshipEncoding", "parent-reference-v1") || uint(out, "offset", request->offset)) goto resource;
@@ -885,7 +882,7 @@ int search_read_json(ToolByteBuffer *out, const SearchIndex *index, const char *
                 if (!rt_strcmp(kind, "Paper")) related++;
             }
         }
-        if (put(out, ",\"overview\":{\"directDocuments\":") || number(out, documents) ||
+        if (put(out, ",\"overview\":{\"directDocuments\":") || tool_byte_buffer_append_uint(out, documents) ||
             uint(out, "consultations", consultations) || uint(out, "relatedPapers", related) ||
             string(out, "consultationOrder", "meeting.start-desc; unknown last") || put(out, "}")) goto resource;
     }
@@ -895,20 +892,20 @@ int search_read_json(ToolByteBuffer *out, const SearchIndex *index, const char *
         if (entry->record == NONE) local_missing++;
         else if (index->records[entry->record].warnings) local_warnings++;
     }
-    if (put(out, ",\"localCoverage\":{\"unindexedObjects\":") || number(out, local_missing) ||
+    if (put(out, ",\"localCoverage\":{\"unindexedObjects\":") || tool_byte_buffer_append_uint(out, local_missing) ||
         uint(out, "warningObjects", local_warnings) || put(out, "}")) goto resource;
     if (first && (uint(out, "nonPublicReferences", nonpublic) || uint(out, "unresolvedAgendaReferences", missing_agenda) ||
         uint(out, "publicStatusUnspecified", unspecified))) goto resource;
     if (!rt_strcmp(operation, "get_search_options")) {
         if (put(out, ",\"kinds\":[")) goto resource;
         for (i = 0; i < index->kind_count; i++)
-            if ((i && put(out, ",")) || search_json_quote(out, index->strings + index->kinds[i].name)) goto resource;
+            if ((i && put(out, ",")) || tool_json_append_string(out, index->strings + index->kinds[i].name)) goto resource;
         if (put(out, "],\"dateRoles\":[")) goto resource;
         for (i = 0; i < SEARCH_REFERENCE_YEAR; i++)
-            if ((i && put(out, ",")) || search_json_quote(out, search_date_role_name((unsigned int)i))) goto resource;
+            if ((i && put(out, ",")) || tool_json_append_string(out, search_date_role_name((unsigned int)i))) goto resource;
         if (put(out, "],\"projectionFields\":[")) goto resource;
         for (i = 0; i < sizeof(metadata_fields)/sizeof(metadata_fields[0]); i++)
-            if ((i && put(out, ",")) || search_json_quote(out, metadata_fields[i])) goto resource;
+            if ((i && put(out, ",")) || tool_json_append_string(out, metadata_fields[i])) goto resource;
         if (put(out, "]") || paper_types_json(out, index) || boolean(out, "catalogIndexedOnly", 1) ||
             string(out, "actorSemantics", "exact raw relationship IDs; no inferred authorship")) goto resource;
     }
@@ -974,7 +971,7 @@ int search_hit_source_json(ToolByteBuffer *out, const SearchIndex *index, const 
     if (put(out, "]") || uint(out, "relationshipTotal", total) ||
         boolean(out, "relationshipsComplete", returned == total) ||
         key(out, "relationsAvailable") || put(out, "{\"operation\":\"get_object\",\"id\":") ||
-        search_json_quote(out, index->strings + index->records[source].id) ||
+        tool_json_append_string(out, index->strings + index->records[source].id) ||
         string(out, "view", "relations") || string(out, "direction", "incoming") ||
         string(out, "snapshotId", index->snapshot_id) || put(out, "}")) return -1;
     return put(out, "}");

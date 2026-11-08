@@ -9,19 +9,14 @@
 #endif
 #define LIMIT (64U * 1024U * 1024U)
 static int put(ToolByteBuffer *b, const char *s) { return tool_byte_buffer_append_cstr(b, s); }
-static int number(ToolByteBuffer *b, unsigned long long n) {
-    char text[32];
-    rt_unsigned_to_string(n, text, sizeof(text));
-    return put(b, text);
-}
 static int field(ToolByteBuffer *b, const char *k, const char *v) {
-    return put(b, ",") || json_quote(b, k) || put(b, ":") || json_quote(b, v);
+    return put(b, ",") || tool_json_append_string(b, k) || put(b, ":") || tool_json_append_string(b, v);
 }
 static int integer(ToolByteBuffer *b, const char *k, unsigned long long n) {
-    return put(b, ",") || json_quote(b, k) || put(b, ":") || number(b, n);
+    return put(b, ",") || tool_json_append_string(b, k) || put(b, ":") || tool_byte_buffer_append_uint(b, n);
 }
-static int raw(ToolByteBuffer *b, const Json *j, size_t n) {
-    const JsonToken *t = json_token(j, n);
+static int raw(ToolByteBuffer *b, const ToolJson *j, size_t n) {
+    const ToolJsonToken *t = tool_json_token(j, n);
     return !t ? -1 : tool_byte_buffer_append(b, j->text + t->start, t->end - t->start);
 }
 int prepare_error(const char *message, const char *path) {
@@ -42,27 +37,27 @@ static int digest_valid(const char *s) {
             return 0;
     return 1;
 }
-static int string(const Json *j, size_t object, const char *name, char *out, size_t cap) {
-    return json_string(j, json_get(j, object, name), out, cap);
+static int string(const ToolJson *j, size_t object, const char *name, char *out, size_t cap) {
+    return tool_json_string(j, tool_json_get(j, object, name), out, cap);
 }
-static int array(const Json *j, size_t n) {
-    const JsonToken *t = json_token(j, n);
-    return t && t->kind == JSON_ARRAY;
+static int array(const ToolJson *j, size_t n) {
+    const ToolJsonToken *t = tool_json_token(j, n);
+    return t && t->kind == TOOL_JSON_ARRAY;
 }
-static int keys(const Json *j, size_t object, const char *const *names, size_t count) {
-    const JsonToken *t = json_token(j, object);
+static int keys(const ToolJson *j, size_t object, const char *const *names, size_t count) {
+    const ToolJsonToken *t = tool_json_token(j, object);
     size_t i, k;
-    if (!t || t->kind != JSON_OBJECT)
+    if (!t || t->kind != TOOL_JSON_OBJECT)
         return -1;
-    for (i = object + 1; i < t->next; i = json_token(j, i + 1)->next) {
+    for (i = object + 1; i < t->next; i = tool_json_token(j, i + 1)->next) {
         for (k = 0; k < count; k++)
-            if (json_equals(j, i, names[k]))
+            if (tool_json_equals(j, i, names[k]))
                 break;
         if (k == count)
             return -1;
-        for (k = object + 1; k < i; k = json_token(j, k + 1)->next) {
+        for (k = object + 1; k < i; k = tool_json_token(j, k + 1)->next) {
             char a[128], b[128];
-            if (json_string(j, i, a, sizeof(a)) || json_string(j, k, b, sizeof(b)) ||
+            if (tool_json_string(j, i, a, sizeof(a)) || tool_json_string(j, k, b, sizeof(b)) ||
                 !rt_strcmp(a, b))
                 return -1;
         }
@@ -101,33 +96,33 @@ int prepare_config_open(PrepareConfig *c, const char *path, int layout) {
     if (platform_get_path_info(path, &info) || info.size > 65536 ||
         tool_read_all_input(path, &c->bytes, &length) || length > 65536)
         return prepare_error("cannot read templates: ", path);
-    if (json_parse(&c->json, (const char *)c->bytes, length))
+    if (tool_json_parse(&c->json, (const char *)c->bytes, length))
         return prepare_error("invalid template JSON: ", path);
-    list = json_get(&c->json, 0, "templates");
+    list = tool_json_get(&c->json, 0, "templates");
     if (keys(&c->json, 0, root_keys, 2) ||
-        json_uint(&c->json, json_get(&c->json, 0, "format"), &version) || version != 1 ||
+        tool_json_uint(&c->json, tool_json_get(&c->json, 0, "format"), &version) || version != 1 ||
         !array(&c->json, list))
         return prepare_error("invalid template schema: ", path);
-    for (i = list + 1; i < json_token(&c->json, list)->next; i = json_token(&c->json, i)->next) {
+    for (i = list + 1; i < tool_json_token(&c->json, list)->next; i = tool_json_token(&c->json, i)->next) {
         char id[128];
-        size_t anchors = json_get(&c->json, i, "anchors"), fields = json_get(&c->json, i, "fields");
-        size_t stop = json_get(&c->json, i, "stopAt"), count = 0;
-        size_t exclude = json_get(&c->json, i, "excludeAnchors");
+        size_t anchors = tool_json_get(&c->json, i, "anchors"), fields = tool_json_get(&c->json, i, "fields");
+        size_t stop = tool_json_get(&c->json, i, "stopAt"), count = 0;
+        size_t exclude = tool_json_get(&c->json, i, "excludeAnchors");
         if (keys(&c->json, i, template_keys, 5) || string(&c->json, i, "id", id, sizeof(id)) ||
             !id[0] || !array(&c->json, anchors) || !array(&c->json, fields) ||
-            (stop != JSON_NONE && !array(&c->json, stop)) ||
-            (exclude != JSON_NONE && !array(&c->json, exclude)))
+            (stop != TOOL_JSON_NONE && !array(&c->json, stop)) ||
+            (exclude != TOOL_JSON_NONE && !array(&c->json, exclude)))
             goto invalid;
-        for (j = list + 1; j < i; j = json_token(&c->json, j)->next)
-            if (json_equals(&c->json, json_get(&c->json, j, "id"), id))
+        for (j = list + 1; j < i; j = tool_json_token(&c->json, j)->next)
+            if (tool_json_equals(&c->json, tool_json_get(&c->json, j, "id"), id))
                 goto invalid;
         for (k = 0; k < 3; k++) {
             size_t a = k == 0 ? anchors : k == 1 ? stop : exclude;
-            if (a == JSON_NONE)
+            if (a == TOOL_JSON_NONE)
                 continue;
-            for (j = a + 1; j < json_token(&c->json, a)->next; j = json_token(&c->json, j)->next) {
+            for (j = a + 1; j < tool_json_token(&c->json, a)->next; j = tool_json_token(&c->json, j)->next) {
                 char text[256];
-                if (json_string(&c->json, j, text, sizeof(text)) || !text[0])
+                if (tool_json_string(&c->json, j, text, sizeof(text)) || !text[0])
                     goto invalid;
                 if (!k)
                     count++;
@@ -136,11 +131,11 @@ int prepare_config_open(PrepareConfig *c, const char *path, int layout) {
         if (!count || count > 16)
             goto invalid;
         count = 0;
-        for (j = fields + 1; j < json_token(&c->json, fields)->next;
-             j = json_token(&c->json, j)->next) {
+        for (j = fields + 1; j < tool_json_token(&c->json, fields)->next;
+             j = tool_json_token(&c->json, j)->next) {
             char name[64], label[256], type[32], value[256], placement[32];
             unsigned long long lines;
-            size_t field_stop = json_get(&c->json, j, "stopAt");
+            size_t field_stop = tool_json_get(&c->json, j, "stopAt");
             if (++count > 16 || keys(&c->json, j, field_keys, 7) ||
                 string(&c->json, j, "name", name, sizeof(name)) ||
                 string(&c->json, j, "label", label, sizeof(label)) || !label[0] ||
@@ -148,29 +143,29 @@ int prepare_config_open(PrepareConfig *c, const char *path, int layout) {
                 goto invalid;
             if (!field_type(name) || rt_strcmp(type, field_type(name)))
                 goto invalid;
-            if (json_get(&c->json, j, "maxLines") != JSON_NONE &&
+            if (tool_json_get(&c->json, j, "maxLines") != TOOL_JSON_NONE &&
                 (rt_strcmp(type, "text") ||
-                 json_uint(&c->json, json_get(&c->json, j, "maxLines"), &lines) || !lines ||
+                 tool_json_uint(&c->json, tool_json_get(&c->json, j, "maxLines"), &lines) || !lines ||
                  lines > 4))
                 goto invalid;
-            if (field_stop != JSON_NONE) {
+            if (field_stop != TOOL_JSON_NONE) {
                 if (!array(&c->json, field_stop))
                     goto invalid;
-                for (k = field_stop + 1; k < json_token(&c->json, field_stop)->next;
-                     k = json_token(&c->json, k)->next)
-                    if (json_string(&c->json, k, value, sizeof(value)) || !value[0])
+                for (k = field_stop + 1; k < tool_json_token(&c->json, field_stop)->next;
+                     k = tool_json_token(&c->json, k)->next)
+                    if (tool_json_string(&c->json, k, value, sizeof(value)) || !value[0])
                         goto invalid;
             }
             if (!rt_strcmp(type, "literal") &&
                 (string(&c->json, j, "value", value, sizeof(value)) || !value[0]))
                 goto invalid;
-            if (json_get(&c->json, j, "placement") != JSON_NONE &&
+            if (tool_json_get(&c->json, j, "placement") != TOOL_JSON_NONE &&
                 (string(&c->json, j, "placement", placement, sizeof(placement)) ||
                  (rt_strcmp(placement, "right") && rt_strcmp(placement, "below") &&
                   rt_strcmp(placement, "right-or-below"))))
                 goto invalid;
-            for (k = fields + 1; k < j; k = json_token(&c->json, k)->next)
-                if (json_equals(&c->json, json_get(&c->json, k, "name"), name))
+            for (k = fields + 1; k < j; k = tool_json_token(&c->json, k)->next)
+                if (tool_json_equals(&c->json, tool_json_get(&c->json, k, "name"), name))
                     goto invalid;
         }
         if (!count)
@@ -188,7 +183,7 @@ invalid:
     return prepare_error("invalid or duplicate template definition: ", path);
 }
 void prepare_config_close(PrepareConfig *c) {
-    json_free(&c->json);
+    tool_json_free(&c->json);
     rt_free(c->bytes);
 }
 static int atomic_write(const char *path, const unsigned char *bytes, size_t length) {
@@ -227,7 +222,7 @@ int prepare_manifest_read(const char *root, char key[65]) {
     char path[4096], engine[128];
     unsigned char *bytes = 0;
     size_t length;
-    Json j;
+    ToolJson j;
     unsigned long long format;
     int status;
     PlatformDirEntry info;
@@ -235,15 +230,15 @@ int prepare_manifest_read(const char *root, char key[65]) {
         platform_get_path_info(path, &info) || info.size > 65536 ||
         tool_read_all_input(path, &bytes, &length))
         return prepare_error("missing preparation manifest; run oparl-prepare: ", root);
-    if (json_parse(&j, (const char *)bytes, length)) {
+    if (tool_json_parse(&j, (const char *)bytes, length)) {
         rt_free(bytes);
         return prepare_error("invalid preparation manifest: ", root);
     }
-    status = json_uint(&j, json_get(&j, 0, "format"), &format) || format != 1 ||
+    status = tool_json_uint(&j, tool_json_get(&j, 0, "format"), &format) || format != 1 ||
              string(&j, 0, "key", key, 65) || !digest_valid(key) ||
              string(&j, 0, "engine", engine, sizeof(engine)) ||
              rt_strcmp(engine, PREPARE_ENGINE_ID);
-    json_free(&j);
+    tool_json_free(&j);
     rt_free(bytes);
     return status ? prepare_error("stale preparation engine; run oparl-prepare: ", root) : 0;
 }
@@ -262,17 +257,17 @@ int prepared_open(PreparedDocument *d, const char *root, const char *key, const 
     size_t length, pages, i;
     unsigned long long n, format, page = 0, warning_pages = 0;
     unsigned long long structure_counts[5] = {0, 0, 0, 0, 0};
-    const JsonToken *data;
+    const ToolJsonToken *data;
     rt_memset(d, 0, sizeof(*d));
     if (artifact_path(root, key, hash, path) || platform_get_path_info(path, &info) ||
         info.size > LIMIT || tool_read_all_input(path, &d->bytes, &length))
         return prepare_error("missing/oversized prepared document: ", hash);
-    if (json_parse(&d->json, (const char *)d->bytes, length))
+    if (tool_json_parse(&d->json, (const char *)d->bytes, length))
         goto invalid;
-    d->data = json_get(&d->json, 0, "data");
-    data = json_token(&d->json, d->data);
-    if (!data || data->kind != JSON_OBJECT ||
-        json_uint(&d->json, json_get(&d->json, 0, "format"), &format) || format != 1 ||
+    d->data = tool_json_get(&d->json, 0, "data");
+    data = tool_json_token(&d->json, d->data);
+    if (!data || data->kind != TOOL_JSON_OBJECT ||
+        tool_json_uint(&d->json, tool_json_get(&d->json, 0, "format"), &format) || format != 1 ||
         string(&d->json, 0, "sha256", expected, sizeof(expected)))
         goto invalid;
     prepare_hash(d->bytes + data->start, data->end - data->start, actual);
@@ -281,16 +276,16 @@ int prepared_open(PreparedDocument *d, const char *root, const char *key, const 
         rt_strcmp(source, hash) || string(&d->json, d->data, "key", pipeline, sizeof(pipeline)) ||
         rt_strcmp(pipeline, key) || string(&d->json, d->data, "engine", engine, sizeof(engine)) ||
         rt_strcmp(engine, PREPARE_ENGINE_ID) ||
-        json_uint(&d->json, json_get(&d->json, d->data, "sourceBytes"), &n) || n != size)
+        tool_json_uint(&d->json, tool_json_get(&d->json, d->data, "sourceBytes"), &n) || n != size)
         goto invalid;
-    pages = json_get(&d->json, d->data, "pages");
-    if (!array(&d->json, pages) || !array(&d->json, json_get(&d->json, d->data, "fields")))
+    pages = tool_json_get(&d->json, d->data, "pages");
+    if (!array(&d->json, pages) || !array(&d->json, tool_json_get(&d->json, d->data, "fields")))
         goto invalid;
-    for (i = pages + 1; i < json_token(&d->json, pages)->next; i = json_token(&d->json, i)->next) {
-        const JsonToken *text = json_token(&d->json, json_get(&d->json, i, "text"));
-        if (json_uint(&d->json, json_get(&d->json, i, "page"), &n) || n != ++page || !text ||
-            text->kind != JSON_STRING ||
-            json_uint(&d->json, json_get(&d->json, i, "warnings"), &n) || n > 7)
+    for (i = pages + 1; i < tool_json_token(&d->json, pages)->next; i = tool_json_token(&d->json, i)->next) {
+        const ToolJsonToken *text = tool_json_token(&d->json, tool_json_get(&d->json, i, "text"));
+        if (tool_json_uint(&d->json, tool_json_get(&d->json, i, "page"), &n) || n != ++page || !text ||
+            text->kind != TOOL_JSON_STRING ||
+            tool_json_uint(&d->json, tool_json_get(&d->json, i, "warnings"), &n) || n > 7)
             goto invalid;
         if (n)
             warning_pages++;
@@ -300,41 +295,41 @@ int prepared_open(PreparedDocument *d, const char *root, const char *key, const 
     {
         static const char *const names[] = {"tables", "agendaItems", "uncertainRows",
                                             "structuredPages", "skippedPages"};
-        size_t structure = json_get(&d->json, d->data, "structure");
+        size_t structure = tool_json_get(&d->json, d->data, "structure");
         for (i = 0; i < 5; i++)
-            if (json_uint(&d->json, json_get(&d->json, structure, names[i]), &n) ||
+            if (tool_json_uint(&d->json, tool_json_get(&d->json, structure, names[i]), &n) ||
                 n != structure_counts[i])
                 goto invalid;
     }
-    if (json_uint(&d->json, json_get(&d->json, d->data, "pageCount"), &n) || n != page ||
-        json_uint(&d->json, json_get(&d->json, d->data, "warningPages"), &n) || n != warning_pages)
+    if (tool_json_uint(&d->json, tool_json_get(&d->json, d->data, "pageCount"), &n) || n != page ||
+        tool_json_uint(&d->json, tool_json_get(&d->json, d->data, "warningPages"), &n) || n != warning_pages)
         goto invalid;
     {
         static const char *const names[] = {"matchedHeaders", "unmatchedHeaders",
                                             "ambiguousHeaders"};
         unsigned long long total = 0;
-        const JsonToken *error = json_token(&d->json, json_get(&d->json, d->data, "error"));
+        const ToolJsonToken *error = tool_json_token(&d->json, tool_json_get(&d->json, d->data, "error"));
         for (i = 0; i < 3; i++) {
-            if (json_uint(&d->json, json_get(&d->json, d->data, names[i]), &n) || n > 1)
+            if (tool_json_uint(&d->json, tool_json_get(&d->json, d->data, names[i]), &n) || n > 1)
                 goto invalid;
             total += n;
         }
         if (total != (page ? 1U : 0U) || !error ||
-            (json_equals(&d->json, json_get(&d->json, d->data, "status"), "failed")
-                 ? error->kind != JSON_STRING
-                 : error->kind != JSON_NULL))
+            (tool_json_equals(&d->json, tool_json_get(&d->json, d->data, "status"), "failed")
+                 ? error->kind != TOOL_JSON_STRING
+                 : error->kind != TOOL_JSON_NULL))
             goto invalid;
     }
-    if (!json_equals(&d->json, json_get(&d->json, d->data, "status"), "complete") &&
-        !json_equals(&d->json, json_get(&d->json, d->data, "status"), "warnings") &&
-        !json_equals(&d->json, json_get(&d->json, d->data, "status"), "failed"))
+    if (!tool_json_equals(&d->json, tool_json_get(&d->json, d->data, "status"), "complete") &&
+        !tool_json_equals(&d->json, tool_json_get(&d->json, d->data, "status"), "warnings") &&
+        !tool_json_equals(&d->json, tool_json_get(&d->json, d->data, "status"), "failed"))
         goto invalid;
     return 0;
 invalid:
     return prepare_error("invalid/corrupt prepared document; regenerate with --force: ", hash);
 }
 void prepared_close(PreparedDocument *d) {
-    json_free(&d->json);
+    tool_json_free(&d->json);
     rt_free(d->bytes);
 }
 static size_t find(const char *text, size_t length, const char *needle, size_t from) {
@@ -411,16 +406,16 @@ typedef struct {
     PdfStructureState structure_state;
     int resource;
 } Build;
-static int header_limit(const Json *json, size_t definition, const PdfTextLayout *layout,
+static int header_limit(const ToolJson *json, size_t definition, const PdfTextLayout *layout,
                         size_t *limit) {
-    size_t stop = json_get(json, definition, "stopAt"), i;
+    size_t stop = tool_json_get(json, definition, "stopAt"), i;
     *limit = layout->length < 2048 ? layout->length : 2048;
-    if (stop == JSON_NONE)
+    if (stop == TOOL_JSON_NONE)
         return 0;
-    for (i = stop + 1; i < json_token(json, stop)->next; i = json_token(json, i)->next) {
+    for (i = stop + 1; i < tool_json_token(json, stop)->next; i = tool_json_token(json, i)->next) {
         char label[256];
         size_t at;
-        if (json_string(json, i, label, sizeof(label)))
+        if (tool_json_string(json, i, label, sizeof(label)))
             return -1;
         at = find(layout->text, *limit, label, 0);
         if (at < *limit)
@@ -430,37 +425,37 @@ static int header_limit(const Json *json, size_t definition, const PdfTextLayout
 }
 static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page,
                     unsigned int warnings) {
-    const Json *j = &b->config->json;
-    size_t list = json_get(j, 0, "templates"), i, best = JSON_NONE, score = 0, ties = 0;
+    const ToolJson *j = &b->config->json;
+    size_t list = tool_json_get(j, 0, "templates"), i, best = TOOL_JSON_NONE, score = 0, ties = 0;
     size_t cap = layout->length < 2048 ? layout->length : 2048;
     char label[256], value[257], source[257], type[32], name[64], id[128];
     if (warnings) {
         b->unmatched++;
         return 0;
     }
-    for (i = list + 1; i < json_token(j, list)->next; i = json_token(j, i)->next) {
-        size_t a = json_get(j, i, "anchors"), k, count = 0;
-        size_t exclude = json_get(j, i, "excludeAnchors");
+    for (i = list + 1; i < tool_json_token(j, list)->next; i = tool_json_token(j, i)->next) {
+        size_t a = tool_json_get(j, i, "anchors"), k, count = 0;
+        size_t exclude = tool_json_get(j, i, "excludeAnchors");
         int excluded = 0;
         if (header_limit(j, i, layout, &cap))
             return -1;
-        if (exclude != JSON_NONE)
-            for (k = exclude + 1; k < json_token(j, exclude)->next; k = json_token(j, k)->next) {
-                if (json_string(j, k, label, sizeof(label)))
+        if (exclude != TOOL_JSON_NONE)
+            for (k = exclude + 1; k < tool_json_token(j, exclude)->next; k = tool_json_token(j, k)->next) {
+                if (tool_json_string(j, k, label, sizeof(label)))
                     return -1;
                 if (find(layout->text, cap, label, 0) != (size_t)-1)
                     excluded = 1;
             }
         if (excluded)
             continue;
-        for (k = a + 1; k < json_token(j, a)->next; k = json_token(j, k)->next) {
-            if (json_string(j, k, label, sizeof(label)))
+        for (k = a + 1; k < tool_json_token(j, a)->next; k = tool_json_token(j, k)->next) {
+            if (tool_json_string(j, k, label, sizeof(label)))
                 return -1;
             if (find(layout->text, cap, label, 0) == (size_t)-1)
                 break;
             count++;
         }
-        if (k != json_token(j, a)->next)
+        if (k != tool_json_token(j, a)->next)
             continue;
         if (count > score) {
             best = i;
@@ -469,7 +464,7 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page,
         } else if (count == score)
             ties++;
     }
-    if (best == JSON_NONE) {
+    if (best == TOOL_JSON_NONE) {
         b->unmatched++;
         return 0;
     }
@@ -482,8 +477,8 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page,
         return -1;
     if (header_limit(j, best, layout, &cap))
         return -1;
-    list = json_get(j, best, "fields");
-    for (i = list + 1; i < json_token(j, list)->next; i = json_token(j, i)->next) {
+    list = tool_json_get(j, best, "fields");
+    for (i = list + 1; i < tool_json_token(j, list)->next; i = tool_json_token(j, i)->next) {
         size_t start, end, at, k, n, boundary;
         const char *state = "rule-supported";
         char placement[32] = "right";
@@ -491,11 +486,11 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page,
         if (string(j, i, "name", name, sizeof(name)) ||
             string(j, i, "label", label, sizeof(label)) || string(j, i, "type", type, sizeof(type)))
             return -1;
-        if (json_get(j, i, "placement") != JSON_NONE &&
+        if (tool_json_get(j, i, "placement") != TOOL_JSON_NONE &&
             string(j, i, "placement", placement, sizeof(placement)))
             return -1;
-        if (json_get(j, i, "maxLines") != JSON_NONE &&
-            json_uint(j, json_get(j, i, "maxLines"), &max_lines))
+        if (tool_json_get(j, i, "maxLines") != TOOL_JSON_NONE &&
+            tool_json_uint(j, tool_json_get(j, i, "maxLines"), &max_lines))
             return -1;
         at = find(layout->text, cap, label, 0);
         start = end = 0;
@@ -507,7 +502,7 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page,
         else {
             start = at + rt_strlen(label);
             boundary = cap;
-            for (k = list + 1; k < json_token(j, list)->next; k = json_token(j, k)->next) {
+            for (k = list + 1; k < tool_json_token(j, list)->next; k = tool_json_token(j, k)->next) {
                 char next[256];
                 size_t p;
                 if (k == i)
@@ -518,14 +513,14 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page,
                 if (p < boundary)
                     boundary = p;
             }
-            k = json_get(j, i, "stopAt");
-            if (k != JSON_NONE) {
+            k = tool_json_get(j, i, "stopAt");
+            if (k != TOOL_JSON_NONE) {
                 size_t stop;
-                for (stop = k + 1; stop < json_token(j, k)->next;
-                     stop = json_token(j, stop)->next) {
+                for (stop = k + 1; stop < tool_json_token(j, k)->next;
+                     stop = tool_json_token(j, stop)->next) {
                     char next[256];
                     size_t p;
-                    if (json_string(j, stop, next, sizeof(next)))
+                    if (tool_json_string(j, stop, next, sizeof(next)))
                         return -1;
                     p = find(layout->text, cap, next, start);
                     if (p < boundary)
@@ -589,7 +584,7 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page,
         }
         n = b->fields.size;
         if ((n && put(&b->fields, ",")) || put(&b->fields, "{\"field\":") ||
-            json_quote(&b->fields, name) || field(&b->fields, "status", state) ||
+            tool_json_append_string(&b->fields, name) || field(&b->fields, "status", state) ||
             field(&b->fields, "templateId", id) ||
             field(&b->fields, "rule", "header-anchor-position-v2") ||
             integer(&b->fields, "page", page) || field(&b->fields, "placement", placement) ||
@@ -597,10 +592,10 @@ static int annotate(Build *b, const PdfTextLayout *layout, unsigned int page,
             integer(&b->fields, "layoutTextStart", start) ||
             integer(&b->fields, "layoutTextLength", end - start) ||
             put(&b->fields, ",\"sourceText\":") ||
-            (end - start < sizeof(source) ? json_quote(&b->fields, source)
+            (end - start < sizeof(source) ? tool_json_append_string(&b->fields, source)
                                           : put(&b->fields, "null")) ||
             put(&b->fields, ",\"value\":") ||
-            (!rt_strcmp(state, "rule-supported") ? json_quote(&b->fields, value)
+            (!rt_strcmp(state, "rule-supported") ? tool_json_append_string(&b->fields, value)
                                                  : put(&b->fields, "null")) ||
             put(&b->fields, "}"))
             return -1;
@@ -632,16 +627,16 @@ static int page_callback(unsigned int page, const char *text, size_t length, uns
         goto error;
     if (pdf_structure_page(&structure, layout, warnings, &b->structure_state, &result))
         goto error;
-    if (put(&out, "{\"page\":") || number(&out, page) || integer(&out, "warnings", warnings) ||
-        put(&out, ",\"text\":") || json_quote(&out, text))
+    if (put(&out, "{\"page\":") || tool_byte_buffer_append_uint(&out, page) || integer(&out, "warnings", warnings) ||
+        put(&out, ",\"text\":") || tool_json_append_string(&out, text))
         goto error;
     if (page == 1 || b->config->layout || result.keep_layout) {
         if (put(&out, ",\"layout\":{\"space\":\"pdf-user-space-milliunits\",\"text\":") ||
-            json_quote(&out, layout->text) || put(&out, ",\"spans\":["))
+            tool_json_append_string(&out, layout->text) || put(&out, ",\"spans\":["))
             goto error;
         for (i = 0; i < layout->span_count; i++) {
             const PdfTextSpan *s = &layout->spans[i];
-            if ((i && put(&out, ",")) || put(&out, "{\"start\":") || number(&out, s->start) ||
+            if ((i && put(&out, ",")) || put(&out, "{\"start\":") || tool_byte_buffer_append_uint(&out, s->start) ||
                 integer(&out, "length", s->length) || put(&out, ",\"x\":") ||
                 signed_number(&out, s->x) || put(&out, ",\"y\":") || signed_number(&out, s->y) ||
                 put(&out, ",\"endX\":") || signed_number(&out, s->end_x) ||
@@ -693,7 +688,7 @@ int prepare_document(const PrepareConfig *c, const char *root, const unsigned ch
         if (!result) {
             *reused = 1;
             *incomplete =
-                !json_equals(&doc.json, json_get(&doc.json, doc.data, "status"), "complete");
+                !tool_json_equals(&doc.json, tool_json_get(&doc.json, doc.data, "status"), "complete");
         }
         prepared_close(&doc);
         return result;
@@ -711,11 +706,11 @@ int prepare_document(const PrepareConfig *c, const char *root, const unsigned ch
     }
     status = extracted ? "failed" : build.warnings ? "warnings" : "complete";
     *incomplete = extracted || build.warnings;
-    if (put(&payload, "{\"sourceSha256\":") || json_quote(&payload, hash) ||
+    if (put(&payload, "{\"sourceSha256\":") || tool_json_append_string(&payload, hash) ||
         integer(&payload, "sourceBytes", length) || field(&payload, "engine", PREPARE_ENGINE_ID) ||
         field(&payload, "key", c->key) || field(&payload, "status", status) ||
         put(&payload, ",\"error\":") ||
-        (extracted ? json_quote(&payload, error ? error : "PDF extraction failed")
+        (extracted ? tool_json_append_string(&payload, error ? error : "PDF extraction failed")
                    : put(&payload, "null")) ||
         integer(&payload, "pageCount", build.count) ||
         integer(&payload, "warningPages", build.warnings) ||
@@ -723,7 +718,7 @@ int prepare_document(const PrepareConfig *c, const char *root, const unsigned ch
         integer(&payload, "unmatchedHeaders", build.unmatched) ||
         integer(&payload, "ambiguousHeaders", build.ambiguous) || put(&payload, ",\"fields\":[") ||
         tool_byte_buffer_append(&payload, build.fields.data, build.fields.size) ||
-        put(&payload, "],\"structure\":{\"tables\":") || number(&payload, build.tables) ||
+        put(&payload, "],\"structure\":{\"tables\":") || tool_byte_buffer_append_uint(&payload, build.tables) ||
         integer(&payload, "agendaItems", build.agenda_items) ||
         integer(&payload, "uncertainRows", build.uncertain_rows) ||
         integer(&payload, "structuredPages", build.structured_pages) ||
@@ -732,7 +727,7 @@ int prepare_document(const PrepareConfig *c, const char *root, const unsigned ch
         put(&payload, "]}"))
         goto done;
     prepare_hash(payload.data, payload.size, checksum);
-    if (put(&envelope, "{\"format\":1,\"sha256\":") || json_quote(&envelope, checksum) ||
+    if (put(&envelope, "{\"format\":1,\"sha256\":") || tool_json_append_string(&envelope, checksum) ||
         put(&envelope, ",\"data\":") ||
         tool_byte_buffer_append(&envelope, payload.data, payload.size) || put(&envelope, "}\n") ||
         envelope.size > LIMIT || atomic_write(path, envelope.data, envelope.size))
@@ -754,8 +749,8 @@ int prepared_summary(ToolByteBuffer *out, const PreparedDocument *d) {
     if (put(out, "{\"format\":1"))
         return -1;
     for (i = 0; i < sizeof(names) / sizeof(names[0]); i++)
-        if (put(out, ",") || json_quote(out, names[i]) || put(out, ":") ||
-            raw(out, &d->json, json_get(&d->json, d->data, names[i])))
+        if (put(out, ",") || tool_json_append_string(out, names[i]) || put(out, ":") ||
+            raw(out, &d->json, tool_json_get(&d->json, d->data, names[i])))
             return -1;
     return put(out, "}");
 }

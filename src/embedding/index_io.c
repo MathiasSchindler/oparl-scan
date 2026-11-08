@@ -1,15 +1,6 @@
 #include "index_io.h"
 #include <stdint.h>
 
-void eg_hex_digest(const unsigned char digest[32], char text[65]) {
-    static const char hex[] = "0123456789abcdef";
-    for (unsigned int i = 0; i < 32; i++) {
-        text[i * 2] = hex[digest[i] >> 4];
-        text[i * 2 + 1] = hex[digest[i] & 15];
-    }
-    text[64] = 0;
-}
-
 int eg_parse_digest(const char *text, unsigned char digest[32]) {
     if (rt_strlen(text) != 64) return eg_error("expected a SHA-256 digest", 0);
     for (unsigned int i = 0; i < 32; i++) {

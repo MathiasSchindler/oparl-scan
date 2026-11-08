@@ -197,22 +197,22 @@ int search_hit_date_json(ToolByteBuffer *out, const SearchIndex *index, const Se
     const char *property = proof ? index->strings + proof->property : "importedAtEpochSeconds";
     if (!date) return tool_byte_buffer_append_cstr(out, "null");
     return tool_byte_buffer_append_cstr(out, "{\"value\":") ||
-        search_json_quote(out, search_hit_date_text(index, hit)) ||
-        tool_byte_buffer_append_cstr(out, ",\"role\":") || search_json_quote(out, roles[hit->date_role]) ||
+        tool_json_append_string(out, search_hit_date_text(index, hit)) ||
+        tool_byte_buffer_append_cstr(out, ",\"role\":") || tool_json_append_string(out, roles[hit->date_role]) ||
         tool_byte_buffer_append_cstr(out, ",\"precision\":") ||
-        search_json_quote(out, !date->precision ? "invalid" : date->precision == 1 ? "day" : "instant") ||
+        tool_json_append_string(out, !date->precision ? "invalid" : date->precision == 1 ? "day" : "instant") ||
         tool_byte_buffer_append_cstr(out, ",\"sourceObject\":") ||
         (hit->date_role == SEARCH_IMPORTED ?
-            tool_byte_buffer_append_cstr(out, "null,\"sourceIndex\":") || search_json_quote(out, index->snapshot_id) :
-            search_json_quote(out, index->strings + index->records[hit->date_source].id)) ||
-        tool_byte_buffer_append_cstr(out, ",\"property\":") || search_json_quote(out, property) ||
+            tool_byte_buffer_append_cstr(out, "null,\"sourceIndex\":") || tool_json_append_string(out, index->snapshot_id) :
+            tool_json_append_string(out, index->strings + index->records[hit->date_source].id)) ||
+        tool_byte_buffer_append_cstr(out, ",\"property\":") || tool_json_append_string(out, property) ||
         tool_byte_buffer_append_cstr(out, ",\"rule\":") ||
-        search_json_quote(out, proof ? index->strings + proof->rule : "local-archive-index-import-v1") ||
+        tool_json_append_string(out, proof ? index->strings + proof->rule : "local-archive-index-import-v1") ||
         tool_byte_buffer_append_cstr(out, ",\"certainty\":") ||
-        search_json_quote(out, !proof || proof->certainty == SEARCH_EXACT ? "exact" :
+        tool_json_append_string(out, !proof || proof->certainty == SEARCH_EXACT ? "exact" :
             proof->certainty == SEARCH_DERIVED ? "derived" : "source-assertion") ||
         tool_byte_buffer_append_cstr(out, ",\"via\":") ||
-        search_json_quote(out, hit->date_role == SEARCH_IMPORTED ? "index" :
+        tool_json_append_string(out, hit->date_role == SEARCH_IMPORTED ? "index" :
             hit->date_source == hit->paper && hit->paper != hit->record ? "direct-paper-owner" :
             hit->date_source == hit->record ? "self" :
             hit->date_source == index->records[hit->record].parent ? "page-parent" : "meeting-context") ||

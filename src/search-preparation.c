@@ -7,14 +7,14 @@
 static int put(ToolByteBuffer *out, const char *text) {
     return tool_byte_buffer_append_cstr(out, text);
 }
-static int raw(ToolByteBuffer *out, const Json *json, size_t value) {
-    const JsonToken *t = json_token(json, value);
+static int raw(ToolByteBuffer *out, const ToolJson *json, size_t value) {
+    const ToolJsonToken *t = tool_json_token(json, value);
     return t ? tool_byte_buffer_append(out, json->text + t->start, t->end - t->start)
              : put(out, "null");
 }
-static int property(ToolByteBuffer *out, const Json *json, size_t object, const char *name) {
-    return put(out, ",") || json_quote(out, name) || put(out, ":") ||
-           raw(out, json, json_get(json, object, name));
+static int property(ToolByteBuffer *out, const ToolJson *json, size_t object, const char *name) {
+    return put(out, ",") || tool_json_append_string(out, name) || put(out, ":") ||
+           raw(out, json, tool_json_get(json, object, name));
 }
 uint32_t search_document_record(const SearchIndex *index, const SearchRecord *record) {
     uint32_t source = (uint32_t)(record - index->records), found = NONE;
@@ -47,43 +47,43 @@ int search_preparation_validate(const SearchIndex *index, const SearchRecord *re
     const SearchRecord *parent = &index->records[record->parent];
     const char *packet = index->strings + record->preparation;
     const char *summary = index->strings + parent->preparation;
-    Json page, document;
+    ToolJson page, document;
     unsigned long long format, number, counts[5] = {0, 0, 0, 0, 0};
     char source[65], expected[65], *layout_text = 0;
     size_t layout, spans, i, length;
-    const JsonToken *t;
+    const ToolJsonToken *t;
     int status = -1;
     if (!record->preparation || !parent->preparation ||
         rt_strcmp(index->strings + record->kind, "Page") ||
-        json_parse(&page, packet, rt_strlen(packet)))
+        tool_json_parse(&page, packet, rt_strlen(packet)))
         return -1;
-    if (json_parse(&document, summary, rt_strlen(summary))) {
-        json_free(&page);
+    if (tool_json_parse(&document, summary, rt_strlen(summary))) {
+        tool_json_free(&page);
         return -1;
     }
-    if (json_uint(&page, json_get(&page, 0, "format"), &format) || format != 1 ||
-        json_uint(&page, json_get(&page, 0, "page"), &number) || number != record->page ||
-        json_string(&page, json_get(&page, 0, "sourceSha256"), source, sizeof(source)) ||
-        json_string(&document, json_get(&document, 0, "sourceSha256"), expected,
+    if (tool_json_uint(&page, tool_json_get(&page, 0, "format"), &format) || format != 1 ||
+        tool_json_uint(&page, tool_json_get(&page, 0, "page"), &number) || number != record->page ||
+        tool_json_string(&page, tool_json_get(&page, 0, "sourceSha256"), source, sizeof(source)) ||
+        tool_json_string(&document, tool_json_get(&document, 0, "sourceSha256"), expected,
                     sizeof(expected)) ||
         rt_strcmp(source, expected) || pdf_structure_validate_page(&page, 0, counts))
         goto done;
-    layout = json_get(&page, 0, "layout");
-    if (layout != JSON_NONE) {
-        size_t text = json_get(&page, layout, "text");
-        spans = json_get(&page, layout, "spans");
-        t = json_token(&page, text);
-        if (!t || t->kind != JSON_STRING || !json_token(&page, spans) ||
-            json_token(&page, spans)->kind != JSON_ARRAY)
+    layout = tool_json_get(&page, 0, "layout");
+    if (layout != TOOL_JSON_NONE) {
+        size_t text = tool_json_get(&page, layout, "text");
+        spans = tool_json_get(&page, layout, "spans");
+        t = tool_json_token(&page, text);
+        if (!t || t->kind != TOOL_JSON_STRING || !tool_json_token(&page, spans) ||
+            tool_json_token(&page, spans)->kind != TOOL_JSON_ARRAY)
             goto done;
         layout_text = (char *)rt_malloc(t->end - t->start + 1);
-        if (!layout_text || json_string(&page, text, layout_text, t->end - t->start + 1))
+        if (!layout_text || tool_json_string(&page, text, layout_text, t->end - t->start + 1))
             goto done;
         length = rt_strlen(layout_text);
-        for (i = spans + 1; i < json_token(&page, spans)->next; i = json_token(&page, i)->next) {
+        for (i = spans + 1; i < tool_json_token(&page, spans)->next; i = tool_json_token(&page, i)->next) {
             unsigned long long start, size;
-            if (json_uint(&page, json_get(&page, i, "start"), &start) ||
-                json_uint(&page, json_get(&page, i, "length"), &size) || start > length ||
+            if (tool_json_uint(&page, tool_json_get(&page, i, "start"), &start) ||
+                tool_json_uint(&page, tool_json_get(&page, i, "length"), &size) || start > length ||
                 size > length - start)
                 goto done;
         }
@@ -91,8 +91,8 @@ int search_preparation_validate(const SearchIndex *index, const SearchRecord *re
     status = 0;
 done:
     rt_free(layout_text);
-    json_free(&document);
-    json_free(&page);
+    tool_json_free(&document);
+    tool_json_free(&page);
     return status;
 }
 static int available(ToolByteBuffer *out, const SearchIndex *index, uint32_t file,
@@ -102,40 +102,40 @@ static int available(ToolByteBuffer *out, const SearchIndex *index, uint32_t fil
     char number[32];
     rt_unsigned_to_string(page ? page : 1, number, sizeof(number));
     return put(out, ",\"available\":{\"id\":") ||
-           json_quote(out, index->strings + (version == NONE ? record->identity
+           tool_json_append_string(out, index->strings + (version == NONE ? record->identity
                                                              : index->versions[version].id)) ||
            ((page || page_count) && (put(out, ",\"page\":") || put(out, number))) ||
-           put(out, ",\"snapshotId\":") || json_quote(out, index->snapshot_id) || put(out, "}");
+           put(out, ",\"snapshotId\":") || tool_json_append_string(out, index->snapshot_id) || put(out, "}");
 }
-static int contains_position(const Json *json, size_t cell, size_t byte) {
-    size_t list = json_get(json, cell, "sources"), i;
-    const JsonToken *t = json_token(json, list);
+static int contains_position(const ToolJson *json, size_t cell, size_t byte) {
+    size_t list = tool_json_get(json, cell, "sources"), i;
+    const ToolJsonToken *t = tool_json_token(json, list);
     if (!t)
         return 0;
-    for (i = list + 1; i < t->next; i = json_token(json, i)->next) {
+    for (i = list + 1; i < t->next; i = tool_json_token(json, i)->next) {
         unsigned long long start, length;
-        if (!json_uint(json, json_get(json, i, "start"), &start) &&
-            !json_uint(json, json_get(json, i, "length"), &length) && byte >= start &&
+        if (!tool_json_uint(json, tool_json_get(json, i, "start"), &start) &&
+            !tool_json_uint(json, tool_json_get(json, i, "length"), &length) && byte >= start &&
             byte - start < length)
             return 1;
     }
     return 0;
 }
-static int layout_position(const Json *json, const SearchIndex *index, const SearchRecord *record,
+static int layout_position(const ToolJson *json, const SearchIndex *index, const SearchRecord *record,
                            uint32_t byte, size_t *result) {
-    size_t text = json_get(json, json_get(json, 0, "layout"), "text"), p = 0, q = 0, raw_length;
-    const JsonToken *t = json_token(json, text);
+    size_t text = tool_json_get(json, tool_json_get(json, 0, "layout"), "text"), p = 0, q = 0, raw_length;
+    const ToolJsonToken *t = tool_json_token(json, text);
     const char *body = index->strings + record->text + record->body_start;
     size_t length = record->text_length - record->body_start;
     char *layout;
     int status = 0;
-    *result = JSON_NONE;
+    *result = TOOL_JSON_NONE;
     if (byte < record->body_start || byte >= record->text_length || !t)
         return 0;
     layout = (char *)rt_malloc(t->end - t->start + 1);
     if (!layout)
         return search_error("cannot allocate PDF layout match mapping", 0);
-    if (json_string(json, text, layout, t->end - t->start + 1)) {
+    if (tool_json_string(json, text, layout, t->end - t->start + 1)) {
         status = -1;
         goto done;
     }
@@ -158,26 +158,26 @@ done:
     rt_free(layout);
     return status;
 }
-static int context_json(ToolByteBuffer *out, const Json *page, size_t byte, int *matched) {
-    size_t structure = json_get(page, 0, "structure"),
-           list = json_get(page, structure, "agendaItems");
-    size_t i, candidate = JSON_NONE, protocols = 0;
-    const JsonToken *t = json_token(page, list);
+static int context_json(ToolByteBuffer *out, const ToolJson *page, size_t byte, int *matched) {
+    size_t structure = tool_json_get(page, 0, "structure"),
+           list = tool_json_get(page, structure, "agendaItems");
+    size_t i, candidate = TOOL_JSON_NONE, protocols = 0;
+    const ToolJsonToken *t = tool_json_token(page, list);
     if (!t)
         return 0;
-    for (i = list + 1; i < t->next; i = json_token(page, i)->next) {
+    for (i = list + 1; i < t->next; i = tool_json_token(page, i)->next) {
         static const char *const cells[] = {"heading", "body", "outcome"};
         size_t k, references;
         int found = 0;
-        if (!json_equals(page, json_get(page, i, "kind"), "protocol-top"))
+        if (!tool_json_equals(page, tool_json_get(page, i, "kind"), "protocol-top"))
             continue;
         candidate = i;
         protocols++;
         for (k = 0; k < sizeof(cells) / sizeof(cells[0]); k++)
-            found |= contains_position(page, json_get(page, i, cells[k]), byte);
-        references = json_get(page, i, "references");
-        for (k = references + 1; k < json_token(page, references)->next;
-             k = json_token(page, k)->next)
+            found |= contains_position(page, tool_json_get(page, i, cells[k]), byte);
+        references = tool_json_get(page, i, "references");
+        for (k = references + 1; k < tool_json_token(page, references)->next;
+             k = tool_json_token(page, k)->next)
             found |= contains_position(page, k, byte);
         if (found) {
             *matched = 1;
@@ -195,20 +195,20 @@ static int context_json(ToolByteBuffer *out, const Json *page, size_t byte, int 
                 return -1;
         return put(out, "}");
     }
-    list = json_get(page, structure, "tables");
-    for (i = list + 1; i < json_token(page, list)->next; i = json_token(page, i)->next) {
-        size_t rows = json_get(page, i, "rows"), row;
-        for (row = rows + 1; row < json_token(page, rows)->next;
-             row = json_token(page, row)->next) {
-            size_t cells = json_get(page, row, "cells"), cell;
+    list = tool_json_get(page, structure, "tables");
+    for (i = list + 1; i < tool_json_token(page, list)->next; i = tool_json_token(page, i)->next) {
+        size_t rows = tool_json_get(page, i, "rows"), row;
+        for (row = rows + 1; row < tool_json_token(page, rows)->next;
+             row = tool_json_token(page, row)->next) {
+            size_t cells = tool_json_get(page, row, "cells"), cell;
             int found = 0;
-            for (cell = cells + 1; cell < json_token(page, cells)->next;
-                 cell = json_token(page, cell)->next)
+            for (cell = cells + 1; cell < tool_json_token(page, cells)->next;
+                 cell = tool_json_token(page, cell)->next)
                 found |= contains_position(page, cell, byte);
             if (!found)
                 continue;
             *matched = 1;
-            return put(out, "{\"kind\":") || raw(out, page, json_get(page, i, "kind")) ||
+            return put(out, "{\"kind\":") || raw(out, page, tool_json_get(page, i, "kind")) ||
                    property(out, page, i, "columns") || property(out, page, row, "status") ||
                    property(out, page, row, "cells") || put(out, "}");
         }
@@ -222,34 +222,34 @@ int search_preparation_json(ToolByteBuffer *out, const SearchIndex *index,
                         : search_document_record(index, record);
     const SearchRecord *document;
     const char *summary, *packet;
-    Json json, page;
+    ToolJson json, page;
     int status = -1, has_page = 0;
     unsigned long long page_count;
     if (file == NONE || !index->records[file].preparation)
         return put(out, "null");
     document = &index->records[file];
     summary = index->strings + document->preparation;
-    if (json_parse(&json, summary, rt_strlen(summary)))
+    if (tool_json_parse(&json, summary, rt_strlen(summary)))
         return search_error("invalid PDF preparation", 0);
-    if (json_uint(&json, json_get(&json, 0, "pageCount"), &page_count)) {
-        json_free(&json);
+    if (tool_json_uint(&json, tool_json_get(&json, 0, "pageCount"), &page_count)) {
+        tool_json_free(&json);
         return search_error("invalid PDF preparation page count", 0);
     }
     packet = index->strings + record->preparation;
     if (record->parent != NONE && record->preparation != document->preparation) {
-        if (json_parse(&page, packet, rt_strlen(packet))) {
-            json_free(&json);
+        if (tool_json_parse(&page, packet, rt_strlen(packet))) {
+            tool_json_free(&json);
             return search_error("invalid PDF page preparation", 0);
         }
         has_page = 1;
     }
     if (detail) {
-        const JsonToken *root = json_token(&json, 0);
+        const ToolJsonToken *root = tool_json_token(&json, 0);
         if (tool_byte_buffer_append(out, summary + root->start, root->end - root->start - 1) ||
             available(out, index, file, record->page, page_count))
             goto done;
         if (has_page) {
-            size_t layout = json_get(&page, 0, "layout");
+            size_t layout = tool_json_get(&page, 0, "layout");
             if (put(out, ",\"pageData\":"))
                 goto done;
             if (detail == 2) {
@@ -259,9 +259,9 @@ int search_preparation_json(ToolByteBuffer *out, const SearchIndex *index,
                 if (put(out, "{\"format\":1") || property(out, &page, 0, "page") ||
                     property(out, &page, 0, "sourceSha256") || property(out, &page, 0, "structure"))
                     goto done;
-                if (layout != JSON_NONE &&
+                if (layout != TOOL_JSON_NONE &&
                     (put(out, ",\"layoutSpansAvailable\":true,\"layout\":{\"space\":") ||
-                     raw(out, &page, json_get(&page, layout, "space")) ||
+                     raw(out, &page, tool_json_get(&page, layout, "space")) ||
                      property(out, &page, layout, "text") || put(out, "}")))
                     goto done;
                 if (put(out, "}"))
@@ -270,21 +270,21 @@ int search_preparation_json(ToolByteBuffer *out, const SearchIndex *index,
         }
         status = put(out, "}");
     } else {
-        size_t fields = json_get(&json, 0, "fields"), i, emitted = 0, issues = 0;
+        size_t fields = tool_json_get(&json, 0, "fields"), i, emitted = 0, issues = 0;
         ToolByteBuffer context;
         int matched = 0;
         if (put(out, "{\"format\":1,\"fileId\":") ||
-            json_quote(out, index->strings + document->id) ||
+            tool_json_append_string(out, index->strings + document->id) ||
             property(out, &json, 0, "sourceSha256") || property(out, &json, 0, "status") ||
             property(out, &json, 0, "structure") || put(out, ",\"fields\":["))
             goto done;
-        for (i = fields + 1; i < json_token(&json, fields)->next; i = json_token(&json, i)->next) {
-            if (!json_equals(&json, json_get(&json, i, "status"), "rule-supported")) {
+        for (i = fields + 1; i < tool_json_token(&json, fields)->next; i = tool_json_token(&json, i)->next) {
+            if (!tool_json_equals(&json, tool_json_get(&json, i, "status"), "rule-supported")) {
                 issues++;
                 continue;
             }
             if ((emitted++ && put(out, ",")) || put(out, "{\"field\":") ||
-                raw(out, &json, json_get(&json, i, "field")) || property(out, &json, i, "value") ||
+                raw(out, &json, tool_json_get(&json, i, "field")) || property(out, &json, i, "value") ||
                 property(out, &json, i, "status") || property(out, &json, i, "page") ||
                 put(out, "}"))
                 goto done;
@@ -298,18 +298,18 @@ int search_preparation_json(ToolByteBuffer *out, const SearchIndex *index,
         }
         tool_byte_buffer_init(&context);
         {
-            size_t position = JSON_NONE;
+            size_t position = TOOL_JSON_NONE;
             status = has_page ? layout_position(&page, index, record, byte, &position) : 0;
             if (!status && has_page)
                 status = context_json(&context, &page, position, &matched);
         }
         if (!status && has_page)
             status = put(out, ",\"pageStatus\":") ||
-                     raw(out, &page, json_get(&page, json_get(&page, 0, "structure"), "status"));
+                     raw(out, &page, tool_json_get(&page, tool_json_get(&page, 0, "structure"), "status"));
         if (!status)
             status =
                 put(out, ",\"selection\":") ||
-                json_quote(out, context.size ? matched ? "matching-text" : "page" : "document") ||
+                tool_json_append_string(out, context.size ? matched ? "matching-text" : "page" : "document") ||
                 put(out, ",\"context\":") ||
                 (context.size && context.size <= 1600
                      ? tool_byte_buffer_append(out, context.data, context.size)
@@ -320,7 +320,7 @@ int search_preparation_json(ToolByteBuffer *out, const SearchIndex *index,
     }
 done:
     if (has_page)
-        json_free(&page);
-    json_free(&json);
+        tool_json_free(&page);
+    tool_json_free(&json);
     return status;
 }

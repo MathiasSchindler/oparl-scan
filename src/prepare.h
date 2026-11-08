@@ -1,16 +1,16 @@
 #ifndef OPARL_PREPARE_H
 #define OPARL_PREPARE_H
-#include "json.h"
+#include "tool_json_parser.h"
 #include "pdf-text.h"
 
 typedef struct {
-    Json json;
+    ToolJson json;
     unsigned char *bytes;
     char key[65], template_hash[65];
     int layout;
 } PrepareConfig;
 typedef struct {
-    Json json;
+    ToolJson json;
     unsigned char *bytes;
     size_t data;
 } PreparedDocument;

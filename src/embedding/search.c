@@ -1,11 +1,11 @@
 #include "search.h"
-#include "json.h"
+#include "tool_json_parser.h"
 
-static int boolean_field(const EgJson *json, size_t object, const char *key, int *out) {
-    size_t field = eg_json_get(json, object, key);
-    const EgJsonToken *token = eg_json_token(json, field);
-    if (!token || token->kind != EG_JSON_BOOL) return -1;
-    *out = eg_json_true(json, field);
+static int boolean_field(const ToolJson *json, size_t object, const char *key, int *out) {
+    size_t field = tool_json_get(json, object, key);
+    const ToolJsonToken *token = tool_json_token(json, field);
+    if (!token || token->kind != TOOL_JSON_BOOL) return -1;
+    *out = tool_json_true(json, field);
     return 0;
 }
 
@@ -27,7 +27,7 @@ int eg_title_index_load(EgTitleIndex *index, const char *directory) {
     char path[4096];
     unsigned char *data = 0;
     size_t size = 0;
-    EgJson json = {0};
+    ToolJson json = {0};
     PlatformDirEntry info;
     unsigned long long dimensions, count, primary_year = 0, declared[100] = {0};
     int result = -1;
@@ -38,74 +38,74 @@ int eg_title_index_load(EgTitleIndex *index, const char *directory) {
         info.size > 64U * 1024U * 1024U || tool_read_all_input(path, &data, &size)) {
         eg_error("cannot read index manifest (limit 64 MiB): ", path); goto done;
     }
-    if (size != info.size || eg_json_parse(&json, (const char *)data, size)) goto invalid;
-    int multi = eg_json_equals(&json, eg_json_get(&json, 0, "format"), "eg2-paper-title-index-v2");
-    if ((!multi && !eg_json_equals(&json, eg_json_get(&json, 0, "format"), "eg2-paper-title-index-v1")) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "model_revision"), EG2_MODEL_REVISION) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "weights_sha256"), EG2_WEIGHTS_SHA256) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "tokenizer_sha256"), EG2_TOKENIZER_SHA256) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "task"), "document") ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "prefix"), EG2_DOCUMENT_PREFIX) ||
-        !eg_json_equals(&json, eg_json_get(&json, 0, "source_field"), "Paper.name") ||
-        eg_json_uint(&json, eg_json_get(&json, 0, "dimensions"), &dimensions) || dimensions != EG2_DIM ||
-        eg_json_uint(&json, eg_json_get(&json, 0, "count"), &count) || !count || count > 100000U ||
+    if (size != info.size || tool_json_parse(&json, (const char *)data, size)) goto invalid;
+    int multi = tool_json_equals_alloc(&json, tool_json_get(&json, 0, "format"), "eg2-paper-title-index-v2");
+    if ((!multi && !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "format"), "eg2-paper-title-index-v1")) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "model_revision"), EG2_MODEL_REVISION) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "weights_sha256"), EG2_WEIGHTS_SHA256) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "tokenizer_sha256"), EG2_TOKENIZER_SHA256) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "task"), "document") ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "prefix"), EG2_DOCUMENT_PREFIX) ||
+        !tool_json_equals_alloc(&json, tool_json_get(&json, 0, "source_field"), "Paper.name") ||
+        tool_json_uint(&json, tool_json_get(&json, 0, "dimensions"), &dimensions) || dimensions != EG2_DIM ||
+        tool_json_uint(&json, tool_json_get(&json, 0, "count"), &count) || !count || count > 100000U ||
         boolean_field(&json, 0, "archive_complete", &index->complete)) goto invalid;
     if (multi) {
-        const EgJsonToken *archives = eg_json_token(&json, eg_json_get(&json, 0, "archives"));
-        if (!archives || archives->kind != EG_JSON_ARRAY || archives->next == eg_json_get(&json, 0, "archives") + 1)
+        const ToolJsonToken *archives = tool_json_token(&json, tool_json_get(&json, 0, "archives"));
+        if (!archives || archives->kind != TOOL_JSON_ARRAY || archives->next == tool_json_get(&json, 0, "archives") + 1)
             goto invalid;
         int all_complete = 1;
-        size_t a = eg_json_get(&json, 0, "archives") + 1;
+        size_t a = tool_json_get(&json, 0, "archives") + 1;
         while (a < archives->next) {
             unsigned long long year, n;
             int complete;
-            if (eg_json_uint(&json, eg_json_get(&json, a, "year"), &year) || year < 2000 || year > 2099 ||
-                eg_json_uint(&json, eg_json_get(&json, a, "count"), &n) || n > count ||
+            if (tool_json_uint(&json, tool_json_get(&json, a, "year"), &year) || year < 2000 || year > 2099 ||
+                tool_json_uint(&json, tool_json_get(&json, a, "count"), &n) || n > count ||
                 boolean_field(&json, a, "archive_complete", &complete)) goto invalid;
             declared[year - 2000] += n;
             if (declared[year - 2000] > count) goto invalid;
             index->year_present[year - 2000] = 1;
             all_complete = all_complete && complete;
-            a = eg_json_token(&json, a)->next;
+            a = tool_json_token(&json, a)->next;
         }
         if (all_complete != index->complete) goto invalid;
     } else {
-        if (eg_json_uint(&json, eg_json_get(&json, 0, "year"), &primary_year) ||
+        if (tool_json_uint(&json, tool_json_get(&json, 0, "year"), &primary_year) ||
             primary_year < 2000 || primary_year > 2099) goto invalid;
         declared[primary_year - 2000] = count;
         index->year_present[primary_year - 2000] = 1;
     }
-    size_t items_index = eg_json_get(&json, 0, "items"), n = 0;
-    const EgJsonToken *items = eg_json_token(&json, items_index);
-    if (!items || items->kind != EG_JSON_ARRAY) goto invalid;
+    size_t items_index = tool_json_get(&json, 0, "items"), n = 0;
+    const ToolJsonToken *items = tool_json_token(&json, items_index);
+    if (!items || items->kind != TOOL_JSON_ARRAY) goto invalid;
     index->titles = rt_malloc_array((size_t)count, sizeof(*index->titles));
     if (!index->titles) { eg_error("cannot allocate resident title vectors", 0); goto done; }
     index->count = (size_t)count;
     rt_memset(index->titles, 0, index->count * sizeof(*index->titles));
-    for (size_t i = items_index + 1; i < items->next; i = eg_json_token(&json, i)->next) {
+    for (size_t i = items_index + 1; i < items->next; i = tool_json_token(&json, i)->next) {
         if (n == index->count) goto invalid;
         EgTitle *title = index->titles + n++;
         unsigned long long year = primary_year, tokens;
         unsigned char key[32];
         char relative[80], stored[80], key_hex[65], prefix[4] = "00/";
-        if (multi && eg_json_uint(&json, eg_json_get(&json, i, "year"), &year)) goto invalid;
+        if (multi && tool_json_uint(&json, tool_json_get(&json, i, "year"), &year)) goto invalid;
         if (year < 2000 || year > 2099 || !index->year_present[year - 2000]) goto invalid;
         title->year = (unsigned int)year;
-        title->id = eg_json_dup_string(&json, eg_json_get(&json, i, "id"), 4096);
-        title->title = eg_json_dup_string(&json, eg_json_get(&json, i, "title"),
+        title->id = tool_json_dup_string(&json, tool_json_get(&json, i, "id"), 4096);
+        title->title = tool_json_dup_string(&json, tool_json_get(&json, i, "title"),
                                        EG2_MAX_TEXT - (sizeof(EG2_DOCUMENT_PREFIX) - 1));
-        title->reference = eg_json_dup_string(&json, eg_json_get(&json, i, "reference"), 512);
+        title->reference = tool_json_dup_string(&json, tool_json_get(&json, i, "reference"), 512);
         if (!title->id || !title->id[0] || !title->title || !title->title[0] || !title->reference ||
-            eg_json_uint(&json, eg_json_get(&json, i, "tokens"), &tokens) ||
+            tool_json_uint(&json, tool_json_get(&json, i, "tokens"), &tokens) ||
             tokens < 2 || tokens > EG2_MAX_TOKENS) goto invalid;
         prefix[0] = (char)('0' + (year % 100) / 10);
         prefix[1] = (char)('0' + year % 10);
         if (rt_strncmp(title->reference, prefix, 3)) goto invalid;
         eg_title_key(title->id, title->title, key);
         eg_title_vector_path(key, relative);
-        if (eg_json_string(&json, eg_json_get(&json, i, "vector"), stored, sizeof(stored)) ||
+        if (tool_json_string(&json, tool_json_get(&json, i, "vector"), stored, sizeof(stored)) ||
             rt_strcmp(stored, relative) ||
-            eg_json_string(&json, eg_json_get(&json, i, "key"), key_hex, sizeof(key_hex)) ||
+            tool_json_string(&json, tool_json_get(&json, i, "key"), key_hex, sizeof(key_hex)) ||
             rt_strlen(key_hex) != 64 || rt_strncmp(key_hex, relative + 6, 64)) goto invalid;
         if (rt_join_path(directory, relative, path, sizeof(path))) {
             eg_error("vector path too long", relative); goto done;
@@ -125,7 +125,7 @@ int eg_title_index_load(EgTitleIndex *index, const char *directory) {
 invalid:
     eg_error("invalid, incompatible or inconsistent title index: ", directory);
 done:
-    eg_json_free(&json);
+    tool_json_free(&json);
     rt_free(data);
     if (result) eg_title_index_free(index);
     return result;

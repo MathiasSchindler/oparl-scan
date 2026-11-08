@@ -1,6 +1,6 @@
 #ifndef OPARL_PDF_STRUCTURE_H
 #define OPARL_PDF_STRUCTURE_H
-#include "json.h"
+#include "tool_json_parser.h"
 #include "pdf-text.h"
 
 typedef struct {
@@ -16,5 +16,5 @@ typedef struct {
 
 int pdf_structure_page(ToolByteBuffer *out, const PdfTextLayout *layout, unsigned int warnings,
                        PdfStructureState *state, PdfStructureResult *result);
-int pdf_structure_validate_page(const Json *json, size_t page, unsigned long long counts[5]);
+int pdf_structure_validate_page(const ToolJson *json, size_t page, unsigned long long counts[5]);
 #endif

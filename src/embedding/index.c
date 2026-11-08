@@ -1,6 +1,7 @@
 #include "eg2.h"
-#include "json.h"
+#include "tool_json_parser.h"
 #include "index_io.h"
+#include "hash_util.h"
 #include "crypto/sha256.h"
 #include "math/math.h"
 #include <stdint.h>
@@ -84,15 +85,6 @@ static int flush_titles(TitleRun *run) {
     return 0;
 }
 
-static void hex_digest(const unsigned char digest[32], char text[65]) {
-    static const char hex[] = "0123456789abcdef";
-    for (unsigned int i = 0; i < 32; i++) {
-        text[i * 2] = hex[digest[i] >> 4];
-        text[i * 2 + 1] = hex[digest[i] & 15];
-    }
-    text[64] = 0;
-}
-
 static int read_source(const char *path, unsigned char **bytes, size_t *size) {
     PlatformDirEntry info;
     if (platform_get_path_info(path, &info) || (info.mode & 0170000U) != 0100000U ||
@@ -114,12 +106,12 @@ static int list_sources(const char *directory, ToolArray *sources) {
     return eg_index_files(directory, ".json", sources);
 }
 
-static char *string_field(const EgJson *json, const char *key, size_t limit) {
-    return eg_json_dup_string(json, eg_json_get(json, 0, key), limit);
+static char *string_field(const ToolJson *json, const char *key, size_t limit) {
+    return tool_json_dup_string(json, tool_json_get(json, 0, key), limit);
 }
 
-static int read_paper(const EgJson *json, size_t source, ToolArray *papers) {
-    if (!eg_json_equals(json, eg_json_get(json, 0, "type"), "https://schema.oparl.org/1.1/Paper"))
+static int read_paper(const ToolJson *json, size_t source, ToolArray *papers) {
+    if (!tool_json_equals_alloc(json, tool_json_get(json, 0, "type"), "https://schema.oparl.org/1.1/Paper"))
         return 0;
     Paper *p = tool_array_append(papers);
     if (!p) return eg_error("cannot allocate paper", 0);
@@ -127,10 +119,10 @@ static int read_paper(const EgJson *json, size_t source, ToolArray *papers) {
     p->source = source;
     p->id = string_field(json, "id", 4096);
     p->reference = string_field(json, "reference", 512);
-    const EgJsonToken *deleted = eg_json_token(json, eg_json_get(json, 0, "deleted"));
-    if (deleted && deleted->kind != EG_JSON_BOOL)
+    const ToolJsonToken *deleted = tool_json_token(json, tool_json_get(json, 0, "deleted"));
+    if (deleted && deleted->kind != TOOL_JSON_BOOL)
         return eg_error("Paper.deleted must be boolean", p->id);
-    p->deleted = eg_json_true(json, eg_json_get(json, 0, "deleted"));
+    p->deleted = tool_json_true(json, tool_json_get(json, 0, "deleted"));
     if (!p->id || !p->id[0] || (!p->deleted && !p->reference))
         return eg_error("Paper requires an id and, unless deleted, a reference", 0);
     return 0;
@@ -158,7 +150,7 @@ static int add_archive(ToolArray *archives, const char *argument, unsigned int y
 static int load_archive(Archive *archive, size_t index, ToolArray *papers) {
     unsigned char *bytes = 0;
     size_t size = 0;
-    EgJson json = {0};
+    ToolJson json = {0};
     int result = -1;
     char path[4096];
     archive->prefix[0] = (char)('0' + (archive->year % 100) / 10);
@@ -170,15 +162,15 @@ static int load_archive(Archive *archive, size_t index, ToolArray *papers) {
     }
     if (read_source(archive->archive_file, &bytes, &size)) goto done;
     crypto_sha256_hash(bytes, size, archive->sha);
-    if (eg_json_parse(&json, (const char *)bytes, size)) {
+    if (tool_json_parse(&json, (const char *)bytes, size)) {
         eg_error("invalid archive.json: ", archive->archive_file); goto done;
     }
-    const EgJsonToken *flag = eg_json_token(&json, eg_json_get(&json, 0, "complete"));
-    if (!flag || flag->kind != EG_JSON_BOOL) {
+    const ToolJsonToken *flag = tool_json_token(&json, tool_json_get(&json, 0, "complete"));
+    if (!flag || flag->kind != TOOL_JSON_BOOL) {
         eg_error("archive.json requires a boolean complete field: ", archive->archive_file); goto done;
     }
-    archive->complete = eg_json_true(&json, eg_json_get(&json, 0, "complete"));
-    eg_json_free(&json);
+    archive->complete = tool_json_true(&json, tool_json_get(&json, 0, "complete"));
+    tool_json_free(&json);
     rt_free(bytes);
     bytes = 0;
     if (!archive->complete &&
@@ -194,10 +186,10 @@ static int load_archive(Archive *archive, size_t index, ToolArray *papers) {
         }
         if (read_source(path, &bytes, &size)) goto done;
         crypto_sha256_hash(bytes, size, source->sha);
-        if (eg_json_parse(&json, (const char *)bytes, size)) {
+        if (tool_json_parse(&json, (const char *)bytes, size)) {
             eg_error("invalid metadata JSON: ", path); goto done;
         }
-        if (!eg_json_token(&json, 0) || eg_json_token(&json, 0)->kind != EG_JSON_OBJECT) {
+        if (!tool_json_token(&json, 0) || tool_json_token(&json, 0)->kind != TOOL_JSON_OBJECT) {
             eg_error("expected a canonical metadata object: ", path); goto done;
         }
         size_t before = papers->count;
@@ -222,13 +214,13 @@ static int load_archive(Archive *archive, size_t index, ToolArray *papers) {
                 archive->selected++;
             } else archive->other++;
         }
-        eg_json_free(&json);
+        tool_json_free(&json);
         rt_free(bytes);
         bytes = 0;
     }
     result = 0;
 done:
-    eg_json_free(&json);
+    tool_json_free(&json);
     rt_free(bytes);
     return result;
 }
@@ -238,15 +230,13 @@ static int atomic_write(const char *path, const void *data, size_t size) {
 }
 
 static int field(ToolByteBuffer *buffer, const char *key, const char *text) {
-    return eg_json_quote(buffer, key) || tool_byte_buffer_append_char(buffer, ':') ||
-           eg_json_quote(buffer, text) || tool_byte_buffer_append_char(buffer, ',');
+    return tool_json_append_string(buffer, key) || tool_byte_buffer_append_char(buffer, ':') ||
+           tool_json_append_string(buffer, text) || tool_byte_buffer_append_char(buffer, ',');
 }
 
 static int number(ToolByteBuffer *buffer, const char *key, unsigned long long value) {
-    char digits[32];
-    rt_unsigned_to_string(value, digits, sizeof(digits));
-    return eg_json_quote(buffer, key) || tool_byte_buffer_append_char(buffer, ':') ||
-           tool_byte_buffer_append_cstr(buffer, digits) || tool_byte_buffer_append_char(buffer, ',');
+    return tool_json_append_string(buffer, key) || tool_byte_buffer_append_char(buffer, ':') ||
+           tool_byte_buffer_append_uint(buffer, value) || tool_byte_buffer_append_char(buffer, ',');
 }
 
 static int archive_fields(ToolByteBuffer *buffer, const Archive *archive) {
@@ -284,19 +274,6 @@ changed:
 done:
     tool_array_free(&current);
     return result;
-}
-
-static int ensure_directory(const char *path) {
-    PlatformDirEntry info;
-    char scratch[4096];
-    if (!platform_get_path_info(path, &info)) {
-        if (info.is_dir && (info.mode & 0170000U) == 0040000U) return 0;
-        return eg_error("output path is not a regular directory: ", path);
-    }
-    if (tool_ensure_parent_dirs(path, scratch, sizeof(scratch)) ||
-        platform_make_directory(path, 0700))
-        return eg_error("cannot create directory: ", path);
-    return 0;
 }
 
 static int usage(void) {
@@ -410,7 +387,7 @@ int main(int argc, char **argv) {
         previous_selected = paper;
     }
     if (rt_join_path(output, "cache", cache, sizeof(cache))) goto path_error;
-    if (ensure_directory(output) || ensure_directory(cache)) goto done;
+    if (eg_ensure_directory(output) || eg_ensure_directory(cache)) goto done;
     if (selected) {
         if (rt_join_path(directory, "tokenizer.eg2", path, sizeof(path))) goto path_error;
         if (eg_tokenizer_load(&tokenizer, path)) goto done;
@@ -457,8 +434,8 @@ int main(int argc, char **argv) {
         char hex[65], source_hex[65], source_path[4096];
         int found;
         eg_title_key(p->id, p->title, p->key);
-        hex_digest(p->key, hex);
-        hex_digest(source->sha, source_hex);
+        hash_to_hex(p->key, sizeof(p->key), hex);
+        hash_to_hex(source->sha, sizeof(source->sha), source_hex);
         eg_title_vector_path(p->key, p->vector);
         if (rt_join_path(output, p->vector, path, sizeof(path)) ||
             rt_join_path(archive->metadata, source->name, source_path, sizeof(source_path))) goto path_error;
@@ -488,7 +465,7 @@ int main(int argc, char **argv) {
             (archives.count > 1 && number(&manifest, "year", archive->year)) ||
             number(&manifest, "tokens", p->tokens) ||
             tool_byte_buffer_append_cstr(&manifest, "\"vector\":") ||
-            eg_json_quote(&manifest, p->vector) || tool_byte_buffer_append_char(&manifest, '}'))
+            tool_json_append_string(&manifest, p->vector) || tool_byte_buffer_append_char(&manifest, '}'))
             goto allocation_error;
     }
     if (flush_titles(&run)) goto done;

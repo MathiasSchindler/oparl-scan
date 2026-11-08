@@ -14,7 +14,6 @@ int eg_absolute_path(const char *input, int allow_missing, char *out, size_t cap
 int eg_read_regular(const char *path, size_t limit, unsigned char **bytes, size_t *size);
 int eg_ensure_directory(const char *path);
 int eg_atomic_write(const char *path, const void *data, size_t size);
-void eg_hex_digest(const unsigned char digest[32], char text[65]);
 int eg_parse_digest(const char *text, unsigned char digest[32]);
 
 #endif

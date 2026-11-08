@@ -1,5 +1,5 @@
 #include "search.h"
-#include "json.h"
+#include "tool_json_parser.h"
 #include "pdf-text.h"
 #include "hash_util.h"
 #include "runtime.h"
@@ -47,7 +47,7 @@ static int attestation(Import *import, const char *kind, const char *hash, Attes
     PlatformDirEntry info;
     unsigned char *bytes = 0;
     size_t length, used, i;
-    Json json;
+    ToolJson json;
     int valid;
     rt_memset(out, 0, sizeof(*out));
     rt_copy_string(name, sizeof(name), kind); used = rt_strlen(name);
@@ -57,17 +57,17 @@ static int attestation(Import *import, const char *kind, const char *hash, Attes
     if (platform_get_path_info(path, &info) != 0) return 0;
     if (info.size > 32768 || tool_read_all_input(path, &bytes, &length) != 0)
         return search_error("cannot read archive attestation", path);
-    if (json_parse(&json, (const char *)bytes, length) != 0) {
+    if (tool_json_parse(&json, (const char *)bytes, length) != 0) {
         rt_free(bytes); return search_error("invalid archive attestation JSON", path);
     }
-    valid = json_string(&json, json_get(&json, 0, "sha256"), out->digest, sizeof(out->digest)) == 0 &&
-        rt_strlen(out->digest) == 64 && json_uint(&json, json_get(&json, 0, "size"), &out->size) == 0;
-    if (json_get(&json, 0, "observedAtEpochSeconds") != JSON_NONE &&
-        json_uint(&json, json_get(&json, 0, "observedAtEpochSeconds"), &out->observed) != 0) valid = 0;
-    if (json_get(&json, 0, "fetchedAtEpochSeconds") != JSON_NONE &&
-        json_uint(&json, json_get(&json, 0, "fetchedAtEpochSeconds"), &out->fetched) != 0) valid = 0;
-    if (json_get(&json, 0, "currentPath") != JSON_NONE &&
-        json_string(&json, json_get(&json, 0, "currentPath"), out->current, sizeof(out->current)) != 0) valid = 0;
+    valid = tool_json_string(&json, tool_json_get(&json, 0, "sha256"), out->digest, sizeof(out->digest)) == 0 &&
+        rt_strlen(out->digest) == 64 && tool_json_uint(&json, tool_json_get(&json, 0, "size"), &out->size) == 0;
+    if (tool_json_get(&json, 0, "observedAtEpochSeconds") != TOOL_JSON_NONE &&
+        tool_json_uint(&json, tool_json_get(&json, 0, "observedAtEpochSeconds"), &out->observed) != 0) valid = 0;
+    if (tool_json_get(&json, 0, "fetchedAtEpochSeconds") != TOOL_JSON_NONE &&
+        tool_json_uint(&json, tool_json_get(&json, 0, "fetchedAtEpochSeconds"), &out->fetched) != 0) valid = 0;
+    if (tool_json_get(&json, 0, "currentPath") != TOOL_JSON_NONE &&
+        tool_json_string(&json, tool_json_get(&json, 0, "currentPath"), out->current, sizeof(out->current)) != 0) valid = 0;
     for (i = 0; i < 64; i++) if (tool_hex_value(out->digest[i]) < 0) valid = 0;
     if (out->fetched > out->observed || out->observed > 0x7fffffffffffffffULL) valid = 0;
     if (out->current[0] && !rt_strcmp(kind, "document")) {
@@ -76,7 +76,7 @@ static int attestation(Import *import, const char *kind, const char *hash, Attes
         for (i = 75; i < rt_strlen(out->current); i++)
             if (out->current[i] == '/' || out->current[i] == '\\') valid = 0;
     }
-    json_free(&json); rt_free(bytes);
+    tool_json_free(&json); rt_free(bytes);
     if (!valid) return search_error("invalid archive attestation", path);
     out->present = 1;
     return 0;
@@ -136,13 +136,13 @@ static int map_put(Import *import, Map *map, uint32_t key, uint32_t value) {
     map->entries[slot].key = key; map->entries[slot].value = value; map->count++;
     return 0;
 }
-static uint32_t json_text(Import *import, const Json *json, size_t object, const char *key) {
-    size_t index = json_get(json, object, key);
-    const JsonToken *token = json_token(json, index);
+static uint32_t json_text(Import *import, const ToolJson *json, size_t object, const char *key) {
+    size_t index = tool_json_get(json, object, key);
+    const ToolJsonToken *token = tool_json_token(json, index);
     char *value;
     uint32_t offset;
-    if (!token || token->kind == JSON_NULL) return 0;
-    if (token->kind != JSON_STRING) {
+    if (!token || token->kind == TOOL_JSON_NULL) return 0;
+    if (token->kind != TOOL_JSON_STRING) {
         search_error("OParl property is not a string", key);
         search_error("metadata source", string(import, import->current_file));
         import->builder.failed = 1;
@@ -150,7 +150,7 @@ static uint32_t json_text(Import *import, const Json *json, size_t object, const
     }
     value = (char *)rt_malloc(token->end - token->start + 1);
     if (!value) { import->builder.failed = 1; return 0; }
-    if (json_string(json, index, value, token->end - token->start + 1) != 0) {
+    if (tool_json_string(json, index, value, token->end - token->start + 1) != 0) {
         search_error("cannot decode OParl string property", key);
         rt_free(value); import->builder.failed = 1; return 0;
     }
@@ -180,27 +180,27 @@ static int append_id(ToolArray *array, uint32_t id) {
     return 0;
 }
 
-static int ingest(Import *import, const Json *json, size_t object, int rank);
-static int link_value(Import *import, const Json *json, size_t value, uint32_t parent,
+static int ingest(Import *import, const ToolJson *json, size_t object, int rank);
+static int link_value(Import *import, const ToolJson *json, size_t value, uint32_t parent,
                       uint32_t role, uint32_t property) {
-    const JsonToken *token = json_token(json, value);
+    const ToolJsonToken *token = tool_json_token(json, value);
     uint32_t id;
     size_t child;
-    if (!token || token->kind == JSON_NULL) return 0;
-    if (token->kind == JSON_ARRAY) {
+    if (!token || token->kind == TOOL_JSON_NULL) return 0;
+    if (token->kind == TOOL_JSON_ARRAY) {
         if (role == SEARCH_BODY || role == SEARCH_SYSTEM)
             return search_error("OParl context relationship must be singular", string(import, property));
-        for (child = value + 1; child < token->next; child = json_token(json, child)->next)
+        for (child = value + 1; child < token->next; child = tool_json_token(json, child)->next)
             if (link_value(import, json, child, parent, role, property) != 0) return -1;
         return 0;
     }
-    if (token->kind == JSON_OBJECT) {
+    if (token->kind == TOOL_JSON_OBJECT) {
         id = json_text(import, json, value, "id");
         if (ingest(import, json, value, 1) != 0) return -1;
-    } else if (token->kind == JSON_STRING) {
+    } else if (token->kind == TOOL_JSON_STRING) {
         char *value_text = (char *)rt_malloc(token->end - token->start + 1);
         if (!value_text) return -1;
-        if (json_string(json, value, value_text, token->end - token->start + 1) != 0) {
+        if (tool_json_string(json, value, value_text, token->end - token->start + 1) != 0) {
             rt_free(value_text); return -1;
         }
         id = text(import, value_text); rt_free(value_text);
@@ -218,7 +218,7 @@ static int link_value(Import *import, const Json *json, size_t value, uint32_t p
 }
 
 typedef struct { const char *key; uint32_t role; } RelationKey;
-static int ingest(Import *import, const Json *json, size_t object, int rank) {
+static int ingest(Import *import, const ToolJson *json, size_t object, int rank) {
     static const RelationKey paper[] = {
         {"mainFile",SEARCH_MAIN_FILE},{"auxiliaryFile",SEARCH_PAPER_ATTACHMENT},
         {"consultation",SEARCH_CONSULTATION},{"superordinatedPaper",SEARCH_SUPERORDINATED},
@@ -237,13 +237,13 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
         {"underDirectionOf",SEARCH_DIRECTION},{"organization",SEARCH_ORGANIZATION},
         {"body",SEARCH_BODY},{"system",SEARCH_SYSTEM}};
     const RelationKey *keys = 0;
-    size_t count = 0, i, type = json_get(json, object, "type");
+    size_t count = 0, i, type = tool_json_get(json, object, "type");
     uint32_t id, n, modified, kind;
     unsigned long long observed;
     Entity *e;
     char type_text[128];
-    if (json_equals(json, type, "at") || json_equals(json, type, "gr")) type = json_get(json, object, "Type");
-    if (json_string(json, type, type_text, sizeof(type_text)) != 0 ||
+    if (tool_json_equals(json, type, "at") || tool_json_equals(json, type, "gr")) type = tool_json_get(json, object, "Type");
+    if (tool_json_string(json, type, type_text, sizeof(type_text)) != 0 ||
         rt_strncmp(type_text, "https://schema.oparl.org/1.1/", 29) != 0) return 0;
     id = json_text(import, json, object, "id");
     if (!id) return import->builder.failed ? -1 : 0;
@@ -253,10 +253,10 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
     if (n == NONE && (n = new_entity(import, id)) == NONE) return -1;
     e = entity(import, n);
     observed = import->observed;
-    if (rank == 1 && !json_true(json, json_get(json, object, "deleted")) &&
-        json_get(json, object, "name") == JSON_NONE && json_get(json, object, "fileName") == JSON_NONE &&
-        json_get(json, object, "accessUrl") == JSON_NONE && json_get(json, object, "start") == JSON_NONE &&
-        json_get(json, object, "reference") == JSON_NONE) observed = 0;
+    if (rank == 1 && !tool_json_true(json, tool_json_get(json, object, "deleted")) &&
+        tool_json_get(json, object, "name") == TOOL_JSON_NONE && tool_json_get(json, object, "fileName") == TOOL_JSON_NONE &&
+        tool_json_get(json, object, "accessUrl") == TOOL_JSON_NONE && tool_json_get(json, object, "start") == TOOL_JSON_NONE &&
+        tool_json_get(json, object, "reference") == TOOL_JSON_NONE) observed = 0;
     if (observed < e->metadata_observed) return 0;
     if (observed == e->metadata_observed && rank < e->rank) return 0;
     if (observed == e->metadata_observed && rank == e->rank) {
@@ -268,11 +268,11 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
     e->record.metadata_origin = (uint32_t)rank;
     e->metadata_mtime = import->mtime;
     e->metadata_observed = observed;
-    e->deleted = json_true(json, json_get(json, object, "deleted"));
+    e->deleted = tool_json_true(json, tool_json_get(json, object, "deleted"));
     if (!rt_strcmp(type_text + 29, "AgendaItem")) {
-        size_t public = json_get(json, object, "public");
-        const JsonToken *token = json_token(json, public);
-        if (token && token->kind == JSON_BOOL && !json_true(json, public)) e->deleted = 1;
+        size_t public = tool_json_get(json, object, "public");
+        const ToolJsonToken *token = tool_json_token(json, public);
+        if (token && token->kind == TOOL_JSON_BOOL && !tool_json_true(json, public)) e->deleted = 1;
     }
     e->record.kind = kind; e->record.source = import->current_file;
     e->record.name = json_text(import, json, object, "name");
@@ -291,17 +291,17 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
     e->record.system = e->record.body = 0;
     e->authority = SEARCH_AUTHORITY_UNKNOWN;
     if (!rt_strcmp(type_text + 29, "Consultation")) {
-        size_t authoritative = json_get(json, object, "authoritative");
-        const JsonToken *token = json_token(json, authoritative);
-        if (token && token->kind != JSON_NULL) {
-            if (token->kind != JSON_BOOL) return search_error("authoritative is not a boolean", string(import, id));
-            e->authority = json_true(json, authoritative) ? SEARCH_AUTHORITATIVE : SEARCH_PRELIMINARY;
+        size_t authoritative = tool_json_get(json, object, "authoritative");
+        const ToolJsonToken *token = tool_json_token(json, authoritative);
+        if (token && token->kind != TOOL_JSON_NULL) {
+            if (token->kind != TOOL_JSON_BOOL) return search_error("authoritative is not a boolean", string(import, id));
+            e->authority = tool_json_true(json, authoritative) ? SEARCH_AUTHORITATIVE : SEARCH_PRELIMINARY;
         }
     }
     e->record.paper_type = json_text(import, json, object, "paperType");
     e->record.year = 0;
     {
-        const JsonToken *token = json_token(json, object);
+        const ToolJsonToken *token = tool_json_token(json, object);
         ToolByteBuffer detail;
         static const char *const fields[] = {"description","result","role","shortName","classification","meetingState"};
         e->record.payload = search_string(&import->builder, json->text + token->start, token->end - token->start);
@@ -343,12 +343,12 @@ static int ingest(Import *import, const Json *json, size_t object, int rank) {
         keys = meeting; count = sizeof(meeting)/sizeof(meeting[0]);
     }
     for (i = 0; i < count; i++)
-        if (link_value(import, json, json_get(json, object, keys[i].key), n,
+        if (link_value(import, json, tool_json_get(json, object, keys[i].key), n,
                        keys[i].role, text(import, keys[i].key)) != 0) return -1;
     for (i = 0; i < sizeof(common)/sizeof(common[0]); i++) {
         uint32_t role = common[i].role;
         if (role == SEARCH_BODY && !rt_strcmp(type_text + 29, "System")) role = SEARCH_BODY_COLLECTION;
-        if (link_value(import, json, json_get(json, object, common[i].key), n,
+        if (link_value(import, json, tool_json_get(json, object, common[i].key), n,
                        role, text(import, common[i].key)) != 0) return -1;
     }
     return import->builder.failed ? -1 : 0;
@@ -359,7 +359,7 @@ static int metadata_file(const char *path, const PlatformDirEntry *entry, int de
     Import *import = (Import *)user;
     unsigned char *bytes = 0;
     size_t length, index, data;
-    Json json;
+    ToolJson json;
     int result = 0;
     (void)depth; (void)control;
     if (entry->is_dir) return 0;
@@ -367,7 +367,7 @@ static int metadata_file(const char *path, const PlatformDirEntry *entry, int de
     if (length < 5 || rt_strcmp(path + length - 5, ".json")) return 0;
     if (entry->size > 32ULL * 1024 * 1024 || tool_read_all_input(path, &bytes, &length) != 0)
         return search_error("cannot read archived metadata", path);
-    if (json_parse(&json, (const char *)bytes, length) != 0) {
+    if (tool_json_parse(&json, (const char *)bytes, length) != 0) {
         rt_free(bytes); return search_error("invalid archived JSON", path);
     }
     import->current_file = text(import, path);
@@ -393,16 +393,16 @@ static int metadata_file(const char *path, const PlatformDirEntry *entry, int de
             }
         }
     }
-    if (result != 0) { json_free(&json); rt_free(bytes); return -1; }
+    if (result != 0) { tool_json_free(&json); rt_free(bytes); return -1; }
     result = ingest(import, &json, 0, 2);
-    data = json_get(&json, 0, "data");
-    if (data != JSON_NONE && json_token(&json, data)->kind == JSON_ARRAY) {
-        const JsonToken *array = json_token(&json, data);
-        for (index = data + 1; result == 0 && index < array->next; index = json_token(&json, index)->next)
-            if (json_token(&json, index)->kind == JSON_OBJECT) result = ingest(import, &json, index, 2);
+    data = tool_json_get(&json, 0, "data");
+    if (data != TOOL_JSON_NONE && tool_json_token(&json, data)->kind == TOOL_JSON_ARRAY) {
+        const ToolJsonToken *array = tool_json_token(&json, data);
+        for (index = data + 1; result == 0 && index < array->next; index = tool_json_token(&json, index)->next)
+            if (tool_json_token(&json, index)->kind == TOOL_JSON_OBJECT) result = ingest(import, &json, index, 2);
     }
     import->metadata++;
-    json_free(&json); rt_free(bytes);
+    tool_json_free(&json); rt_free(bytes);
     if (result != 0) search_error("cannot import metadata resource", path);
     return result;
 }
@@ -414,7 +414,7 @@ static int archive_root(const char *path, const PlatformDirEntry *entry, int dep
     PlatformDirEntry info;
     unsigned char *bytes = 0;
     size_t length;
-    Json json;
+    ToolJson json;
     ArchiveRoot *archive;
     unsigned long long year = 0;
     (void)depth;
@@ -424,22 +424,22 @@ static int archive_root(const char *path, const PlatformDirEntry *entry, int dep
     control->prune = 1;
     if (info.size > 1024 * 1024 || tool_read_all_input(summary, &bytes, &length) != 0)
         return search_error("cannot read archive summary", summary);
-    if (json_parse(&json, (const char *)bytes, length) != 0) {
+    if (tool_json_parse(&json, (const char *)bytes, length) != 0) {
         rt_free(bytes); return search_error("invalid archive summary", summary);
     }
     {
-        int incomplete = !json_true(&json, json_get(&json, 0, "complete")) ||
-            json_true(&json, json_get(&json, 0, "metadataOnly"));
+        int incomplete = !tool_json_true(&json, tool_json_get(&json, 0, "complete")) ||
+            tool_json_true(&json, tool_json_get(&json, 0, "metadataOnly"));
         archive = (ArchiveRoot *)tool_array_append(&import->archives);
-        if (!archive) { json_free(&json); rt_free(bytes); return -1; }
+        if (!archive) { tool_json_free(&json); rt_free(bytes); return -1; }
         archive->incomplete = incomplete;
         if (incomplete) import->builder.incomplete = 1;
     }
-    if (json_get(&json, 0, "referenceYear") != JSON_NONE &&
-        json_uint(&json, json_get(&json, 0, "referenceYear"), &year) != 0) {
-        json_free(&json); rt_free(bytes); return search_error("invalid archive year", summary);
+    if (tool_json_get(&json, 0, "referenceYear") != TOOL_JSON_NONE &&
+        tool_json_uint(&json, tool_json_get(&json, 0, "referenceYear"), &year) != 0) {
+        tool_json_free(&json); rt_free(bytes); return search_error("invalid archive year", summary);
     }
-    json_free(&json); rt_free(bytes);
+    tool_json_free(&json); rt_free(bytes);
     archive->path = text(import, path); archive->year = (unsigned int)year;
     return 0;
 }
@@ -529,21 +529,21 @@ static int record_text(Import *import, SearchRecord *record, const char *body, s
             tool_byte_buffer_append(&buffer, "\x1e", 1) != 0) goto fail;
     }
     if (record->preparation) {
-        Json json;
+        ToolJson json;
         const char *summary = string(import, record->preparation);
         size_t list;
-        if (json_parse(&json, summary, rt_strlen(summary))) goto fail;
-        list = json_get(&json, 0, "fields");
-        for (i = list+1; i < json_token(&json, list)->next; i = json_token(&json, i)->next) {
+        if (tool_json_parse(&json, summary, rt_strlen(summary))) goto fail;
+        list = tool_json_get(&json, 0, "fields");
+        for (i = list+1; i < tool_json_token(&json, list)->next; i = tool_json_token(&json, i)->next) {
             char value[257];
-            if (!json_equals(&json, json_get(&json, i, "status"), "rule-supported")) continue;
-            if (json_string(&json, json_get(&json, i, "value"), value, sizeof(value)) ||
+            if (!tool_json_equals(&json, tool_json_get(&json, i, "status"), "rule-supported")) continue;
+            if (tool_json_string(&json, tool_json_get(&json, i, "value"), value, sizeof(value)) ||
                 tool_byte_buffer_append_cstr(&buffer, value) ||
                 tool_byte_buffer_append(&buffer, "\x1e", 1)) {
-                json_free(&json); goto fail;
+                tool_json_free(&json); goto fail;
             }
         }
-        json_free(&json);
+        tool_json_free(&json);
     }
     record->body_start = (uint32_t)buffer.size;
     if (tool_byte_buffer_append(&buffer, body, length) != 0 || buffer.size > UINT32_MAX) goto fail;
@@ -747,22 +747,22 @@ static int prepare_entity(Import *import, Entity *e) {
 
 static int prepared_pages(Import *import, Entity *e, PageContext *context, size_t length) {
     PreparedDocument doc;
-    const Json *json = &doc.json;
+    const ToolJson *json = &doc.json;
     size_t pages, i, fields;
     int status = prepared_open(&doc, import->prepared, import->preparation_key,
                                string(import, e->pdf_digest), length);
     if (status) { prepared_close(&doc); return -1; }
-    fields = json_get(json, doc.data, "fields");
-    for (i = fields+1; i < json_token(json, fields)->next; i = json_token(json, i)->next) {
+    fields = tool_json_get(json, doc.data, "fields");
+    for (i = fields+1; i < tool_json_token(json, fields)->next; i = tool_json_token(json, i)->next) {
         char value[32], rule[128];
         unsigned long long page;
         SearchFact *fact;
-        if (!json_equals(json, json_get(json, i, "field"), "document.date") ||
-            !json_equals(json, json_get(json, i, "status"), "rule-supported")) continue;
+        if (!tool_json_equals(json, tool_json_get(json, i, "field"), "document.date") ||
+            !tool_json_equals(json, tool_json_get(json, i, "status"), "rule-supported")) continue;
         if (e->record.date || e->dates[SEARCH_DOCUMENT_DATE]) continue;
-        if (json_string(json, json_get(json, i, "value"), value, sizeof(value)) ||
-            json_string(json, json_get(json, i, "rule"), rule, sizeof(rule)) ||
-            json_uint(json, json_get(json, i, "page"), &page)) { status = -1; goto done; }
+        if (tool_json_string(json, tool_json_get(json, i, "value"), value, sizeof(value)) ||
+            tool_json_string(json, tool_json_get(json, i, "rule"), rule, sizeof(rule)) ||
+            tool_json_uint(json, tool_json_get(json, i, "page"), &page)) { status = -1; goto done; }
         fact = (SearchFact *)tool_array_append(&import->builder.facts);
         if (!fact) { status = search_error("cannot allocate prepared document date", 0); goto done; }
         fact->record = e->search_record; fact->role = SEARCH_DOCUMENT_DATE;
@@ -770,15 +770,15 @@ static int prepared_pages(Import *import, Entity *e, PageContext *context, size_
         fact->evidence = evidence(import, e->record.id, e->version, (uint32_t)page, 0,
                                   text(import, "preparation.fields.document.date"), rule, SEARCH_DERIVED);
     }
-    pages = json_get(json, doc.data, "pages");
-    for (i = pages+1; i < json_token(json, pages)->next; i = json_token(json, i)->next) {
-        size_t token = json_get(json, i, "text");
-        const JsonToken *t = json_token(json, token);
+    pages = tool_json_get(json, doc.data, "pages");
+    for (i = pages+1; i < tool_json_token(json, pages)->next; i = tool_json_token(json, i)->next) {
+        size_t token = tool_json_get(json, i, "text");
+        const ToolJsonToken *t = tool_json_token(json, token);
         char *body = (char *)rt_malloc(t->end-t->start+1);
         unsigned long long number, warnings;
-        if (!body || json_string(json, token, body, t->end-t->start+1) ||
-            json_uint(json, json_get(json, i, "page"), &number) ||
-            json_uint(json, json_get(json, i, "warnings"), &warnings)) {
+        if (!body || tool_json_string(json, token, body, t->end-t->start+1) ||
+            tool_json_uint(json, tool_json_get(json, i, "page"), &number) ||
+            tool_json_uint(json, tool_json_get(json, i, "warnings"), &warnings)) {
             rt_free(body); status = search_error("invalid prepared page", string(import, e->pdf)); goto done;
         }
         status = extracted_page((unsigned int)number, body, rt_strlen(body), (unsigned int)warnings, context);
@@ -791,11 +791,11 @@ static int prepared_pages(Import *import, Entity *e, PageContext *context, size_
             uint32_t stored;
             tool_byte_buffer_init(&packet);
             status = tool_byte_buffer_append_cstr(&packet, "{\"format\":1,\"sourceSha256\":") ||
-                json_quote(&packet, string(import, e->pdf_digest));
+                tool_json_append_string(&packet, string(import, e->pdf_digest));
             for (k = 0; !status && k < sizeof(names)/sizeof(names[0]); k++) {
-                const JsonToken *value = json_token(json, json_get(json, i, names[k]));
+                const ToolJsonToken *value = tool_json_token(json, tool_json_get(json, i, names[k]));
                 if (!value) continue;
-                status = tool_byte_buffer_append_cstr(&packet, ",") || json_quote(&packet, names[k]) ||
+                status = tool_byte_buffer_append_cstr(&packet, ",") || tool_json_append_string(&packet, names[k]) ||
                     tool_byte_buffer_append_cstr(&packet, ":") ||
                     tool_byte_buffer_append(&packet, json->text + value->start, value->end - value->start);
             }
@@ -806,10 +806,10 @@ static int prepared_pages(Import *import, Entity *e, PageContext *context, size_
             ((SearchRecord *)import->builder.records.data)[import->builder.records.count-1].preparation = stored;
         }
     }
-    if (json_equals(json, json_get(json, doc.data, "status"), "failed")) {
+    if (tool_json_equals(json, tool_json_get(json, doc.data, "status"), "failed")) {
         char error[256];
         import->failed_pdfs++;
-        if (json_string(json, json_get(json, doc.data, "error"), error, sizeof(error))) {
+        if (tool_json_string(json, tool_json_get(json, doc.data, "error"), error, sizeof(error))) {
             status = search_error("invalid prepared extraction error", string(import, e->pdf)); goto done;
         }
         status = issue(import, e, error);

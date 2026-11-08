@@ -1,6 +1,7 @@
 #include "search.h"
 #include "embedding/search.h"
 #include "embedding/index_io.h"
+#include "hash_util.h"
 
 #define NONE UINT32_MAX
 
@@ -30,14 +31,14 @@ static int path_hash(const char *directory, const char *name, char sha[65]) {
     if (rt_join_path(directory, name, path, sizeof(path)) ||
         eg_read_regular(path, 64U * 1024U * 1024U, &bytes, &size)) return -1;
     crypto_sha256_hash(bytes, size, digest);
-    eg_hex_digest(digest, sha);
+    hash_to_hex(digest, sizeof(digest), sha);
     rt_free(bytes);
     return 0;
 }
 
-static int generation_root(const Json *json, const char *directory, char root[4096]) {
+static int generation_root(const ToolJson *json, const char *directory, char root[4096]) {
     char generation[128], base[4096];
-    if (json_string(json, json_get(json, 0, "generation"), generation, sizeof(generation)) || !generation[0])
+    if (tool_json_string(json, tool_json_get(json, 0, "generation"), generation, sizeof(generation)) || !generation[0])
         return search_error("embedding generation is missing", directory);
     for (size_t i = 0; generation[i]; i++)
         if ((generation[i] < '0' || generation[i] > '9') && generation[i] != '-')
@@ -176,7 +177,7 @@ static int map_records(SearchEmbedding *e, const SearchIndex *index) {
             crypto_sha256_update(&hash, (const unsigned char *)index->strings + page->text + page->body_start,
                                  page->text_length - page->body_start);
         }
-        crypto_sha256_final(&hash, digest); eg_hex_digest(digest, joined_sha);
+        crypto_sha256_final(&hash, digest); hash_to_hex(digest, sizeof(digest), joined_sha);
         if (rt_strcmp(joined_sha, d->text_sha)) {
             search_error("embedded main-form text does not match indexed PDF page text", d->id); goto done;
         }
@@ -198,28 +199,28 @@ done:
 }
 
 static int load_years(SearchEmbedding *e, const SearchIndex *index, const char *directory,
-                      const Json *json, size_t years_index) {
-    const JsonToken *years = json_token(json, years_index);
+                      const ToolJson *json, size_t years_index) {
+    const ToolJsonToken *years = tool_json_token(json, years_index);
     char section_paths[100][4096];
     const char *sections[100];
     size_t count = 0;
     unsigned char present[100] = {0};
-    if (!years || years->kind != JSON_ARRAY) return search_error("embedding years must be an array", directory);
-    for (size_t i = years_index + 1; i < years->next; i = json_token(json, i)->next) {
+    if (!years || years->kind != TOOL_JSON_ARRAY) return search_error("embedding years must be an array", directory);
+    for (size_t i = years_index + 1; i < years->next; i = tool_json_token(json, i)->next) {
         unsigned long long year;
         char base[4096], path[4096], expected[65], actual[65], year_text[32];
-        if (count == 100 || json_uint(json, json_get(json, i, "year"), &year) ||
+        if (count == 100 || tool_json_uint(json, tool_json_get(json, i, "year"), &year) ||
             year < 2000 || year > 2099 || present[year - 2000])
             return search_error("invalid or duplicate embedding year", directory);
         present[year - 2000] = 1;
         rt_unsigned_to_string(year, year_text, sizeof(year_text));
         if (rt_join_path(directory, year_text, base, sizeof(base)) ||
             rt_join_path(base, "titles", path, sizeof(path)) ||
-            json_string(json, json_get(json, i, "titlesSha256"), expected, sizeof(expected)) ||
+            tool_json_string(json, tool_json_get(json, i, "titlesSha256"), expected, sizeof(expected)) ||
             path_hash(path, "manifest.json", actual) || rt_strcmp(actual, expected) ||
             append_titles(e, path)) return search_error("invalid or modified embedding titles", base);
         if (rt_join_path(base, "sections", section_paths[count], sizeof(section_paths[count])) ||
-            json_string(json, json_get(json, i, "sectionsSha256"), expected, sizeof(expected)) ||
+            tool_json_string(json, tool_json_get(json, i, "sectionsSha256"), expected, sizeof(expected)) ||
             path_hash(section_paths[count], "manifest.json", actual) || rt_strcmp(actual, expected))
             return search_error("invalid or modified embedding sections", base);
         sections[count] = section_paths[count];
@@ -238,7 +239,7 @@ int search_embedding_open(SearchIndex *index, const char *directory, const char 
     unsigned char *bytes = 0;
     size_t size;
     char path[4096], root[4096], before[65], after[65];
-    Json json = {0};
+    ToolJson json = {0};
     SearchEmbedding *e = rt_malloc(sizeof(*e));
     if (!e) return search_error("cannot allocate embedding state", 0);
     rt_memset(e, 0, sizeof(*e));
@@ -249,17 +250,17 @@ int search_embedding_open(SearchIndex *index, const char *directory, const char 
         search_error("embedding index is being built; wait for publication", directory); goto done;
     }
     if (rt_join_path(directory, "manifest.json", path, sizeof(path)) ||
-        eg_read_regular(path, 65536, &bytes, &size) || json_parse(&json, (const char *)bytes, size) ||
-        !json_equals(&json, json_get(&json, 0, "format"), "oparl-embeddings-v1") ||
-        !json_equals(&json, json_get(&json, 0, "snapshotId"), index->snapshot_id) ||
-        !json_equals(&json, json_get(&json, 0, "modelRevision"), EG2_MODEL_REVISION) ||
+        eg_read_regular(path, 65536, &bytes, &size) || tool_json_parse(&json, (const char *)bytes, size) ||
+        !tool_json_equals(&json, tool_json_get(&json, 0, "format"), "oparl-embeddings-v1") ||
+        !tool_json_equals(&json, tool_json_get(&json, 0, "snapshotId"), index->snapshot_id) ||
+        !tool_json_equals(&json, tool_json_get(&json, 0, "modelRevision"), EG2_MODEL_REVISION) ||
         threads < 1 || threads > 32 || rt_strlen(model) >= sizeof(e->model_directory)) goto invalid;
     rt_copy_string(e->model_directory, sizeof(e->model_directory), model);
     e->threads = threads;
     unsigned char digest[32];
-    crypto_sha256_hash(bytes, size, digest); eg_hex_digest(digest, before);
+    crypto_sha256_hash(bytes, size, digest); hash_to_hex(digest, sizeof(digest), before);
     if (generation_root(&json, directory, root) ||
-        load_years(e, index, root, &json, json_get(&json, 0, "years"))) goto done;
+        load_years(e, index, root, &json, tool_json_get(&json, 0, "years"))) goto done;
     if (rt_join_path(model, "tokenizer.eg2", path, sizeof(path)) || eg_tokenizer_load(&e->tokenizer, path)) goto done;
     if (path_hash(directory, "manifest.json", after) || rt_strcmp(before, after) ||
         rt_join_path(directory, ".oparl-embedding.lock", path, sizeof(path)) ||
@@ -268,27 +269,25 @@ int search_embedding_open(SearchIndex *index, const char *directory, const char 
     }
     index->embedding = e;
     e = 0;
-    json_free(&json); rt_free(bytes);
+    tool_json_free(&json); rt_free(bytes);
     return 0;
 invalid:
     search_error("invalid embedding index/model or mismatched OParl snapshot", directory);
 done:
-    json_free(&json); rt_free(bytes); embedding_free(e);
+    tool_json_free(&json); rt_free(bytes); embedding_free(e);
     return -1;
 }
 
 static int number_field(ToolByteBuffer *out, const char *name, unsigned long long value) {
-    char text[32];
-    rt_unsigned_to_string(value, text, sizeof(text));
-    return tool_byte_buffer_append_cstr(out, ",") || search_json_quote(out, name) ||
-        tool_byte_buffer_append_cstr(out, ":") || tool_byte_buffer_append_cstr(out, text);
+    return tool_byte_buffer_append_cstr(out, ",") || tool_json_append_string(out, name) ||
+        tool_byte_buffer_append_cstr(out, ":") || tool_byte_buffer_append_uint(out, value);
 }
 
 int search_embedding_status_json(ToolByteBuffer *out, const SearchIndex *index) {
     const SearchEmbedding *e = index->embedding;
     if (!e) return tool_byte_buffer_append_cstr(out, "{\"enabled\":false}");
     if (tool_byte_buffer_append_cstr(out, "{\"enabled\":true,\"scope\":\"titles-and-numbered-main-forms\",\"modelRevision\":") ||
-        search_json_quote(out, EG2_MODEL_REVISION) ||
+        tool_json_append_string(out, EG2_MODEL_REVISION) ||
         number_field(out, "titles", e->titles.count) || number_field(out, "passages", e->sections.count) ||
         number_field(out, "includedMainForms", e->sections.included) ||
         number_field(out, "excludedMainForms", e->sections.excluded) ||
@@ -328,7 +327,7 @@ int search_embedding_source_json(ToolByteBuffer *out, const SearchIndex *index, 
     tool_buffer_append_cstr(score, sizeof(score), n, fraction);
     if (tool_byte_buffer_append_cstr(out, "{\"cosine\":") || tool_byte_buffer_append_cstr(out, score) ||
         tool_byte_buffer_append_cstr(out, ",\"source\":") ||
-        search_json_quote(out, hit->semantic_text ? "main-form-passage" : "paper-title")) return -1;
+        tool_json_append_string(out, hit->semantic_text ? "main-form-passage" : "paper-title")) return -1;
     if (hit->semantic_text) {
         const SearchEmbedding *e = index->embedding;
         const EgPassage *p = 0;
@@ -336,11 +335,11 @@ int search_embedding_source_json(ToolByteBuffer *out, const SearchIndex *index, 
             if (e->sections.passages[i].text == hit->semantic_text) { p = e->sections.passages + i; break; }
         if (!p) return search_error("semantic passage provenance was lost", 0);
         const EgContentDocument *d = e->sections.documents + p->document;
-        if (tool_byte_buffer_append_cstr(out, ",\"chunkId\":") || search_json_quote(out, p->id) ||
+        if (tool_byte_buffer_append_cstr(out, ",\"chunkId\":") || tool_json_append_string(out, p->id) ||
             number_field(out, "pageFirst", p->page_first) || number_field(out, "pageLast", p->page_last) ||
             number_field(out, "joinedTextStart", p->start) || number_field(out, "joinedTextEnd", p->end) ||
-            tool_byte_buffer_append_cstr(out, ",\"joinedTextSha256\":") || search_json_quote(out, d->text_sha) ||
-            tool_byte_buffer_append_cstr(out, ",\"pdfSha256\":") || search_json_quote(out, d->pdf_sha)) return -1;
+            tool_byte_buffer_append_cstr(out, ",\"joinedTextSha256\":") || tool_json_append_string(out, d->text_sha) ||
+            tool_byte_buffer_append_cstr(out, ",\"pdfSha256\":") || tool_json_append_string(out, d->pdf_sha)) return -1;
     }
     return tool_byte_buffer_append_cstr(out, "}");
 }
@@ -425,22 +424,22 @@ int search_embedding_build(const char *path, const char *directory, const char *
     PlatformDirEntry info;
     if (!platform_get_path_info(target, &info)) {
         unsigned char *bytes = 0; size_t size;
-        Json prior = {0};
-        if (eg_read_regular(target, 65536, &bytes, &size) || json_parse(&prior, (const char *)bytes, size)) {
-            rt_free(bytes); json_free(&prior); goto done;
+        ToolJson prior = {0};
+        if (eg_read_regular(target, 65536, &bytes, &size) || tool_json_parse(&prior, (const char *)bytes, size)) {
+            rt_free(bytes); tool_json_free(&prior); goto done;
         }
         int valid = generation_root(&prior, directory, previous);
-        rt_free(bytes); json_free(&prior);
+        rt_free(bytes); tool_json_free(&prior);
         if (valid) goto done;
     }
     rt_unsigned_to_string(threads, thread_text, sizeof(thread_text));
     if (search_open(&index, path) || tool_byte_buffer_append_cstr(&manifest,
         "{\"format\":\"oparl-embeddings-v1\",\"snapshotId\":") ||
-        search_json_quote(&manifest, index.snapshot_id) ||
+        tool_json_append_string(&manifest, index.snapshot_id) ||
         tool_byte_buffer_append_cstr(&manifest, ",\"modelRevision\":") ||
-        search_json_quote(&manifest, EG2_MODEL_REVISION) ||
+        tool_json_append_string(&manifest, EG2_MODEL_REVISION) ||
         tool_byte_buffer_append_cstr(&manifest, ",\"generation\":") ||
-        search_json_quote(&manifest, generation) ||
+        tool_json_append_string(&manifest, generation) ||
         tool_byte_buffer_append_cstr(&manifest, ",\"years\":[")) goto done;
     for (size_t i = 0; i < count; i++) {
         char titles[4096], sections[4096], title_sha[65], section_sha[65];
@@ -467,19 +466,19 @@ int search_embedding_build(const char *path, const char *directory, const char *
             tool_byte_buffer_append_cstr(&manifest, "{\"year\":") ||
             tool_byte_buffer_append_cstr(&manifest, year_text) ||
             tool_byte_buffer_append_cstr(&manifest, ",\"titlesSha256\":") ||
-            search_json_quote(&manifest, title_sha) ||
+            tool_json_append_string(&manifest, title_sha) ||
             tool_byte_buffer_append_cstr(&manifest, ",\"sectionsSha256\":") ||
-            search_json_quote(&manifest, section_sha) ||
+            tool_json_append_string(&manifest, section_sha) ||
             tool_byte_buffer_append_char(&manifest, '}')) goto done;
     }
     if (tool_byte_buffer_append_cstr(&manifest, "]}\n")) goto done;
-    Json json = {0};
+    ToolJson json = {0};
     verify = rt_malloc(sizeof(*verify));
     if (!verify) { search_error("cannot allocate embedding publication validation", 0); goto done; }
     rt_memset(verify, 0, sizeof(*verify));
-    if (json_parse(&json, (const char *)manifest.data, manifest.size)) goto done;
-    int valid = load_years(verify, &index, generation_directory, &json, json_get(&json, 0, "years"));
-    json_free(&json);
+    if (tool_json_parse(&json, (const char *)manifest.data, manifest.size)) goto done;
+    int valid = load_years(verify, &index, generation_directory, &json, tool_json_get(&json, 0, "years"));
+    tool_json_free(&json);
     if (valid || rt_join_path(directory, "manifest.json", target, sizeof(target)) ||
         eg_atomic_write(target, manifest.data, manifest.size)) goto done;
     result = index.incomplete ? 3 : 0;
