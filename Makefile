@@ -26,7 +26,7 @@ CFLAGS := -std=c11 -Oz -Wall -Wextra -Wpedantic -ffreestanding -fno-builtin \
 	-fno-strict-aliasing \
 	-fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections
-APP := src/oparl-scan.c src/http.c src/archive-version.c src/archive-walk.c
+APP := src/oparl-scan.c src/archive-store.c src/http.c src/archive-version.c src/archive-walk.c
 
 ifeq ($(TARGET),macos)
 ifneq ($(ARCH),aarch64)
@@ -74,8 +74,8 @@ endif
 
 OBJECTS := $(addprefix $(BUILD)/obj/,$(addsuffix .o,$(basename $(COMMON) $(PLATFORM) $(START))))
 APP_OBJECTS := $(addprefix $(BUILD)/obj/,$(APP:.c=.o))
-INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o search-model.o search-date.o search-research.o search-preparation.o pdf-text.o pdf-structure.o archive-version.o archive-walk.o prepare.o)
-SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-model.o search-date.o search-research.o search-preparation.o pdf-structure.o search-web.o search-mcp.o search-pdfs.o search-preview-assets.o archive-walk.o)
+INDEX_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-index.o search.o search-build.o search-output.o search-model.o search-date.o search-research.o search-preparation.o pdf-text.o pdf-structure.o archive-version.o archive-walk.o prepare.o)
+SEARCH_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-search.o search.o search-output.o search-model.o search-date.o search-research.o search-preparation.o pdf-structure.o search-web.o search-mcp.o search-pdfs.o search-preview-assets.o archive-walk.o)
 PREPARE_OBJECTS := $(addprefix $(BUILD)/obj/src/,oparl-prepare.o prepare.o pdf-text.o pdf-structure.o archive-walk.o)
 EMBEDDING := src/embedding
 EMBEDDING_CORE := $(addprefix $(BUILD)/obj/$(EMBEDDING)/,bundle.o tokenizer.o model.o kernels.o sme.o vectors.o index_io.o)
@@ -111,7 +111,7 @@ $(SEARCH_PROGRAM): $(SEARCH_OBJECTS) $(BUILD)/obj/src/search-semantic.o $(EMBEDD
 $(PREPARE_PROGRAM): $(PREPARE_OBJECTS) $(INDEX_COMMON) $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(PREPARE_OBJECTS) $(INDEX_COMMON) $(OBJECTS))
 
-$(BUILD)/obj/src/search.o $(BUILD)/obj/src/search-model.o $(BUILD)/obj/src/search-date.o $(BUILD)/obj/src/search-research.o $(BUILD)/obj/src/oparl-index.o $(BUILD)/obj/src/oparl-search.o $(BUILD)/obj/src/search-web.o $(BUILD)/obj/src/search-mcp.o $(BUILD)/obj/src/pdf-text.o $(BUILD)/obj/src/pdf-structure.o: CFLAGS += -O3
+$(BUILD)/obj/src/search.o $(BUILD)/obj/src/search-build.o $(BUILD)/obj/src/search-output.o $(BUILD)/obj/src/search-model.o $(BUILD)/obj/src/search-date.o $(BUILD)/obj/src/search-research.o $(BUILD)/obj/src/oparl-index.o $(BUILD)/obj/src/oparl-search.o $(BUILD)/obj/src/search-web.o $(BUILD)/obj/src/search-mcp.o $(BUILD)/obj/src/pdf-text.o $(BUILD)/obj/src/pdf-structure.o: CFLAGS += -O3
 $(BUILD)/test-json$(EXE): $(BUILD)/obj/tests/test-json.o $(OBJECTS) $(LINK_DEPS)
 	$(call link,$(BUILD)/obj/tests/test-json.o $(OBJECTS))
 

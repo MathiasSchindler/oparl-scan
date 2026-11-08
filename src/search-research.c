@@ -6,7 +6,6 @@
 /* JSON-RPC includes both JSON and its quoted text; reserve room for both copies. */
 #define COMPACT_BYTES 7500U
 
-static size_t relation_start(const SearchIndex *index, uint32_t source);
 static int record_date_json(ToolByteBuffer *out, const SearchIndex *index, uint32_t record, SearchDateRole role);
 
 static const char *const actor_properties[] = {
@@ -183,7 +182,7 @@ int search_research_build(SearchIndex *index) {
                     rt_free(decoded); tool_json_free(&json);
                     return search_error("cannot decode nonpublic agenda reference", index->strings + r->id);
                 }
-                for (k = relation_start(index, (uint32_t)i); k < index->relation_count &&
+                for (k = search_relation_start(index, (uint32_t)i); k < index->relation_count &&
                     index->relations[k].source == i; k++)
                     if (index->relations[k].role == SEARCH_MEETING_AGENDA &&
                         !rt_strcmp(decoded, index->strings + index->relations[k].target)) index->relation_hidden[k] = 1;
@@ -426,14 +425,6 @@ static int entry_add(ToolArray *entries, const SearchIndex *index, uint32_t id, 
         if (!rt_strcmp(index->strings + ((const Entry *)tool_array_get_const(entries, i))->id, index->strings + id)) return 0;
     return entry_append(entries, index, id, record, parent, relation);
 }
-static size_t relation_start(const SearchIndex *index, uint32_t source) {
-    size_t low = 0, high = index->relation_count;
-    while (low < high) {
-        size_t mid = low + (high-low)/2;
-        if (index->relations[mid].source < source) low = mid+1; else high = mid;
-    }
-    return low;
-}
 static int expand(ToolArray *entries, const SearchIndex *index, uint32_t parent, int root, int meeting_root) {
     const Entry entry = *(const Entry *)tool_array_get_const(entries, parent);
     const char *kind;
@@ -441,12 +432,12 @@ static int expand(ToolArray *entries, const SearchIndex *index, uint32_t parent,
     if (entry.record == NONE) return 0;
     kind = index->strings + index->records[entry.record].kind;
     if (root && !rt_strcmp(kind, "Paper"))
-        for (i = relation_start(index, entry.record); i < index->relation_count &&
+        for (i = search_relation_start(index, entry.record); i < index->relation_count &&
             index->relations[i].source == entry.record; i++)
             if (index->relations[i].role == SEARCH_MAIN_FILE &&
                 entry_add(entries, index, index->relations[i].target, index->relation_targets[i], parent, (uint32_t)i)) return -1;
     if (root && !rt_strcmp(kind, "Paper"))
-        for (i = relation_start(index, entry.record); i < index->relation_count &&
+        for (i = search_relation_start(index, entry.record); i < index->relation_count &&
             index->relations[i].source == entry.record; i++)
             if (index->relations[i].role == SEARCH_CONSULTATION &&
                 entry_add(entries, index, index->relations[i].target, index->relation_targets[i], parent, (uint32_t)i)) return -1;
@@ -457,7 +448,7 @@ static int expand(ToolArray *entries, const SearchIndex *index, uint32_t parent,
             if (r->role == SEARCH_CONSULTATION_PAPER && entry_add(entries, index,
                 index->records[r->source].id, r->source, parent, relation)) return -1;
         }
-    for (i = relation_start(index, entry.record); i < index->relation_count && index->relations[i].source == entry.record; i++) {
+    for (i = search_relation_start(index, entry.record); i < index->relation_count && index->relations[i].source == entry.record; i++) {
         const SearchRelation *r = &index->relations[i];
         int take = !rt_strcmp(kind, "Paper") ? root && (r->role == SEARCH_MAIN_FILE ||
             r->role == SEARCH_PAPER_ATTACHMENT || r->role == SEARCH_CONSULTATION ||
@@ -518,7 +509,7 @@ static int consultation(ToolByteBuffer *out, const SearchIndex *index, uint32_t 
             tool_json_true(json, tool_json_get(json, 0, "authoritative")) ? "authoritative" : "preliminary" : "unknown") ||
         string(out, "authoritySource", index->strings + index->records[record].id) ||
         put(out, ",\"context\":[")) return -1;
-    for (i = relation_start(index, record); i < index->relation_count && index->relations[i].source == record; i++) {
+    for (i = search_relation_start(index, record); i < index->relation_count && index->relations[i].source == record; i++) {
         const SearchRelation *r = &index->relations[i];
         uint32_t target = index->relation_targets[i];
         if (r->role != SEARCH_MEETING && r->role != SEARCH_AGENDA_ITEM && r->role != SEARCH_ORGANIZATION) continue;
@@ -534,14 +525,14 @@ static int consultation(ToolByteBuffer *out, const SearchIndex *index, uint32_t 
     }
     {
         int direct_organization = 0;
-        for (i = relation_start(index, record); i < index->relation_count && index->relations[i].source == record; i++)
+        for (i = search_relation_start(index, record); i < index->relation_count && index->relations[i].source == record; i++)
             if (index->relations[i].role == SEARCH_ORGANIZATION) direct_organization = 1;
-        if (!direct_organization) for (i = relation_start(index, record);
+        if (!direct_organization) for (i = search_relation_start(index, record);
             i < index->relation_count && index->relations[i].source == record; i++) {
             uint32_t meeting = index->relation_targets[i];
             size_t j;
             if (index->relations[i].role != SEARCH_MEETING || meeting == NONE) continue;
-            for (j = relation_start(index, meeting); j < index->relation_count && index->relations[j].source == meeting; j++) {
+            for (j = search_relation_start(index, meeting); j < index->relation_count && index->relations[j].source == meeting; j++) {
                 uint32_t target = index->relation_targets[j];
                 if (index->relations[j].role != SEARCH_ORGANIZATION) continue;
                 total++;
@@ -560,11 +551,11 @@ static int consultation(ToolByteBuffer *out, const SearchIndex *index, uint32_t 
     if (put(out, "]") || uint(out, "contextTotal", total) ||
         boolean(out, "moreContextAvailable", total > emitted) || put(out, ",\"decisionSources\":[")) return -1;
     emitted = 0; total = 0;
-    for (i = relation_start(index, record); i < index->relation_count && index->relations[i].source == record; i++) {
+    for (i = search_relation_start(index, record); i < index->relation_count && index->relations[i].source == record; i++) {
         uint32_t agenda = index->relation_targets[i];
         size_t j;
         if (index->relations[i].role != SEARCH_AGENDA_ITEM || agenda == NONE) continue;
-        for (j = relation_start(index, agenda); j < index->relation_count && index->relations[j].source == agenda; j++) {
+        for (j = search_relation_start(index, agenda); j < index->relation_count && index->relations[j].source == agenda; j++) {
             const SearchRelation *r = &index->relations[j];
             uint32_t target = index->relation_targets[j];
             if (r->role != SEARCH_RESOLUTION_FILE) continue;
@@ -742,7 +733,7 @@ static int relationship(ToolByteBuffer *out, const SearchIndex *index, uint32_t 
 static int relations_json(ToolByteBuffer *out, const SearchIndex *index, uint32_t record,
                           const SearchRead *request, const char **error) {
     size_t i, total = 0, hidden = 0, returned = 0, offset = 0;
-    size_t start = relation_start(index, record), end = start, incoming = index->incoming_start[record];
+    size_t start = search_relation_start(index, record), end = start, incoming = index->incoming_start[record];
     unsigned int limit = request->limit ? request->limit : 10;
     int in = !request->direction || rt_strcmp(request->direction, "outgoing");
     int outgoing = !request->direction || rt_strcmp(request->direction, "incoming");
@@ -843,7 +834,7 @@ int search_read_json(ToolByteBuffer *out, const SearchIndex *index, const char *
             (!paper && !meeting && !agenda && rt_strcmp(operation, "get_object"))) goto invalid;
         if (entry_add(&entries, index, root->id, (uint32_t)(root-index->records), NONE, NONE)) goto resource;
         if (agenda) {
-            for (i = relation_start(index, (uint32_t)(root-index->records)); i < index->relation_count &&
+            for (i = search_relation_start(index, (uint32_t)(root-index->records)); i < index->relation_count &&
                 index->relations[i].source == (uint32_t)(root-index->records); i++)
                 if (index->relations[i].role == SEARCH_MEETING_AGENDA) {
                     uint32_t target = index->relation_targets[i];

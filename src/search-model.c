@@ -34,7 +34,7 @@ static int valid_text(const SearchIndex *index, uint32_t offset) {
     return 0;
 }
 
-static size_t relation_start(const SearchIndex *index, uint32_t source) {
+size_t search_relation_start(const SearchIndex *index, uint32_t source) {
     size_t low = 0, high = index->relation_count;
     while (low < high) {
         size_t mid = low + (high - low) / 2;
@@ -42,6 +42,37 @@ static size_t relation_start(const SearchIndex *index, uint32_t source) {
         else high = mid;
     }
     return low;
+}
+
+static const SearchRelationSpec relation_specs[] = {
+    {"Paper", "mainFile", SEARCH_MAIN_FILE},
+    {"Paper", "auxiliaryFile", SEARCH_PAPER_ATTACHMENT},
+    {"Paper", "consultation", SEARCH_CONSULTATION},
+    {"Paper", "superordinatedPaper", SEARCH_SUPERORDINATED},
+    {"Paper", "subordinatedPaper", SEARCH_SUBORDINATED},
+    {"Paper", "relatedPaper", SEARCH_RELATED},
+    {"Consultation", "paper", SEARCH_CONSULTATION_PAPER},
+    {"Consultation", "agendaItem", SEARCH_AGENDA_ITEM},
+    {"Consultation", "agendaitem", SEARCH_AGENDA_ITEM},
+    {"Consultation", "meeting", SEARCH_MEETING},
+    {"AgendaItem", "meeting", SEARCH_AGENDA_MEETING},
+    {"AgendaItem", "consultation", SEARCH_AGENDA_CONSULTATION},
+    {"AgendaItem", "resolutionFile", SEARCH_RESOLUTION_FILE},
+    {"AgendaItem", "auxiliaryFile", SEARCH_AGENDA_ATTACHMENT},
+    {"Meeting", "invitation", SEARCH_INVITATION},
+    {"Meeting", "resultsProtocol", SEARCH_RESULTS_PROTOCOL},
+    {"Meeting", "verbatimProtocol", SEARCH_VERBATIM_PROTOCOL},
+    {"Meeting", "auxiliaryFile", SEARCH_MEETING_ATTACHMENT},
+    {"Meeting", "agendaItem", SEARCH_MEETING_AGENDA},
+    {0, "underDirectionOf", SEARCH_DIRECTION},
+    {0, "organization", SEARCH_ORGANIZATION},
+    {0, "body", SEARCH_BODY},
+    {0, "system", SEARCH_SYSTEM}
+};
+
+const SearchRelationSpec *search_relation_specs(size_t *count) {
+    *count = sizeof(relation_specs) / sizeof(relation_specs[0]);
+    return relation_specs;
 }
 
 static size_t fact_start(const SearchIndex *index, uint32_t record) {
@@ -67,7 +98,7 @@ static const SearchVersion *version_for(const SearchIndex *index, uint32_t recor
 
 int search_is_direct_source(const SearchIndex *index, uint32_t paper, const char *file) {
     size_t i;
-    for (i = relation_start(index, paper); i < index->relation_count && index->relations[i].source == paper; i++) {
+    for (i = search_relation_start(index, paper); i < index->relation_count && index->relations[i].source == paper; i++) {
         const SearchRelation *r = &index->relations[i];
         if ((r->role == SEARCH_MAIN_FILE || r->role == SEARCH_PAPER_ATTACHMENT) &&
             !rt_strcmp(index->strings + r->target, file)) return 1;
@@ -76,17 +107,12 @@ int search_is_direct_source(const SearchIndex *index, uint32_t paper, const char
 }
 
 static const char *domain(uint32_t role) {
-    switch (role) {
-    case SEARCH_MAIN_FILE: case SEARCH_PAPER_ATTACHMENT: case SEARCH_CONSULTATION:
-    case SEARCH_SUPERORDINATED: case SEARCH_SUBORDINATED: case SEARCH_RELATED: return "Paper";
-    case SEARCH_RESOLUTION_FILE: case SEARCH_AGENDA_ATTACHMENT: case SEARCH_AGENDA_CONSULTATION:
-    case SEARCH_AGENDA_MEETING: return "AgendaItem";
-    case SEARCH_MEETING_ATTACHMENT: case SEARCH_INVITATION: case SEARCH_RESULTS_PROTOCOL:
-    case SEARCH_VERBATIM_PROTOCOL: case SEARCH_MEETING_AGENDA: return "Meeting";
-    case SEARCH_CONSULTATION_PAPER: case SEARCH_AGENDA_ITEM: case SEARCH_MEETING: return "Consultation";
-    case SEARCH_BODY_COLLECTION: return "System";
-    default: return 0;
-    }
+    size_t i, count;
+    const SearchRelationSpec *specs = search_relation_specs(&count);
+    if (role == SEARCH_BODY_COLLECTION) return "System";
+    for (i = 0; i < count; i++)
+        if (specs[i].role == role) return specs[i].source_kind;
+    return 0;
 }
 
 int search_model_validate(const SearchIndex *index) {
@@ -220,7 +246,7 @@ int search_model_json(ToolByteBuffer *out, const SearchIndex *index, const Searc
     uint32_t n = (uint32_t)(record - index->records);
     uint32_t object = record->parent == NONE ? n : record->parent;
     const SearchVersion *version = version_for(index, n);
-    size_t i, j, start = relation_start(index, object), first_fact = fact_start(index, object);
+    size_t i, j, start = search_relation_start(index, object), first_fact = fact_start(index, object);
     if (put(out, "{\"identity\":") != 0 || value(out, index, record->identity) != 0 ||
         field(out, index, "objectId", record->id) != 0 || field(out, index, "kind", record->kind) != 0 ||
         key(out, "metadataOrigin") != 0 ||

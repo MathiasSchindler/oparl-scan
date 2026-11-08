@@ -18,21 +18,14 @@ static int property(ToolByteBuffer *out, const ToolJson *json, size_t object, co
 }
 uint32_t search_document_record(const SearchIndex *index, const SearchRecord *record) {
     uint32_t source = (uint32_t)(record - index->records), found = NONE;
-    size_t low = 0, high = index->relation_count, i;
+    size_t i;
     if (record->parent != NONE)
         return record->parent;
     if (!rt_strcmp(index->strings + record->kind, "File"))
         return source;
     if (rt_strcmp(index->strings + record->kind, "Paper"))
         return NONE;
-    while (low < high) {
-        size_t mid = low + (high - low) / 2;
-        if (index->relations[mid].source < source)
-            low = mid + 1;
-        else
-            high = mid;
-    }
-    for (i = low; i < index->relation_count && index->relations[i].source == source; i++) {
+    for (i = search_relation_start(index, source); i < index->relation_count && index->relations[i].source == source; i++) {
         uint32_t target;
         if (index->relations[i].role != SEARCH_MAIN_FILE)
             continue;

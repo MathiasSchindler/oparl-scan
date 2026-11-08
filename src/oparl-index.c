@@ -217,26 +217,8 @@ static int link_value(Import *import, const ToolJson *json, size_t value, uint32
     return import->builder.failed ? -1 : 0;
 }
 
-typedef struct { const char *key; uint32_t role; } RelationKey;
 static int ingest(Import *import, const ToolJson *json, size_t object, int rank) {
-    static const RelationKey paper[] = {
-        {"mainFile",SEARCH_MAIN_FILE},{"auxiliaryFile",SEARCH_PAPER_ATTACHMENT},
-        {"consultation",SEARCH_CONSULTATION},{"superordinatedPaper",SEARCH_SUPERORDINATED},
-        {"subordinatedPaper",SEARCH_SUBORDINATED},{"relatedPaper",SEARCH_RELATED}};
-    static const RelationKey consultation[] = {
-        {"paper",SEARCH_CONSULTATION_PAPER},{"agendaItem",SEARCH_AGENDA_ITEM},
-        {"agendaitem",SEARCH_AGENDA_ITEM},{"meeting",SEARCH_MEETING}};
-    static const RelationKey agenda[] = {
-        {"meeting",SEARCH_AGENDA_MEETING},{"consultation",SEARCH_AGENDA_CONSULTATION},
-        {"resolutionFile",SEARCH_RESOLUTION_FILE},{"auxiliaryFile",SEARCH_AGENDA_ATTACHMENT}};
-    static const RelationKey meeting[] = {
-        {"invitation",SEARCH_INVITATION},{"resultsProtocol",SEARCH_RESULTS_PROTOCOL},
-        {"verbatimProtocol",SEARCH_VERBATIM_PROTOCOL},{"auxiliaryFile",SEARCH_MEETING_ATTACHMENT},
-        {"agendaItem",SEARCH_MEETING_AGENDA}};
-    static const RelationKey common[] = {
-        {"underDirectionOf",SEARCH_DIRECTION},{"organization",SEARCH_ORGANIZATION},
-        {"body",SEARCH_BODY},{"system",SEARCH_SYSTEM}};
-    const RelationKey *keys = 0;
+    const SearchRelationSpec *specs;
     size_t count = 0, i, type = tool_json_get(json, object, "type");
     uint32_t id, n, modified, kind;
     unsigned long long observed;
@@ -332,24 +314,17 @@ static int ingest(Import *import, const ToolJson *json, size_t object, int rank)
         if (rt_strlen(reference_text) >= 3 && reference_text[0] >= '0' && reference_text[0] <= '9' &&
             reference_text[1] >= '0' && reference_text[1] <= '9' && reference_text[2] == '/')
             e->record.year = (unsigned int)(2000 + (reference_text[0] - '0') * 10 + reference_text[1] - '0');
-        keys = paper; count = sizeof(paper)/sizeof(paper[0]);
-    } else if (rt_strcmp(type_text + 29, "Consultation") == 0) {
-        keys = consultation; count = sizeof(consultation)/sizeof(consultation[0]);
-    } else if (rt_strcmp(type_text + 29, "AgendaItem") == 0) {
-        keys = agenda; count = sizeof(agenda)/sizeof(agenda[0]);
     } else if (rt_strcmp(type_text + 29, "Meeting") == 0) {
         e->dates[SEARCH_MEETING_START] = json_text(import, json, object, "start");
         e->dates[SEARCH_MEETING_END] = json_text(import, json, object, "end");
-        keys = meeting; count = sizeof(meeting)/sizeof(meeting[0]);
     }
-    for (i = 0; i < count; i++)
-        if (link_value(import, json, tool_json_get(json, object, keys[i].key), n,
-                       keys[i].role, text(import, keys[i].key)) != 0) return -1;
-    for (i = 0; i < sizeof(common)/sizeof(common[0]); i++) {
-        uint32_t role = common[i].role;
+    specs = search_relation_specs(&count);
+    for (i = 0; i < count; i++) {
+        uint32_t role = specs[i].role;
+        if (specs[i].source_kind && rt_strcmp(type_text + 29, specs[i].source_kind) != 0) continue;
         if (role == SEARCH_BODY && !rt_strcmp(type_text + 29, "System")) role = SEARCH_BODY_COLLECTION;
-        if (link_value(import, json, tool_json_get(json, object, common[i].key), n,
-                       role, text(import, common[i].key)) != 0) return -1;
+        if (link_value(import, json, tool_json_get(json, object, specs[i].key), n,
+                       role, text(import, specs[i].key)) != 0) return -1;
     }
     return import->builder.failed ? -1 : 0;
 }

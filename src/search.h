@@ -5,6 +5,18 @@
 #include "tool_json_parser.h"
 #include <stdint.h>
 
+#define SEARCH_INDEX_LIMIT (4ULL * 1024ULL * 1024ULL * 1024ULL - 1ULL)
+
+typedef struct {
+    char magic[8];
+    uint32_t version, endian, incomplete, reserved;
+    uint64_t strings, records, terms, occurrences, owners, size;
+    uint64_t string_bytes, record_count, term_count, occurrence_count, owner_count;
+    unsigned char sha256[32];
+    uint64_t relations, facts, evidence, versions, sections;
+    uint64_t relation_count, fact_count, evidence_count, version_count, section_count, imported_at;
+} SearchIndexHeader;
+
 typedef struct {
     uint32_t id, name, reference, date, paper_type, organization, kind, source;
     uint32_t text, text_length, body_start, words, year, page, warnings, payload;
@@ -171,6 +183,9 @@ void search_builder_init(SearchBuilder *builder);
 void search_builder_free(SearchBuilder *builder);
 uint32_t search_string(SearchBuilder *builder, const char *text, size_t length);
 const char *search_builder_string(const SearchBuilder *builder, uint32_t offset);
+int search_fold_word(const char *text, size_t length, char *out, size_t capacity);
+int search_next_word(const char *text, size_t length, size_t *p, size_t *start,
+                     size_t *end, uint32_t *position);
 uint32_t search_add_record(SearchBuilder *builder, const SearchRecord *record);
 int search_add_owner(SearchBuilder *builder, uint32_t record, uint32_t paper);
 int search_write(SearchBuilder *builder, const char *path);
@@ -214,6 +229,13 @@ int search_pdf_open(const SearchIndex *index, const char *web_root, const char *
                     uint64_t *bytes, const char **error);
 int search_error(const char *message, const char *detail);
 const char *search_relation_role_name(unsigned int role);
+size_t search_relation_start(const SearchIndex *index, uint32_t source);
+typedef struct {
+    const char *source_kind;
+    const char *key;
+    SearchRelationRole role;
+} SearchRelationSpec;
+const SearchRelationSpec *search_relation_specs(size_t *count);
 int search_research_build(SearchIndex *index);
 void search_research_free(SearchIndex *index);
 const SearchRecord *search_identity_find(const SearchIndex *index, const char *id, unsigned int page);
